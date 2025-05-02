@@ -1,16 +1,17 @@
 #include <QApplication>
 #include <QMainWindow>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QPushButton>
 #include <QTextEdit>
 #include <QUdpSocket>
 #include <QNetworkInterface>
 #include <QTimer>
 #include <QLabel>
-#include <QStatusBar>
-#include <QLineEdit>
 #include <QComboBox>
 #include <QCheckBox>
+#include <QLineEdit>
+#include <QStatusBar>
 
 class RawUDPListener : public QMainWindow {
     Q_OBJECT
@@ -177,7 +178,8 @@ public:
         
         if (success) {
             if (allowBroadcastCheck->isChecked()) {
-                udpSocket->setSocketOption(QAbstractSocket::BroadcastSocketOption, 1);
+                // Use the proper enum value for broadcast option (QAbstractSocket::BroadcastOption = 5)
+                udpSocket->setSocketOption(QAbstractSocket::SocketOption(5), 1);
             }
             
             connect(udpSocket, &QUdpSocket::readyRead, this, &RawUDPListener::processPendingDatagrams);
