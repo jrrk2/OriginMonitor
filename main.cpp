@@ -1,292 +1,229 @@
 #include <QApplication>
 #include <QMainWindow>
 #include <QVBoxLayout>
-#include <QHBoxLayout>
 #include <QPushButton>
-#include <QTextEdit>
-#include <QUdpSocket>
-#include <QNetworkInterface>
-#include <QTimer>
 #include <QLabel>
-#include <QComboBox>
-#include <QCheckBox>
-#include <QLineEdit>
-#include <QStatusBar>
+#include <QListWidget>
+#include <QUdpSocket>
+#include <QWebSocket>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QTimer>
+#include <QRegularExpression>
+#include <QDebug>
 
-class RawUDPListener : public QMainWindow {
+class TelescopeDiscovery : public QMainWindow {
     Q_OBJECT
 
 public:
-    RawUDPListener(QWidget *parent = nullptr) : QMainWindow(parent) {
-        setWindowTitle("Raw UDP Broadcast Listener");
-        resize(800, 600);
-        
+    TelescopeDiscovery(QWidget *parent = nullptr) : QMainWindow(parent) {
+        // Setup UI
         QWidget *centralWidget = new QWidget(this);
         setCentralWidget(centralWidget);
         
-        QVBoxLayout *mainLayout = new QVBoxLayout(centralWidget);
+        QVBoxLayout *layout = new QVBoxLayout(centralWidget);
         
-        // Interface selection
-        QHBoxLayout *interfaceLayout = new QHBoxLayout();
-        interfaceLayout->addWidget(new QLabel("Network Interface:"));
-        interfaceCombo = new QComboBox();
-        interfaceLayout->addWidget(interfaceCombo);
-        mainLayout->addLayout(interfaceLayout);
+        statusLabel = new QLabel("Ready to discover Celestron Origin telescopes", this);
+        layout->addWidget(statusLabel);
         
-        // Options
-        QHBoxLayout *optionsLayout = new QHBoxLayout();
-        allowBroadcastCheck = new QCheckBox("Allow Broadcast");
-        allowBroadcastCheck->setChecked(true);
-        optionsLayout->addWidget(allowBroadcastCheck);
+        QPushButton *discoverButton = new QPushButton("Discover Telescopes", this);
+        connect(discoverButton, &QPushButton::clicked, this, &TelescopeDiscovery::startDiscovery);
+        layout->addWidget(discoverButton);
         
-        reuseAddressCheck = new QCheckBox("Reuse Address");
-        reuseAddressCheck->setChecked(true);
-        optionsLayout->addWidget(reuseAddressCheck);
+        resultsListWidget = new QListWidget(this);
+        layout->addWidget(resultsListWidget);
         
-        shareAddressCheck = new QCheckBox("Share Address");
-        shareAddressCheck->setChecked(true);
-        optionsLayout->addWidget(shareAddressCheck);
+        QPushButton *connectButton = new QPushButton("Connect to Selected Telescope", this);
+        connect(connectButton, &QPushButton::clicked, this, &TelescopeDiscovery::connectToTelescope);
+        layout->addWidget(connectButton);
         
-        mainLayout->addLayout(optionsLayout);
+        // WebSocket for telescope connection
+        webSocket = new QWebSocket("", QWebSocketProtocol::VersionLatest, this);
+        connect(webSocket, &QWebSocket::connected, this, &TelescopeDiscovery::onWebSocketConnected);
+        connect(webSocket, &QWebSocket::disconnected, this, &TelescopeDiscovery::onWebSocketDisconnected);
+        connect(webSocket, &QWebSocket::textMessageReceived, this, &TelescopeDiscovery::onTextMessageReceived);
         
-        // Port selection
-        QHBoxLayout *portLayout = new QHBoxLayout();
-        portLayout->addWidget(new QLabel("Port:"));
-        portEdit = new QLineEdit("55555");
-        portLayout->addWidget(portEdit);
-        mainLayout->addLayout(portLayout);
-        
-        // Control buttons
-        QHBoxLayout *controlLayout = new QHBoxLayout();
-        startButton = new QPushButton("Start Listening");
-        connect(startButton, &QPushButton::clicked, this, &RawUDPListener::startListening);
-        controlLayout->addWidget(startButton);
-        
-        stopButton = new QPushButton("Stop Listening");
-        connect(stopButton, &QPushButton::clicked, this, &RawUDPListener::stopListening);
-        stopButton->setEnabled(false);
-        controlLayout->addWidget(stopButton);
-        
-        clearButton = new QPushButton("Clear Log");
-        connect(clearButton, &QPushButton::clicked, this, &RawUDPListener::clearLog);
-        controlLayout->addWidget(clearButton);
-        
-        mainLayout->addLayout(controlLayout);
-        
-        // Log area
-        logText = new QTextEdit();
-        logText->setReadOnly(true);
-        mainLayout->addWidget(logText);
-        
-        // Status bar for packet counts
-        statusBar = new QStatusBar(this);
-        setStatusBar(statusBar);
-        packetCountLabel = new QLabel("Packets: 0");
-        statusBar->addWidget(packetCountLabel);
-        
-        // Setup UDP socket
+        // UDP socket for discovery
         udpSocket = new QUdpSocket(this);
         
-        // Populate interface list
-        populateInterfaceList();
-        
-        // Update packet count periodically
-        QTimer *updateTimer = new QTimer(this);
-        connect(updateTimer, &QTimer::timeout, this, &RawUDPListener::updateStatus);
-        updateTimer->start(1000);  // Update every second
+        // Set window size and title
+        resize(600, 400);
+        setWindowTitle("Celestron Origin Telescope Discovery");
     }
-    
-    void populateInterfaceList() {
-        interfaceCombo->clear();
+
+    void startDiscovery() {
+        statusLabel->setText("Discovering telescopes...");
+        resultsListWidget->clear();
+        telescopeAddresses.clear();
         
-        // Add "Any" option
-        interfaceCombo->addItem("Any (0.0.0.0)", QVariant::fromValue(QHostAddress(QHostAddress::AnyIPv4)));
-        
-        // Add all IPv4 interfaces
-        QList<QNetworkInterface> interfaces = QNetworkInterface::allInterfaces();
-        for (const QNetworkInterface &interface : interfaces) {
-            if (interface.flags() & QNetworkInterface::IsRunning &&
-                !(interface.flags() & QNetworkInterface::IsLoopBack)) {
-                
-                QList<QNetworkAddressEntry> entries = interface.addressEntries();
-                for (const QNetworkAddressEntry &entry : entries) {
-                    if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol) {
-                        QString displayName = QString("%1 - %2 (%3)")
-                                            .arg(interface.name())
-                                            .arg(interface.humanReadableName())
-                                            .arg(entry.ip().toString());
-                        
-                        interfaceCombo->addItem(displayName, QVariant::fromValue(entry.ip()));
-                    }
-                }
-            }
-        }
-        
-        // Select "Any" as the default option since this is best for catching broadcasts
-        interfaceCombo->setCurrentIndex(0);
-        
-        // Add diagnostics info about interfaces to the log
-        logMessage("Available Network Interfaces:");
-        for (const QNetworkInterface &interface : interfaces) {
-            if (interface.flags() & QNetworkInterface::IsRunning) {
-                logMessage(QString("- %1 (%2)")
-                          .arg(interface.name())
-                          .arg(interface.humanReadableName()));
-                
-                QList<QNetworkAddressEntry> entries = interface.addressEntries();
-                for (const QNetworkAddressEntry &entry : entries) {
-                    if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol) {
-                        logMessage(QString("  IP: %1").arg(entry.ip().toString()));
-                        logMessage(QString("  Netmask: %1").arg(entry.netmask().toString()));
-                        logMessage(QString("  Broadcast: %1").arg(entry.broadcast().toString()));
-                    }
-                }
-            }
-        }
-    }
-    
-    void startListening() {
-        // Get the selected interface
-        QHostAddress bindAddress = interfaceCombo->currentData().value<QHostAddress>();
-        
-        // Get the port
-        bool ok;
-        int port = portEdit->text().toInt(&ok);
-        if (!ok || port <= 0 || port > 65535) {
-            logMessage("ERROR: Invalid port number!");
-            return;
-        }
-        
-        // Close existing socket if needed
+        // Close existing socket if it's open
         if (udpSocket->state() != QAbstractSocket::UnconnectedState) {
             udpSocket->close();
         }
         
-        // Set socket options
-        QUdpSocket::BindMode bindMode = QUdpSocket::DefaultForPlatform;
-        if (reuseAddressCheck->isChecked()) {
-            bindMode |= QUdpSocket::ReuseAddressHint;
-        }
-        if (shareAddressCheck->isChecked()) {
-            bindMode |= QUdpSocket::ShareAddress;
-        }
-        
-        // Bind the socket
-        bool success = udpSocket->bind(bindAddress, port, bindMode);
+        // Bind to port 55555 on all interfaces
+        bool success = udpSocket->bind(QHostAddress::AnyIPv4, 55555, QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint);
         
         if (success) {
-            if (allowBroadcastCheck->isChecked()) {
-                // Use the proper enum value for broadcast option (QAbstractSocket::BroadcastOption = 5)
-                udpSocket->setSocketOption(QAbstractSocket::SocketOption(5), 1);
-            }
+            // Enable broadcast reception
+            udpSocket->setSocketOption(QAbstractSocket::SocketOption(5), 1); // BroadcastOption
             
-            connect(udpSocket, &QUdpSocket::readyRead, this, &RawUDPListener::processPendingDatagrams);
+            // Connect to the readyRead signal
+            connect(udpSocket, &QUdpSocket::readyRead, this, &TelescopeDiscovery::processPendingDatagrams);
             
-            logMessage(QString("Started listening on %1:%2")
-                      .arg(bindAddress.toString())
-                      .arg(port));
+            statusLabel->setText("Listening for telescope broadcasts...");
             
-            startButton->setEnabled(false);
-            stopButton->setEnabled(true);
-            interfaceCombo->setEnabled(false);
-            portEdit->setEnabled(false);
-            allowBroadcastCheck->setEnabled(false);
-            reuseAddressCheck->setEnabled(false);
-            shareAddressCheck->setEnabled(false);
-            
-            packetCount = 0;
-            updateStatus();
+            // Auto-stop discovery after 30 seconds if nothing found
+            QTimer::singleShot(30000, this, [this]() {
+                if (telescopeAddresses.isEmpty()) {
+                    stopDiscovery();
+                    statusLabel->setText("No telescopes found. Discovery stopped.");
+                }
+            });
         } else {
-            logMessage(QString("ERROR: Failed to bind to %1:%2 - %3")
-                      .arg(bindAddress.toString())
-                      .arg(port)
-                      .arg(udpSocket->errorString()));
+            statusLabel->setText(QString("Failed to bind to port 55555: %1").arg(udpSocket->errorString()));
         }
     }
     
-    void stopListening() {
-        disconnect(udpSocket, &QUdpSocket::readyRead, this, &RawUDPListener::processPendingDatagrams);
-        udpSocket->close();
+    void stopDiscovery() {
+        // Disconnect signals and close socket
+        if (udpSocket->state() != QAbstractSocket::UnconnectedState) {
+            disconnect(udpSocket, &QUdpSocket::readyRead, this, &TelescopeDiscovery::processPendingDatagrams);
+            udpSocket->close();
+        }
         
-        logMessage("Stopped listening");
-        
-        startButton->setEnabled(true);
-        stopButton->setEnabled(false);
-        interfaceCombo->setEnabled(true);
-        portEdit->setEnabled(true);
-        allowBroadcastCheck->setEnabled(true);
-        reuseAddressCheck->setEnabled(true);
-        shareAddressCheck->setEnabled(true);
+        statusLabel->setText("Discovery stopped");
     }
     
     void processPendingDatagrams() {
+        // Read all available datagrams
         while (udpSocket->hasPendingDatagrams()) {
             QByteArray datagram;
             datagram.resize(udpSocket->pendingDatagramSize());
             QHostAddress sender;
             quint16 senderPort;
             
+            // Read the datagram
             udpSocket->readDatagram(datagram.data(), datagram.size(), &sender, &senderPort);
             
-            packetCount++;
-            
-            // Log packet info
-            logMessage(QString("Received UDP packet from %1:%2 (%3 bytes)")
-                      .arg(sender.toString())
-                      .arg(senderPort)
-                      .arg(datagram.size()));
-            
-            // Display packet data in various formats
-            logMessage("Raw data (ASCII): " + QString::fromUtf8(datagram));
-            logMessage("Raw data (Hex): " + datagram.toHex(' '));
+            QString datagramStr = QString::fromUtf8(datagram);
+            qDebug() << "Received UDP broadcast from" << sender.toString() << ":" << datagramStr;
             
             // Check if this looks like a telescope broadcast
-            QString datagramStr = QString::fromUtf8(datagram);
-            if (datagramStr.contains("Origin", Qt::CaseInsensitive)) {
-                logMessage("*** FOUND CELESTRON ORIGIN TELESCOPE BROADCAST ***");
+            if (datagramStr.contains("Origin", Qt::CaseInsensitive) && 
+                datagramStr.contains("IP Address", Qt::CaseInsensitive)) {
+                
+                // Extract the telescope model
+                QString telescopeModel;
+                if (datagramStr.contains("Identity:")) {
+                    int identityStart = datagramStr.indexOf("Identity:");
+                    int identityEnd = datagramStr.indexOf(" ", identityStart + 9);
+                    if (identityEnd > identityStart) {
+                        telescopeModel = datagramStr.mid(identityStart + 9, identityEnd - identityStart - 9);
+                    }
+                }
+                
+                // Extract the IP address
+                QString telescopeIP;
+                QRegularExpression ipRegex("\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b");
+                QRegularExpressionMatch match = ipRegex.match(datagramStr);
+                
+                if (match.hasMatch()) {
+                    telescopeIP = match.captured(0);
+                    
+                    // Add to our list if not already there
+                    if (!telescopeAddresses.contains(telescopeIP)) {
+                        telescopeAddresses.append(telescopeIP);
+                        
+                        // Add to the UI list
+                        QString displayText;
+                        if (!telescopeModel.isEmpty()) {
+                            displayText = QString("%1 - %2").arg(telescopeIP, telescopeModel);
+                        } else {
+                            displayText = QString("%1 - Celestron Origin Telescope").arg(telescopeIP);
+                        }
+                        
+                        resultsListWidget->addItem(displayText);
+                        
+                        statusLabel->setText(QString("Found Celestron Origin telescope at %1").arg(telescopeIP));
+                    }
+                }
             }
-            
-            logMessage(""); // Empty line for separation
         }
     }
     
-    void clearLog() {
-        logText->clear();
+    void connectToTelescope() {
+        QListWidgetItem *selectedItem = resultsListWidget->currentItem();
+        if (!selectedItem) {
+            statusLabel->setText("Please select a telescope from the list");
+            return;
+        }
+        
+        // Extract the IP address from the selected item
+        QString text = selectedItem->text();
+        QRegularExpression ipRegex("\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b");
+        QRegularExpressionMatch match = ipRegex.match(text);
+        
+        if (!match.hasMatch()) {
+            statusLabel->setText("Could not find IP address in selected item");
+            return;
+        }
+        
+        QString ipAddress = match.captured(0);
+        statusLabel->setText(QString("Connecting to telescope at %1...").arg(ipAddress));
+        
+        // Connect to the telescope via WebSocket
+        QString url = QString("ws://%1:80").arg(ipAddress);
+        webSocket->open(QUrl(url));
     }
     
-    void updateStatus() {
-        packetCountLabel->setText(QString("Packets received: %1").arg(packetCount));
+    void onWebSocketConnected() {
+        statusLabel->setText("Connected to telescope!");
+        
+        // Send a status request to get basic info
+        QJsonObject command;
+        command["Command"] = "GetStatus";
+        command["Destination"] = "System";
+        command["SequenceID"] = 1;
+        command["Source"] = "QtApp";
+        command["Type"] = "Command";
+        
+        QJsonDocument doc(command);
+        webSocket->sendTextMessage(doc.toJson());
     }
     
-    void logMessage(const QString &message) {
-        logText->append(message);
-        // Auto-scroll to bottom
-        QTextCursor cursor = logText->textCursor();
-        cursor.movePosition(QTextCursor::End);
-        logText->setTextCursor(cursor);
+    void onWebSocketDisconnected() {
+        statusLabel->setText("Disconnected from telescope");
     }
     
+    void onTextMessageReceived(const QString &message) {
+        QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8());
+        if (!doc.isNull() && doc.isObject()) {
+            QJsonObject obj = doc.object();
+            
+            // Display the response
+            QString responseType = obj["Type"].toString();
+            QString command = obj["Command"].toString();
+            
+            statusLabel->setText(QString("Received %1 for %2").arg(responseType, command));
+            
+            // You can add more specific handling here
+        }
+    }
+
 private:
-    QComboBox *interfaceCombo;
-    QCheckBox *allowBroadcastCheck;
-    QCheckBox *reuseAddressCheck;
-    QCheckBox *shareAddressCheck;
-    QLineEdit *portEdit;
-    QPushButton *startButton;
-    QPushButton *stopButton;
-    QPushButton *clearButton;
-    QTextEdit *logText;
+    QLabel *statusLabel;
+    QListWidget *resultsListWidget;
     QUdpSocket *udpSocket;
-    QStatusBar *statusBar;
-    QLabel *packetCountLabel;
-    int packetCount = 0;
+    QWebSocket *webSocket;
+    QStringList telescopeAddresses;
 };
 
-int main(int argc, char **argv) {
+int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     
-    RawUDPListener listener;
-    listener.show();
+    TelescopeDiscovery discovery;
+    discovery.show();
     
     return app.exec();
 }
