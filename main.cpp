@@ -11,7 +11,6 @@
 #include <QWebSocket>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QRegularExpression>
 
 class TelescopeDiscoveryUDP : public QMainWindow {
     Q_OBJECT
@@ -31,10 +30,6 @@ public:
         QPushButton *listenButton = new QPushButton("Listen for UDP Broadcasts", this);
         connect(listenButton, &QPushButton::clicked, this, &TelescopeDiscoveryUDP::startUDPListener);
         layout->addWidget(listenButton);
-        
-        QPushButton *stopButton = new QPushButton("Stop Listening", this);
-        connect(stopButton, &QPushButton::clicked, this, &TelescopeDiscoveryUDP::stopListening);
-        layout->addWidget(stopButton);
         
         QPushButton *connectButton = new QPushButton("Connect to First Found Telescope", this);
         connect(connectButton, &QPushButton::clicked, this, &TelescopeDiscoveryUDP::connectToTelescope);
@@ -61,103 +56,37 @@ public:
     void startUDPListener() {
         addStatus("Starting UDP listener for telescope broadcasts...");
         
-        // Explicitly bind to all available network interfaces
-        QList<QNetworkInterface> interfaces = QNetworkInterface::allInterfaces();
-        bool bindSuccess = false;
-        
-        addStatus("Available network interfaces:");
-        for (const QNetworkInterface &interface : interfaces) {
-            if (interface.flags() & QNetworkInterface::IsRunning && 
-                !(interface.flags() & QNetworkInterface::IsLoopBack)) {
-                
-                addStatus(QString("- %1 (%2)").arg(interface.name(), interface.humanReadableName()));
-                
-                QList<QNetworkAddressEntry> entries = interface.addressEntries();
-                for (const QNetworkAddressEntry &entry : entries) {
-                    if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol) {
-                        addStatus(QString("  IP: %1").arg(entry.ip().toString()));
-                    }
-                }
-            }
-        }
-        
-        // Try to bind to any address on the UDP broadcast port (55555)
-        if (udpSocket->bind(QHostAddress::AnyIPv4, 55555, QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint)) {
-            addStatus("Successfully bound to UDP port 55555 on all IPv4 interfaces");
-            bindSuccess = true;
-        } else {
-            addStatus(QString("Failed to bind to UDP port 55555 on all interfaces: %1").arg(udpSocket->errorString()));
-        }
-        
-        // If that fails, try binding to individual interfaces
-        if (!bindSuccess) {
-            addStatus("Trying to bind to individual interfaces...");
-            
-            for (const QNetworkInterface &interface : interfaces) {
-                if (interface.flags() & QNetworkInterface::IsRunning && 
-                    !(interface.flags() & QNetworkInterface::IsLoopBack)) {
-                    
-                    QList<QNetworkAddressEntry> entries = interface.addressEntries();
-                    for (const QNetworkAddressEntry &entry : entries) {
-                        if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol) {
-                            // Create a new socket for this interface
-                            QUdpSocket *interfaceSocket = new QUdpSocket(this);
-                            if (interfaceSocket->bind(entry.ip(), 55555, QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint)) {
-                                addStatus(QString("Successfully bound to UDP port 55555 on interface %1 (%2)")
-                                        .arg(interface.name(), entry.ip().toString()));
-                                
-                                // Connect to the readyRead signal
-                                connect(interfaceSocket, &QUdpSocket::readyRead, this, [this, interfaceSocket]() {
-                                    processUDPDatagram(interfaceSocket);
-                                });
-                                
-                                // Add to our list of sockets
-                                interfaceSockets.append(interfaceSocket);
-                                bindSuccess = true;
-                            } else {
-                                addStatus(QString("Failed to bind to UDP port 55555 on interface %1 (%2): %3")
-                                        .arg(interface.name(), entry.ip().toString(), interfaceSocket->errorString()));
-                                interfaceSocket->deleteLater();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        if (!bindSuccess) {
-            addStatus("Failed to bind to any interfaces. UDP listener could not be started.");
+        // Bind to the UDP broadcast port (55555)
+        if (!udpSocket->bind(55555, QUdpSocket::ShareAddress)) {
+            addStatus(QString("Failed to bind to UDP port 55555: %1").arg(udpSocket->errorString()));
             return;
         }
         
-        // Connect the readyRead signal to our slot for the main socket (if successful)
-        if (udpSocket->state() == QAbstractSocket::BoundState) {
-            connect(udpSocket, &QUdpSocket::readyRead, this, [this]() {
-                processUDPDatagram(udpSocket);
-            });
-        }
+        // Connect the readyRead signal to our slot
+        connect(udpSocket, &QUdpSocket::readyRead, this, &TelescopeDiscoveryUDP::processUDPDatagram);
         
-        addStatus("UDP listener started. Waiting for telescope broadcasts...");
+        addStatus("UDP listener started on port 55555. Waiting for telescope broadcasts...");
         
         // Auto-stop listening after 30 seconds if nothing is found
         QTimer::singleShot(30000, [this]() {
             if (foundTelescopeAddresses.isEmpty()) {
-                stopListening();
+                udpSocket->close();
+                disconnect(udpSocket, &QUdpSocket::readyRead, this, &TelescopeDiscoveryUDP::processUDPDatagram);
                 addStatus("No telescopes found after 30 seconds. Listener stopped.");
             }
         });
     }
     
-    void processUDPDatagram(QUdpSocket *socket) {
+    void processUDPDatagram() {
         // Read all available datagrams
-        while (socket->hasPendingDatagrams()) {
+        while (udpSocket->hasPendingDatagrams()) {
             QByteArray datagram;
-            datagram.resize(socket->pendingDatagramSize());
+            datagram.resize(udpSocket->pendingDatagramSize());
             QHostAddress sender;
             quint16 senderPort;
             
             // Read the datagram
-            socket->readDatagram(datagram.data(), datagram.size(), &sender, &senderPort);
+            udpSocket->readDatagram(datagram.data(), datagram.size(), &sender, &senderPort);
             
             // Log the raw datagram for debugging
             addStatus(QString("Received UDP broadcast from %1:%2").arg(sender.toString()).arg(senderPort));
@@ -197,30 +126,9 @@ public:
                 // Add to our list if not already there
                 if (!foundTelescopeAddresses.contains(telescopeIP)) {
                     foundTelescopeAddresses.append(telescopeIP);
-                    
-                    // Once we've found a telescope, we can keep listening but also notify the user
-                    addStatus("Ready to connect to the telescope. Click 'Connect to First Found Telescope' to proceed.");
                 }
             }
         }
-    }
-    
-    void stopListening() {
-        // Close the main socket
-        if (udpSocket->state() == QAbstractSocket::BoundState) {
-            disconnect(udpSocket, 0, this, 0);  // Disconnect all signals from this socket
-            udpSocket->close();
-        }
-        
-        // Close all interface-specific sockets
-        for (QUdpSocket *socket : interfaceSockets) {
-            disconnect(socket, 0, this, 0);  // Disconnect all signals from this socket
-            socket->close();
-            socket->deleteLater();
-        }
-        interfaceSockets.clear();
-        
-        addStatus("Stopped listening for UDP broadcasts");
     }
     
     void connectToTelescope() {
@@ -290,7 +198,6 @@ public:
 private:
     QTextEdit *statusText;
     QUdpSocket *udpSocket;
-    QList<QUdpSocket*> interfaceSockets;  // For binding to specific interfaces
     QWebSocket *webSocket;
     QStringList foundTelescopeAddresses;
 };
