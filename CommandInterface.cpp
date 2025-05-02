@@ -1,11 +1,18 @@
+#include "TelescopeGUI.hpp"
 #include "CommandInterface.hpp"
 
-CommandInterface::CommandInterface(QWebSocket *webSocket, QWidget *parent) 
-    : QWidget(parent), webSocket(webSocket) {
+CommandInterface::CommandInterface(TelescopeGUI *telescopeGUI, QWidget *parent) 
+    : QWidget(parent), telescopeGUI(telescopeGUI) {
     setupUI();
 }
 
 void CommandInterface::sendCommand() {
+    // Check if we have a valid TelescopeGUI pointer
+    if (!telescopeGUI) {
+        QMessageBox::warning(this, "Error", "Cannot send command - not properly connected to main window");
+        return;
+    }
+    
     QString command = commandComboBox->currentText();
     QString destination = destinationComboBox->currentText();
     
@@ -37,20 +44,13 @@ void CommandInterface::sendCommand() {
         }
     }
     
-    // Convert to JSON and send
-    QJsonDocument doc(jsonCommand);
-    QString message = doc.toJson();
+    // Send the command using the TelescopeGUI's method
+    telescopeGUI->sendJsonMessage(jsonCommand);
     
-    if (webSocket->isValid() && webSocket->state() == QAbstractSocket::ConnectedState) {
-        webSocket->sendTextMessage(message);
-        
-        // Add to command history
-        QListWidgetItem *item = new QListWidgetItem(QString("Sent: %1 to %2").arg(command, destination));
-        commandHistoryList->addItem(item);
-        commandHistoryList->scrollToBottom();
-    } else {
-        QMessageBox::warning(this, "Connection Error", "Not connected to telescope");
-    }
+    // Add to command history - we'll assume it worked if we got here
+    QListWidgetItem *item = new QListWidgetItem(QString("Sent: %1 to %2").arg(command, destination));
+    commandHistoryList->addItem(item);
+    commandHistoryList->scrollToBottom();
 }
 
 void CommandInterface::setupUI() {

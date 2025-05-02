@@ -1,4 +1,5 @@
 #include "TelescopeGUI.hpp"
+#include "CommandInterface.hpp"
 #include <cmath>
 
 TelescopeGUI::TelescopeGUI(QWidget *parent) : QMainWindow(parent) {
@@ -166,7 +167,7 @@ void TelescopeGUI::onWebSocketConnected() {
     statusLabel->setText("Connected to telescope!");
     connectButton->setText("Disconnect");
     isConnected = true;
-    
+
     // Send a status request to get basic info
     QJsonObject command;
     command["Command"] = "GetStatus";
@@ -202,8 +203,8 @@ void TelescopeGUI::updateMountDisplay() {
     mountDateLabel->setText(data.mount.date);
     mountTimeZoneLabel->setText(data.mount.timeZone);
     
-    mountLatitudeLabel->setText(QString::number(data.mount.latitude * 180.0 / M_PI, 'f', 6) + "°");
-    mountLongitudeLabel->setText(QString::number(data.mount.longitude * 180.0 / M_PI, 'f', 6) + "°");
+    mountLatitudeLabel->setText(QString::number(data.mount.latitude * 180.0 / M_PI, 'f', 1) + "° +/- 0.05");
+    mountLongitudeLabel->setText(QString::number(data.mount.longitude * 180.0 / M_PI, 'f', 1) + "° +/- 0.05");
     
     mountIsAlignedLabel->setText(data.mount.isAligned ? "Yes" : "No");
     mountIsTrackingLabel->setText(data.mount.isTracking ? "Yes" : "No");
@@ -723,7 +724,7 @@ QWidget* TelescopeGUI::createOrientationTab() {
 }
 
 QWidget* TelescopeGUI::createCommandTab() {
-    CommandInterface *commandInterface = new CommandInterface(webSocket, this);
+    CommandInterface *commandInterface = new CommandInterface(this, this);
     return commandInterface;
 }
 
@@ -766,7 +767,7 @@ void TelescopeGUI::logJsonPacket(const QString &message, bool incoming) {
     // Create log line
     QString logLine = QString("[%1] %2: %3\n").arg(timestamp, direction, message);
     
-    qDebug() << logLine;
+    if (debug) qDebug() << logLine;
 }
 
 void TelescopeGUI::requestImage(const QString &filePath) {

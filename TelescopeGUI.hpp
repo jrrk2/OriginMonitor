@@ -40,6 +40,12 @@ public:
      */
     TelescopeGUI(QWidget *parent = nullptr);
     
+    /**
+     * @brief Send a JSON message to the telescope
+     * @param obj The JSON object to send
+     */
+    void sendJsonMessage(const QJsonObject &obj);
+    
 private slots:
     /**
      * @brief Start discovery of telescopes
@@ -137,12 +143,6 @@ private:
      * @brief Set up the UDP discovery
      */
     void setupDiscovery();
-    
-    /**
-     * @brief Send a JSON message to the telescope
-     * @param obj The JSON object to send
-     */
-    void sendJsonMessage(const QJsonObject &obj);
     
     /**
      * @brief Log a JSON packet to a file
@@ -265,4 +265,7 @@ private:
     // Orientation tab widgets
     QLabel *orientationAltitudeLabel;
     QLabel *orientationLastUpdateLabel;
+
+    CommandInterface *commandInterface;
+    bool debug = false;
 };

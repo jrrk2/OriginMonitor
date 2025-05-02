@@ -20,6 +20,9 @@
  * with a dropdown for selecting the command and destination,
  * and a text field for entering additional parameters.
  */
+
+class TelescopeGUI;
+
 class CommandInterface : public QWidget {
     Q_OBJECT
     
@@ -29,7 +32,7 @@ public:
      * @param webSocket The WebSocket for sending commands
      * @param parent The parent widget
      */
-    CommandInterface(QWebSocket *webSocket, QWidget *parent = nullptr);
+    CommandInterface(TelescopeGUI *telescopeGUI, QWidget *parent = nullptr);
     
 private slots:
     /**
@@ -63,4 +66,7 @@ private:
     
     /** List for displaying the command history */
     QListWidget *commandHistoryList;
+
+    /** Whether the telescope is connected */
+    TelescopeGUI *telescopeGUI;
 };
