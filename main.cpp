@@ -172,8 +172,8 @@ public:
         QString ipAddress = match.captured(0);
         statusLabel->setText(QString("Connecting to telescope at %1...").arg(ipAddress));
         
-        // Connect to the telescope via WebSocket
-        QString url = QString("ws://%1:80").arg(ipAddress);
+        // Connect to the telescope via WebSocket using the correct endpoint
+        QString url = QString("ws://%1:80/SmartScope-1.0/mountControlEndpoint").arg(ipAddress);
         webSocket->open(QUrl(url));
     }
     
