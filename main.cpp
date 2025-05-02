@@ -13,6 +13,7 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QDebug>
+#include <QQueue>
 
 class TelescopeDiscovery : public QMainWindow {
     Q_OBJECT
@@ -20,7 +21,7 @@ class TelescopeDiscovery : public QMainWindow {
 public:
     TelescopeDiscovery(QWidget *parent = nullptr) : QMainWindow(parent) {
         // Setup UI
-        QWidget *centralWidget = new QWidget(this);
+        QWidget *centralWidget = new  QWidget(this);
         setCentralWidget(centralWidget);
         
         QVBoxLayout *layout = new QVBoxLayout(centralWidget);
@@ -44,7 +45,10 @@ public:
         connect(webSocket, &QWebSocket::connected, this, &TelescopeDiscovery::onWebSocketConnected);
         connect(webSocket, &QWebSocket::disconnected, this, &TelescopeDiscovery::onWebSocketDisconnected);
         connect(webSocket, &QWebSocket::textMessageReceived, this, &TelescopeDiscovery::onTextMessageReceived);
-        
+
+        scanTimer = new QTimer(this);
+        connect(scanTimer, &QTimer::timeout, this, &TelescopeDiscovery::processNextPendingScan);
+
         // Set window size and title
         resize(600, 400);
         setWindowTitle("Celestron Origin Telescope Discovery");
@@ -454,6 +458,10 @@ private:
     QListWidget *resultsListWidget;
     QWebSocket *webSocket;
     QStringList telescopeAddresses;
+    QList<QWebSocket*> activeTestSockets; // Track active test sockets
+    QQueue<QHostAddress> pendingScans;    // Queue for pending IP scans
+    const int maxConcurrentConnections = 5; // Limit concurrent connections
+    QTimer *scanTimer;                    // Timer for processing scan queue
 };
 
 int main(int argc, char *argv[]) {
