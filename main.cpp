@@ -11,6 +11,7 @@
 #include <QHostInfo>
 #include <QNetworkInterface>
 #include <QProcess>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QDebug>
 #include <QQueue>
@@ -46,9 +47,9 @@ public:
         connect(webSocket, &QWebSocket::disconnected, this, &TelescopeDiscovery::onWebSocketDisconnected);
         connect(webSocket, &QWebSocket::textMessageReceived, this, &TelescopeDiscovery::onTextMessageReceived);
 
-        scanTimer = new QTimer(this);
-        connect(scanTimer, &QTimer::timeout, this, &TelescopeDiscovery::processNextPendingScan);
-
+    scanTimer = new QTimer(this);
+    connect(scanTimer, &QTimer::timeout, this, &TelescopeDiscovery::processNextPendingScan);
+	
         // Set window size and title
         resize(600, 400);
         setWindowTitle("Celestron Origin Telescope Discovery");
@@ -266,141 +267,275 @@ public:
             }
         });
     }
+
+
+// Replace your sendUdpBroadcast method with this one
+void sendUdpBroadcast() {
+    // Clear any existing scan queue
+    pendingScans.clear();
     
-    void sendUdpBroadcast() {
-        // As a last resort, try scanning each IP that responded to mDNS queries
-        // This could be based on the traffic we saw in the packet capture
-        // where the telescope was sending mDNS queries
-        
-        // For each local network interface
-        QList<QNetworkInterface> interfaces = QNetworkInterface::allInterfaces();
-        for (const QNetworkInterface &interface : interfaces) {
-            if (interface.flags() & QNetworkInterface::IsRunning && 
-                !(interface.flags() & QNetworkInterface::IsLoopBack)) {
-                
-                QList<QNetworkAddressEntry> entries = interface.addressEntries();
-                for (const QNetworkAddressEntry &entry : entries) {
-                    if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol) {
-                        // Get the subnet info
-                        QHostAddress ip = entry.ip();
-                        QHostAddress subnet = entry.netmask();
+    // Reset the status
+    statusLabel->setText("Scanning network for telescopes...");
+    
+    // For each local network interface
+    QList<QNetworkInterface> interfaces = QNetworkInterface::allInterfaces();
+    for (const QNetworkInterface &interface : interfaces) {
+        if (interface.flags() & QNetworkInterface::IsRunning && 
+            !(interface.flags() & QNetworkInterface::IsLoopBack)) {
+            
+            QList<QNetworkAddressEntry> entries = interface.addressEntries();
+            for (const QNetworkAddressEntry &entry : entries) {
+                if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol) {
+                    // Get the subnet info
+                    QHostAddress ip = entry.ip();
+                    QHostAddress subnet = entry.netmask();
+                    
+                    // Calculate network parameters
+                    quint32 ipInt = ip.toIPv4Address();
+                    quint32 subnetInt = subnet.toIPv4Address();
+                    quint32 networkInt = ipInt & subnetInt;
+                    int hostCount = ~subnetInt + 1;
+                    
+                    // Limit the scan range to avoid overloading
+                    int maxHosts = qMin(hostCount - 2, 254);  // Limit to 254 hosts
+                    
+                    for (int i = 1; i <= maxHosts; i++) {
+                        QHostAddress targetIp(networkInt + i);
                         
-                        // For each IP in the subnet
-                        quint32 ipInt = ip.toIPv4Address();
-                        quint32 subnetInt = subnet.toIPv4Address();
-                        quint32 networkInt = ipInt & subnetInt;
-                        int hostCount = ~subnetInt + 1;
-                        
-                        for (int i = 1; i < hostCount - 1; i++) {
-                            QHostAddress targetIp(networkInt + i);
-                            
-                            // Skip our own IP
-                            if (targetIp != ip) {
-                                // Try a WebSocket connection to this IP
-                                tryWebSocketConnection(targetIp);
-                            }
+                        // Skip our own IP
+                        if (targetIp != ip) {
+                            // Add to the queue instead of immediately connecting
+                            pendingScans.enqueue(targetIp);
                         }
                     }
                 }
             }
         }
-        
-        // Set a timer to indicate completion
-        QTimer::singleShot(10000, [this]() {
-            if (telescopeAddresses.isEmpty()) {
-                statusLabel->setText("No Celestron Origin telescopes found");
-            } else {
-                statusLabel->setText(QString("Found %1 Celestron Origin telescope(s)").arg(telescopeAddresses.size()));
-            }
-        });
     }
     
-    void tryWebSocketConnection(const QHostAddress &ip) {
-        // Try a direct WebSocket connection to this IP
-        QWebSocket *testSocket = new QWebSocket("", QWebSocketProtocol::VersionLatest, this);
-        
-        connect(testSocket, &QWebSocket::connected, [this, testSocket, ip]() {
-            // We got a connection! Send a command to verify it's a telescope
-            verifyTelescopeWithWebSocket(ip, ip.toString());
-            
-            // Close this test socket
-            testSocket->close();
-        });
-        
-        connect(testSocket, &QWebSocket::disconnected, testSocket, &QWebSocket::deleteLater);
-        
-        // Set a timeout for the connection attempt
-        QTimer::singleShot(200, [testSocket]() {
-            if (testSocket->state() == QAbstractSocket::ConnectingState) {
-                testSocket->abort();
-                testSocket->deleteLater();
-            }
-        });
-        
-        // Try to connect
-        QString url = QString("ws://%1:80").arg(ip.toString());
-        testSocket->open(QUrl(url));
+    // Shuffle the queue to get a better distribution of scanning
+    // (prevents hitting the same subnet range all at once)
+    QList<QHostAddress> tempList = pendingScans.toList();
+
+    // Use Qt's own random generator instead of std::random_shuffle
+    QRandomGenerator generator(QDateTime::currentMSecsSinceEpoch());
+    for (int i = tempList.size() - 1; i > 0; --i) {
+        int j = generator.bounded(i + 1);
+        if (i != j) {
+            tempList.swapItemsAt(i, j);
+        }
     }
     
-    void verifyTelescopeWithWebSocket(const QHostAddress &ip, const QString &name) {
-        // Create a temporary WebSocket to verify if this is really a telescope
-        QWebSocket *testSocket = new QWebSocket("", QWebSocketProtocol::VersionLatest, this);
+    pendingScans.clear();
+    for (const QHostAddress &addr : tempList) {
+        pendingScans.enqueue(addr);
+    }
+    
+    // Start processing the queue by kicking off maxConcurrentConnections requests
+    for (int i = 0; i < maxConcurrentConnections && !pendingScans.isEmpty(); i++) {
+        tryWebSocketConnection(pendingScans.dequeue());
+    }
+    
+    // Set a timer to update the status when we're done
+    QTimer::singleShot(30000, [this]() {
+        // Stop the scan timer if it's still running
+        if (scanTimer->isActive()) {
+            scanTimer->stop();
+        }
         
-        connect(testSocket, &QWebSocket::connected, [this, testSocket, ip, name]() {
-            // Send a status request command
-            QJsonObject command;
-            command["Command"] = "GetStatus";
-            command["Destination"] = "System";
-            command["SequenceID"] = 1;
-            command["Source"] = "QtApp";
-            command["Type"] = "Command";
-            
-            QJsonDocument doc(command);
-            testSocket->sendTextMessage(doc.toJson());
-            
-            // Set a timer to close this connection if no response
-            QTimer::singleShot(1000, [testSocket]() {
-                testSocket->close();
-            });
-        });
+        // Abort any remaining connections
+        for (QWebSocket *socket : activeTestSockets) {
+            socket->abort();
+            socket->deleteLater();
+        }
+        activeTestSockets.clear();
+        pendingScans.clear();
         
-        connect(testSocket, &QWebSocket::textMessageReceived, [this, testSocket, ip, name](const QString &message) {
-            QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8());
-            if (!doc.isNull() && doc.isObject()) {
-                QJsonObject obj = doc.object();
+        // Update status
+        if (telescopeAddresses.isEmpty()) {
+            statusLabel->setText("No Celestron Origin telescopes found");
+        } else {
+            statusLabel->setText(QString("Found %1 Celestron Origin telescope(s)").arg(telescopeAddresses.size()));
+        }
+    });
+}
+
+  // Replace your tryWebSocketConnection method with this one
+void tryWebSocketConnection(const QHostAddress &ip) {
+    // If we already have too many active connections, queue this request
+    if (activeTestSockets.size() >= maxConcurrentConnections) {
+        pendingScans.enqueue(ip);
+        
+        // Make sure the scan timer is running to process the queue
+        if (!scanTimer->isActive()) {
+            scanTimer->start(50); // Process queued scans every 50ms
+        }
+        return;
+    }
+
+    // Create a new socket for testing
+    QWebSocket *testSocket = new QWebSocket("", QWebSocketProtocol::VersionLatest, this);
+    activeTestSockets.append(testSocket);
+    
+    // Store IP as string for use in lambdas
+    QString ipString = ip.toString();
+    qDebug() << "Creating WebSocket for" << ipString;
+    
+    // Connection success handler
+    connect(testSocket, &QWebSocket::connected, [this, testSocket, ipString]() {
+        qDebug() << "WebSocket connected to" << ipString;
+        // Remove from active sockets list - it's handled by verifyTelescopeWithWebSocket now
+        activeTestSockets.removeOne(testSocket);
+        verifyTelescopeWithWebSocket(QHostAddress(ipString), ipString);
+        
+        // Process next pending scan if any
+        processNextPendingScan();
+    });
+    
+    // Ensure socket is properly cleaned up on disconnect
+    connect(testSocket, &QWebSocket::disconnected, [this, testSocket]() {
+        activeTestSockets.removeOne(testSocket);
+        testSocket->deleteLater();
+        
+        // Process next pending scan if any
+        processNextPendingScan();
+    });
+    
+    // Error handler with proper cleanup
+    connect(testSocket, QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error),
+            [this, testSocket, ipString](QAbstractSocket::SocketError error) {
+        qDebug() << "WebSocket error for" << ipString << ":" << error;
+        activeTestSockets.removeOne(testSocket);
+        testSocket->deleteLater();
+        
+        // Process next pending scan if any
+        processNextPendingScan();
+    });
+    
+    // Connection timeout with proper cleanup
+    QTimer *timer = new QTimer(this);
+    timer->setSingleShot(true);
+    connect(timer, &QTimer::timeout, [this, testSocket, timer, ipString]() {
+        qDebug() << "Connection timeout for" << ipString;
+        if (activeTestSockets.contains(testSocket)) {
+            activeTestSockets.removeOne(testSocket);
+            testSocket->abort();  // Properly abort the connection
+            testSocket->deleteLater();
+            
+            // Process next pending scan if any
+            processNextPendingScan();
+        }
+        timer->deleteLater();
+    });
+    timer->start(500); // Longer timeout (500ms instead of 200ms)
+    
+    // Try to connect
+    QString url = QString("ws://%1:80").arg(ipString);
+    qDebug() << "Opening WebSocket connection to" << url;
+    testSocket->open(QUrl(url));
+}
+
+// Add this helper method to process the pending IP scan queue
+void processNextPendingScan() {
+    // If we have pending scans and room for more active connections, process next
+    if (!pendingScans.isEmpty() && activeTestSockets.size() < maxConcurrentConnections) {
+        QHostAddress nextIp = pendingScans.dequeue();
+        tryWebSocketConnection(nextIp);
+    }
+}
+
+// Replace your verifyTelescopeWithWebSocket method with this one
+void verifyTelescopeWithWebSocket(const QHostAddress &ip, const QString &name) {
+    // Create a temporary WebSocket to verify if this is really a telescope
+    QWebSocket *testSocket = new QWebSocket("", QWebSocketProtocol::VersionLatest, this);
+    QString ipString = ip.toString();
+    
+    // Debugging
+    qDebug() << "Verifying if" << ipString << "is a telescope";
+    
+    bool responseReceived = false;
+    
+    connect(testSocket, &QWebSocket::connected, [this, testSocket, ipString, name, &responseReceived]() {
+        qDebug() << "Verification WebSocket connected to" << ipString;
+        
+        // Send a status request command
+        QJsonObject command;
+        command["Command"] = "GetStatus";
+        command["Destination"] = "System";
+        command["SequenceID"] = 1;
+        command["Source"] = "QtApp";
+        command["Type"] = "Command";
+        
+        QJsonDocument doc(command);
+        testSocket->sendTextMessage(doc.toJson());
+    });
+    
+    connect(testSocket, &QWebSocket::textMessageReceived, 
+            [this, testSocket, ipString, name, &responseReceived](const QString &message) {
+        // Mark that we received a response
+        responseReceived = true;
+        
+        qDebug() << "Received response from" << ipString;
+        
+        QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8());
+        if (!doc.isNull() && doc.isObject()) {
+            QJsonObject obj = doc.object();
+            
+            // Check if this looks like a telescope response
+            if (obj.contains("Command") && obj.contains("Source")) {
+                // This is very likely a Celestron Origin telescope
                 
-                // Check if this looks like a telescope response
-                if (obj.contains("Command") && obj.contains("Source")) {
-                    // This is very likely a Celestron Origin telescope
-                    QString ipString = ip.toString();
+                // Add to our list of discovered telescopes if not already there
+                if (!telescopeAddresses.contains(ipString)) {
+                    telescopeAddresses.append(ipString);
                     
-                    // Add to our list of discovered telescopes
-                    if (!telescopeAddresses.contains(ipString)) {
-                        telescopeAddresses.append(ipString);
-                        
-                        // Add to the UI list
-                        QString displayText = QString("%1 (%2)").arg(ipString, name);
-                        if (obj.contains("Source") && obj.contains("Command")) {
-                            displayText += QString(" - %1 (%2)").arg(obj["Source"].toString(), 
-                                                                   obj["Command"].toString());
-                        }
-                        resultsListWidget->addItem(displayText);
-                        
-                        statusLabel->setText(QString("Found %1 Celestron Origin telescope(s)").arg(telescopeAddresses.size()));
+                    // Add to the UI list
+                    QString displayText = QString("%1 (%2)").arg(ipString, name);
+                    if (obj.contains("Source") && obj.contains("Command")) {
+                        displayText += QString(" - %1 (%2)").arg(obj["Source"].toString(), 
+                                                               obj["Command"].toString());
                     }
+                    resultsListWidget->addItem(displayText);
+                    
+                    statusLabel->setText(QString("Found %1 Celestron Origin telescope(s)")
+                                       .arg(telescopeAddresses.size()));
                 }
             }
-            
-            testSocket->close();
-        });
+        }
         
-        connect(testSocket, &QWebSocket::disconnected, testSocket, &QWebSocket::deleteLater);
-        
-        // Connect to the WebSocket endpoint
-        QString url = QString("ws://%1:80").arg(ip.toString());
-        testSocket->open(QUrl(url));
-    }
+        // Always close the socket after processing the response
+        testSocket->close();
+    });
     
+    // Error handling with proper cleanup
+    connect(testSocket, QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error),
+            [testSocket, ipString](QAbstractSocket::SocketError error) {
+        qDebug() << "Verification WebSocket error for" << ipString << ":" << error;
+        testSocket->deleteLater();
+    });
+    
+    // Properly clean up on disconnect
+    connect(testSocket, &QWebSocket::disconnected, [testSocket, &responseReceived]() {
+        testSocket->deleteLater();
+    });
+    
+    // Set a timeout to close this connection if no response
+    QTimer *timer = new QTimer(testSocket);
+    timer->setSingleShot(true);
+    connect(timer, &QTimer::timeout, [testSocket, &responseReceived, ipString]() {
+        if (!responseReceived) {
+            qDebug() << "Verification timeout for" << ipString;
+            testSocket->abort();
+        }
+    });
+    timer->start(1500);  // 1.5 second timeout (longer than before)
+    
+    // Connect to the WebSocket endpoint
+    QString url = QString("ws://%1:80").arg(ipString);
+    qDebug() << "Opening verification WebSocket connection to" << url;
+    testSocket->open(QUrl(url));
+}
+  
     void connectToTelescope() {
         QListWidgetItem *selectedItem = resultsListWidget->currentItem();
         if (!selectedItem) {
