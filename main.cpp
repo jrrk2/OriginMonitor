@@ -117,15 +117,13 @@ public:
                                             .arg(entry.ip().toString());
                         
                         interfaceCombo->addItem(displayName, QVariant::fromValue(entry.ip()));
-                        
-                        // Auto-select en0 if available
-                        if (interface.name() == "en0") {
-                            interfaceCombo->setCurrentIndex(interfaceCombo->count() - 1);
-                        }
                     }
                 }
             }
         }
+        
+        // Select "Any" as the default option since this is best for catching broadcasts
+        interfaceCombo->setCurrentIndex(0);
         
         // Add diagnostics info about interfaces to the log
         logMessage("Available Network Interfaces:");
