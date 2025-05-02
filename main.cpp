@@ -355,7 +355,9 @@ public:
             testSocket->sendTextMessage(doc.toJson());
             
             // Set a timer to close this connection if no response
-            QTimer::singleShot(1000, testSocket, &QWebSocket::close);
+            QTimer::singleShot(1000, [testSocket]() {
+                testSocket->close();
+            });
         });
         
         connect(testSocket, &QWebSocket::textMessageReceived, [this, testSocket, ip, name](const QString &message) {
