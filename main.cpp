@@ -357,7 +357,8 @@ public:
             if (telescopeAddresses.isEmpty()) {
                 statusLabel->setText("No Celestron Origin telescopes found");
             } else {
-                statusLabel->setText(QString("Found %1 Celestron Origin telescope(s)").arg(telescopeAddresses.size()));
+                statusLabel->setText(QString("Found %1 Celestron Origin telescope(s)")
+                                   .arg(telescopeAddresses.size()));
             }
         });
     }
@@ -397,7 +398,7 @@ public:
                 // Print response size for debugging
                 qDebug() << "Received HTTP response from" << ipString << "of size" << data.size() << "bytes";
                 
-                // ANY HTTP 200 response is probably our telescope, but we'll do some basic checks
+                // ANY HTTP 200 response is a candidate, but we need better filtering
                 if (data.size() > 0) {
                     // Check for HTML content
                     QString htmlContent = QString::fromUtf8(data);
@@ -405,20 +406,52 @@ public:
                     // Print the first 100 characters of the HTML for debugging
                     qDebug() << "HTML received from" << ipString << ":" << htmlContent.left(100);
                     
-                    // At this point, we've confirmed the device responds on port 80
-                    // Mark as a potential telescope
-                    qDebug() << "Found potential Origin telescope at" << ipString;
+                    // More specific checks to filter out common routers and other devices
+                    bool isLikelyRouter = 
+                        htmlContent.contains("router", Qt::CaseInsensitive) ||
+                        htmlContent.contains("admin", Qt::CaseInsensitive) ||
+                        htmlContent.contains("login", Qt::CaseInsensitive) ||
+                        htmlContent.contains("password", Qt::CaseInsensitive);
                     
-                    // Add to our list of discovered telescopes if not already there
-                    if (!telescopeAddresses.contains(ipString)) {
-                        telescopeAddresses.append(ipString);
+                    // Positive indicators for Origin telescope
+                    bool isLikelyTelescope =
+                        htmlContent.contains("Origin", Qt::CaseInsensitive) ||
+                        htmlContent.contains("Celestron", Qt::CaseInsensitive) ||
+                        // The exact content from your index.html
+                        htmlContent.contains("Origin Landing Page", Qt::CaseInsensitive);
+                    
+                    // If it matches telescope patterns and doesn't look like a router
+                    if ((isLikelyTelescope && !isLikelyRouter) || 
+                        // Special case: If the HTML is very similar to the example you provided
+                        (htmlContent.contains("<title>Origin Landing Page</title>", Qt::CaseInsensitive) &&
+                         htmlContent.contains("links-container", Qt::CaseInsensitive))) {
                         
-                        // Add to the UI list with a more informative description
-                        QString displayText = QString("%1 - Potential Celestron Origin Telescope").arg(ipString);
-                        resultsListWidget->addItem(displayText);
+                        qDebug() << "Found Origin telescope at" << ipString;
                         
-                        statusLabel->setText(QString("Found %1 potential Celestron Origin telescope(s)")
-                                           .arg(telescopeAddresses.size()));
+                        // Add to our list of discovered telescopes if not already there
+                        if (!telescopeAddresses.contains(ipString)) {
+                            telescopeAddresses.append(ipString);
+                            
+                            // Add to the UI list with a definitive description
+                            QString displayText = QString("%1 - Celestron Origin Telescope").arg(ipString);
+                            resultsListWidget->addItem(displayText);
+                            
+                            statusLabel->setText(QString("Found %1 Celestron Origin telescope(s)")
+                                               .arg(telescopeAddresses.size()));
+                        }
+                    } 
+                    // If it has HTML but doesn't match our router filter, mark as possible telescope
+                    else if (!isLikelyRouter && 
+                             (htmlContent.contains("<html", Qt::CaseInsensitive) && 
+                              htmlContent.contains("<body", Qt::CaseInsensitive))) {
+                        
+                        qDebug() << "Found possible telescope candidate at" << ipString << " - additional verification needed";
+                        
+                        // Try a second verification step: WebSocket connection
+                        verifyWithWebSocket(ipString);
+                    } 
+                    else {
+                        qDebug() << "Device at" << ipString << "doesn't appear to be an Origin telescope";
                     }
                 } else {
                     qDebug() << "Device at" << ipString << "returned empty response";
@@ -463,12 +496,111 @@ public:
         QTimer::singleShot(timer->interval(), [this, manager, ipString]() {
             // If the manager is still in our list, it means the request is still pending
             if (activeNetworkManagers.contains(manager)) {
-                qDebug() << "Manually aborting HTTP request to" << ipString << "due to timeout";
-                // manager->abort();
+                qDebug() << "Manually canceling HTTP request to" << ipString << "due to timeout";
+                // Remove from the list
+                activeNetworkManagers.removeOne(manager);
+                // The correct way to abort a request is to delete the manager
+                manager->deleteLater();
+                // Process next pending scan
+                processNextPendingScan();
             }
         });
         
         manager->get(request);
+    }
+    
+    // Additional verification using WebSocket
+    void verifyWithWebSocket(const QString &ipString) {
+        qDebug() << "Attempting WebSocket verification for" << ipString;
+        
+        // Create a temporary WebSocket to verify if this is really a telescope
+        QWebSocket *testSocket = new QWebSocket("", QWebSocketProtocol::VersionLatest, this);
+        
+        // Track whether we received a valid response
+        bool *responseReceived = new bool(false);
+        
+        // Connection success handler
+        connect(testSocket, &QWebSocket::connected, [this, testSocket, ipString, responseReceived]() {
+            qDebug() << "WebSocket connected to" << ipString;
+            
+            // Send a status request command
+            QJsonObject command;
+            command["Command"] = "GetStatus";
+            command["Destination"] = "System";
+            command["SequenceID"] = 1;
+            command["Source"] = "QtApp";
+            command["Type"] = "Command";
+            
+            QJsonDocument doc(command);
+            testSocket->sendTextMessage(doc.toJson());
+        });
+        
+        // Handle received messages
+        connect(testSocket, &QWebSocket::textMessageReceived, 
+                [this, testSocket, ipString, responseReceived](const QString &message) {
+            
+            // Mark that we received a response
+            *responseReceived = true;
+            
+            qDebug() << "Received WebSocket response from" << ipString << ":" << message.left(100);
+            
+            QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8());
+            if (!doc.isNull() && doc.isObject()) {
+                QJsonObject obj = doc.object();
+                
+                // Check if this looks like a telescope response
+                if (obj.contains("Command") || obj.contains("Source")) {
+                    // This is very likely a Celestron Origin telescope
+                    qDebug() << "Confirmed Origin telescope at" << ipString << "via WebSocket";
+                    
+                    // Add to our list of discovered telescopes if not already there
+                    if (!telescopeAddresses.contains(ipString)) {
+                        telescopeAddresses.append(ipString);
+                        
+                        // Add to the UI list with a description that indicates verification method
+                        QString displayText = QString("%1 - Celestron Origin Telescope (WebSocket verified)").arg(ipString);
+                        resultsListWidget->addItem(displayText);
+                        
+                        statusLabel->setText(QString("Found %1 Celestron Origin telescope(s)")
+                                           .arg(telescopeAddresses.size()));
+                    }
+                }
+            }
+            
+            // Close the socket
+            testSocket->close();
+        });
+        
+        // Handle errors
+        connect(testSocket, QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error),
+                [testSocket, ipString, responseReceived](QAbstractSocket::SocketError error) {
+            qDebug() << "WebSocket verification error for" << ipString << ":" << error;
+            testSocket->deleteLater();
+            delete responseReceived;
+        });
+        
+        // Handle disconnection
+        connect(testSocket, &QWebSocket::disconnected, [testSocket, responseReceived]() {
+            testSocket->deleteLater();
+            delete responseReceived;
+        });
+        
+        // Set a timeout
+        QTimer *timer = new QTimer(testSocket);
+        timer->setSingleShot(true);
+        connect(timer, &QTimer::timeout, [testSocket, timer, ipString, responseReceived]() {
+            qDebug() << "WebSocket verification timeout for" << ipString;
+            if (!*responseReceived) {
+                testSocket->abort();
+            }
+            timer->deleteLater();
+        });
+        timer->start(1500);  // 1.5 second timeout
+        
+        // Try to connect
+        QString url = QString("ws://%1:80").arg(ipString);
+        qDebug() << "Opening verification WebSocket connection to" << url;
+        testSocket->open(QUrl(url));
     }
     
     // Helper method to process the pending IP scan queue
