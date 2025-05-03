@@ -773,17 +773,30 @@ void TelescopeGUI::logJsonPacket(const QString &message, bool incoming) {
 void TelescopeGUI::requestImage(const QString &filePath) {
     if (connectedIpAddress.isEmpty()) return;
     
-    // Create a simple HTTP request to fetch the image
-    QUrl url(QString("http://%1/%2").arg(connectedIpAddress, filePath));
+    // Construct the proper URL path
+    // The telescope is sending just the relative path like "Images/Temp/4.jpg"
+    // We need to prepend the proper API path
+    QString fullPath = QString("http://%1/SmartScope-1.0/dev2/%2").arg(connectedIpAddress, filePath);
+    QUrl url(fullPath);
     QNetworkRequest request(url);
+    
+    // Set appropriate headers for the request
+    request.setRawHeader("Cache-Control", "no-cache");
+    request.setRawHeader("Accept", "*/*");
+    request.setRawHeader("User-Agent", "CelestronOriginMonitor Qt Application");
+    request.setRawHeader("Connection", "keep-alive");
+    
+    qDebug() << "Requesting image from:" << fullPath;
     
     QNetworkAccessManager *manager = new QNetworkAccessManager(this);
     QNetworkReply *reply = manager->get(request);
     
-    connect(reply, &QNetworkReply::finished, this, [this, reply, manager]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, manager, filePath]() {
         if (reply->error() == QNetworkReply::NoError) {
             // Read the image data
             QByteArray imageData = reply->readAll();
+            
+            qDebug() << "Received image data, size:" << imageData.size() << "bytes";
             
             // Create a QPixmap from the data
             QPixmap pixmap;
@@ -793,13 +806,62 @@ void TelescopeGUI::requestImage(const QString &filePath) {
                 
                 // Display the image
                 imagePreviewLabel->setPixmap(pixmap);
+                
+                // Analyze image for focus quality (optional)
+                analyzeImageForFocus(imageData);
+            } else {
+                qDebug() << "Failed to load image from data";
             }
+        } else {
+            qDebug() << "Error fetching image:" << reply->errorString();
         }
         
         // Clean up
         reply->deleteLater();
         manager->deleteLater();
     });
+}
+
+// Add a new method to analyze focus quality
+void TelescopeGUI::analyzeImageForFocus(const QByteArray &imageData) {
+    QImage image;
+    if (!image.loadFromData(imageData)) {
+        return;
+    }
+    
+    // Convert to grayscale
+    QImage grayImage = image.convertToFormat(QImage::Format_Grayscale8);
+    
+    // Calculate contrast as a simple measure of focus quality
+    double totalVariance = 0.0;
+    double totalPixels = grayImage.width() * grayImage.height();
+    
+    // Calculate mean pixel value
+    double mean = 0.0;
+    for (int y = 0; y < grayImage.height(); y++) {
+        const uchar* line = grayImage.scanLine(y);
+        for (int x = 0; x < grayImage.width(); x++) {
+            mean += line[x];
+        }
+    }
+    mean /= totalPixels;
+    
+    // Calculate variance
+    for (int y = 0; y < grayImage.height(); y++) {
+        const uchar* line = grayImage.scanLine(y);
+        for (int x = 0; x < grayImage.width(); x++) {
+            double diff = line[x] - mean;
+            totalVariance += diff * diff;
+        }
+    }
+    
+    double contrastScore = sqrt(totalVariance / totalPixels);
+    
+    // Store this score somewhere (member variable or display in UI)
+    qDebug() << "Focus quality score (contrast):" << contrastScore;
+    
+    // You could update a label in the UI to show this
+    // focusQualityLabel->setText(QString("Focus Quality: %1").arg(contrastScore, 0, 'f', 2));
 }
 
 void TelescopeGUI::updateLastUpdateLabel(QLabel *label, const QDateTime &lastUpdate) {

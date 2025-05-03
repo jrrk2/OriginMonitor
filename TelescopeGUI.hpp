@@ -163,7 +163,12 @@ private:
      * @param lastUpdate The timestamp of the last update
      */
     void updateLastUpdateLabel(QLabel *label, const QDateTime &lastUpdate);
-    
+
+    // for future focus functionality
+    void analyzeImageForFocus(const QByteArray &imageData);
+    // Optionally add a variable to store focus scores
+    QList<double> focusScores;
+  
     // Tab creation methods
     QWidget* createMountTab();
     QWidget* createCameraTab();
