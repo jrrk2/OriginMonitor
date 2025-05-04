@@ -54,7 +54,7 @@ macx {
     QMAKE_LFLAGS += -Wl,-rpath,@executable_path/../Frameworks
     
     # For XCode build
-    CONFIG += debug_and_release build_all
+    CONFIG += debug_and_release build_all relative_qt_rpath
     
     # Bundle identifier
     QMAKE_TARGET_BUNDLE_PREFIX = com.yourdomain
@@ -62,6 +62,9 @@ macx {
 
     # You can add custom Info.plist settings here
     # QMAKE_INFO_PLIST = path/to/Info.plist
+
+    QMAKE_MACOSX_DEPLOYMENT_TARGET = 13.0
+    QMAKE_LFLAGS += -Wl,-rpath,@executable_path/../Frameworks
 }
 
 # And replace your post-link command with this
