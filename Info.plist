@@ -2,33 +2,33 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDisplayName</key>
-    <string>Celestron Origin Monitor</string>
-    <key>CFBundleExecutable</key>
-    <string>${EXECUTABLE_NAME}</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.yourdomain.CelestronOriginMonitor</string>
-    <key>CFBundleName</key>
-    <string>${PRODUCT_NAME}</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
-    <key>CFBundleSignature</key>
-    <string>????</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>LSApplicationCategoryType</key>
-    <string>public.app-category.utilities</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>10.14</string>
-    <key>NSHumanReadableCopyright</key>
-    <string>Copyright © 2025. All rights reserved.</string>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
-    <key>NSLocalNetworkUsageDescription</key>
-    <string>This app discovers Celestron Origin telescopes on your local network</string>
-    <key>NSCameraUsageDescription</key>
-    <string>This app needs camera access to view images from the telescope</string>
+	<key>CFBundleDisplayName</key>
+	<string>Celestron Origin Monitor</string>
+	<key>CFBundleExecutable</key>
+	<string>${EXECUTABLE_NAME}</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleName</key>
+	<string>${PRODUCT_NAME}</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>10.14</string>
+	<key>NSCameraUsageDescription</key>
+	<string>This app needs camera access to view images from the telescope</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2025. All rights reserved.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>This app discovers Celestron Origin telescopes on your local network</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
 </dict>
 </plist>
