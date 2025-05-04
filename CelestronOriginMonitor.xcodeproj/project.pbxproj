@@ -319,30 +319,6 @@
 			shellScript = "make -C /Users/jonathan/OriginMonitor -f CelestronOriginMonitor.xcodeproj/qt_makeqmake.mak";
 			showEnvVarsInLog = 0;
 		};
-		7EF0942E79C014DCEC8976BC /* Qt Preprocessors */ = {
-			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputPaths = (
-				/opt/homebrew/share/qt/mkspecs/features/data/dummy.cpp,
-				TelescopeDataProcessor.hpp,
-				CommandInterface.hpp,
-				TelescopeGUI.hpp,
-			);
-			name = "Qt Preprocessors";
-			outputPaths = (
-				build/moc/moc_predefs.h,
-				build/moc/moc_TelescopeDataProcessor.cpp,
-				build/moc/moc_CommandInterface.cpp,
-				build/moc/moc_TelescopeGUI.cpp,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "make -C /Users/jonathan/OriginMonitor -f CelestronOriginMonitor.xcodeproj/qt_preprocess.mak";
-			showEnvVarsInLog = 0;
-		};
 		9C316F444A62BF296E3E1F25 /* Project Copy */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
