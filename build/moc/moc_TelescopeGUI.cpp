@@ -58,7 +58,23 @@ template <> constexpr inline auto TelescopeGUI::qt_create_metaobjectdata<qt_meta
         "updateDiskDisplay",
         "updateDewHeaterDisplay",
         "updateOrientationDisplay",
-        "updateTimeDisplay"
+        "updateTimeDisplay",
+        "startAutomaticDownload",
+        "stopAutomaticDownload",
+        "updateDownloadProgress",
+        "currentFile",
+        "filesCompleted",
+        "totalFiles",
+        "bytesReceived",
+        "bytesTotal",
+        "onDirectoryDownloadStarted",
+        "directory",
+        "onFileDownloadStarted",
+        "fileName",
+        "onFileDownloaded",
+        "success",
+        "onDirectoryDownloaded",
+        "onAllDownloadsComplete"
     };
 
     QtMocHelpers::UintData qt_methods {
@@ -96,6 +112,33 @@ template <> constexpr inline auto TelescopeGUI::qt_create_metaobjectdata<qt_meta
         QtMocHelpers::SlotData<void()>(17, 2, QMC::AccessPrivate, QMetaType::Void),
         // Slot 'updateTimeDisplay'
         QtMocHelpers::SlotData<void()>(18, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'startAutomaticDownload'
+        QtMocHelpers::SlotData<void()>(19, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'stopAutomaticDownload'
+        QtMocHelpers::SlotData<void()>(20, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'updateDownloadProgress'
+        QtMocHelpers::SlotData<void(const QString &, int, int, qint64, qint64)>(21, 2, QMC::AccessPrivate, QMetaType::Void, {{
+            { QMetaType::QString, 22 }, { QMetaType::Int, 23 }, { QMetaType::Int, 24 }, { QMetaType::LongLong, 25 },
+            { QMetaType::LongLong, 26 },
+        }}),
+        // Slot 'onDirectoryDownloadStarted'
+        QtMocHelpers::SlotData<void(const QString &)>(27, 2, QMC::AccessPrivate, QMetaType::Void, {{
+            { QMetaType::QString, 28 },
+        }}),
+        // Slot 'onFileDownloadStarted'
+        QtMocHelpers::SlotData<void(const QString &)>(29, 2, QMC::AccessPrivate, QMetaType::Void, {{
+            { QMetaType::QString, 30 },
+        }}),
+        // Slot 'onFileDownloaded'
+        QtMocHelpers::SlotData<void(const QString &, bool)>(31, 2, QMC::AccessPrivate, QMetaType::Void, {{
+            { QMetaType::QString, 30 }, { QMetaType::Bool, 32 },
+        }}),
+        // Slot 'onDirectoryDownloaded'
+        QtMocHelpers::SlotData<void(const QString &)>(33, 2, QMC::AccessPrivate, QMetaType::Void, {{
+            { QMetaType::QString, 28 },
+        }}),
+        // Slot 'onAllDownloadsComplete'
+        QtMocHelpers::SlotData<void()>(34, 2, QMC::AccessPrivate, QMetaType::Void),
     };
     QtMocHelpers::UintData qt_properties {
     };
@@ -135,6 +178,14 @@ void TelescopeGUI::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _id
         case 13: _t->updateDewHeaterDisplay(); break;
         case 14: _t->updateOrientationDisplay(); break;
         case 15: _t->updateTimeDisplay(); break;
+        case 16: _t->startAutomaticDownload(); break;
+        case 17: _t->stopAutomaticDownload(); break;
+        case 18: _t->updateDownloadProgress((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1])),(*reinterpret_cast< std::add_pointer_t<int>>(_a[2])),(*reinterpret_cast< std::add_pointer_t<int>>(_a[3])),(*reinterpret_cast< std::add_pointer_t<qint64>>(_a[4])),(*reinterpret_cast< std::add_pointer_t<qint64>>(_a[5]))); break;
+        case 19: _t->onDirectoryDownloadStarted((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
+        case 20: _t->onFileDownloadStarted((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
+        case 21: _t->onFileDownloaded((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1])),(*reinterpret_cast< std::add_pointer_t<bool>>(_a[2]))); break;
+        case 22: _t->onDirectoryDownloaded((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
+        case 23: _t->onAllDownloadsComplete(); break;
         default: ;
         }
     }
@@ -159,14 +210,14 @@ int TelescopeGUI::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
     if (_id < 0)
         return _id;
     if (_c == QMetaObject::InvokeMetaMethod) {
-        if (_id < 16)
+        if (_id < 24)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 16;
+        _id -= 24;
     }
     if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
-        if (_id < 16)
+        if (_id < 24)
             *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType();
-        _id -= 16;
+        _id -= 24;
     }
     return _id;
 }
