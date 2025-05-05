@@ -50,39 +50,39 @@
 
 /* Begin PBXFileReference section */
 		1A19EC4C1AD4D902A3BC744F /* qdarwincamerapermission */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = qdarwincamerapermission; path = "/opt/homebrew/share/qt/plugins/permissions/libqdarwincamerapermission$(QT_LIBRARY_SUFFIX).a"; sourceTree = "<absolute>"; };
-		1AAB1C2001DFCED0D39230BD /* TelescopeGUI.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = TelescopeGUI.cpp; path = /Users/jonathan/OriginMonitor/TelescopeGUI.cpp; sourceTree = "<absolute>"; };
+		1AAB1C2001DFCED0D39230BD /* TelescopeGUI.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = TelescopeGUI.cpp; path = TelescopeGUI.cpp; sourceTree = "<absolute>"; };
 		1B2543FCC48E9436F21C4F63 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = /System/Library/Frameworks/Metal.framework; sourceTree = "<absolute>"; };
-		1DF5D4EE001E4955A537115F /* moc_CommandInterface.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_CommandInterface.cpp; path = /Users/jonathan/OriginMonitor/build/moc/moc_CommandInterface.cpp; sourceTree = "<absolute>"; };
+		1DF5D4EE001E4955A537115F /* moc_CommandInterface.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_CommandInterface.cpp; path = build/moc/moc_CommandInterface.cpp; sourceTree = "<absolute>"; };
 		21F907AB8D19BD779147A085 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = /System/Library/Frameworks/AVFoundation.framework; sourceTree = "<absolute>"; };
 		2B774D8E4178765CE52EAAF5 /* DiskArbitration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = DiskArbitration.framework; path = /System/Library/Frameworks/DiskArbitration.framework; sourceTree = "<absolute>"; };
-		3381C1AA85FE6C33A62B3BD1 /* CelestronOriginMonitor.pro */ = {isa = PBXFileReference; lastKnownFileType = text; name = CelestronOriginMonitor.pro; path = /Users/jonathan/OriginMonitor/CelestronOriginMonitor.pro; sourceTree = "<absolute>"; };
-		388C5447E3655250F3030A8E /* celestronoriginmonitor_plugin_import.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = celestronoriginmonitor_plugin_import.cpp; path = /Users/jonathan/OriginMonitor/celestronoriginmonitor_plugin_import.cpp; sourceTree = "<absolute>"; };
+		3381C1AA85FE6C33A62B3BD1 /* CelestronOriginMonitor.pro */ = {isa = PBXFileReference; lastKnownFileType = text; name = CelestronOriginMonitor.pro; path = CelestronOriginMonitor.pro; sourceTree = "<absolute>"; };
+		388C5447E3655250F3030A8E /* celestronoriginmonitor_plugin_import.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = celestronoriginmonitor_plugin_import.cpp; path = celestronoriginmonitor_plugin_import.cpp; sourceTree = "<absolute>"; };
 		3A8EF9C62A8D4790CBB89CEA /* ImageIO.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ImageIO.framework; path = /System/Library/Frameworks/ImageIO.framework; sourceTree = "<absolute>"; };
-		49A6EAC8502D0EA7E134FFBA /* CommandInterface.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = CommandInterface.cpp; path = /Users/jonathan/OriginMonitor/CommandInterface.cpp; sourceTree = "<absolute>"; };
+		49A6EAC8502D0EA7E134FFBA /* CommandInterface.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = CommandInterface.cpp; path = CommandInterface.cpp; sourceTree = "<absolute>"; };
 		51AFF3EE4809E09FAEE5F07D /* QtWebSockets.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QtWebSockets.framework; path = /opt/homebrew/lib/QtWebSockets.framework; sourceTree = "<absolute>"; };
 		53419A4ADDA92E410E5591BA /* QtCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QtCore.framework; path = /opt/homebrew/lib/QtCore.framework; sourceTree = "<absolute>"; };
-		53E86DC12FDD0538BF429FBC /* moc_TelescopeDataProcessor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_TelescopeDataProcessor.cpp; path = /Users/jonathan/OriginMonitor/build/moc/moc_TelescopeDataProcessor.cpp; sourceTree = "<absolute>"; };
+		53E86DC12FDD0538BF429FBC /* moc_TelescopeDataProcessor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_TelescopeDataProcessor.cpp; path = build/moc/moc_TelescopeDataProcessor.cpp; sourceTree = "<absolute>"; };
 		5F9A4B2B3FF5EC87C57CF6B4 /* UniformTypeIdentifiers.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UniformTypeIdentifiers.framework; path = /System/Library/Frameworks/UniformTypeIdentifiers.framework; sourceTree = "<absolute>"; };
-		608A9CA5FE47F12E1F418EB6 /* moc_TelescopeGUI.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_TelescopeGUI.cpp; path = /Users/jonathan/OriginMonitor/build/moc/moc_TelescopeGUI.cpp; sourceTree = "<absolute>"; };
-		6A15892B2101068DCFC2CC6C /* CommandInterface.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = CommandInterface.hpp; path = /Users/jonathan/OriginMonitor/CommandInterface.hpp; sourceTree = "<absolute>"; };
+		608A9CA5FE47F12E1F418EB6 /* moc_TelescopeGUI.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_TelescopeGUI.cpp; path = build/moc/moc_TelescopeGUI.cpp; sourceTree = "<absolute>"; };
+		6A15892B2101068DCFC2CC6C /* CommandInterface.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = CommandInterface.hpp; path = CommandInterface.hpp; sourceTree = "<absolute>"; };
 		714DE62F489E7B5EB62BD7E0 /* CelestronOriginMonitor.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CelestronOriginMonitor.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		723F90793B2C195E2CCB2233 /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppKit.framework; path = /System/Library/Frameworks/AppKit.framework; sourceTree = "<absolute>"; };
-		72CD5FAECFC6C1C5E48D69B2 /* TelescopeDataProcessor.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = TelescopeDataProcessor.hpp; path = /Users/jonathan/OriginMonitor/TelescopeDataProcessor.hpp; sourceTree = "<absolute>"; };
+		72CD5FAECFC6C1C5E48D69B2 /* TelescopeDataProcessor.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = TelescopeDataProcessor.hpp; path = TelescopeDataProcessor.hpp; sourceTree = "<absolute>"; };
 		75BB98347AA20D28579DDB5E /* QtGui.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QtGui.framework; path = /opt/homebrew/lib/QtGui.framework; sourceTree = "<absolute>"; };
-		79ABD44EA6B5D1E1C4BBC373 /* app.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; name = app.icns; path = /Users/jonathan/OriginMonitor/app.icns; sourceTree = "<absolute>"; };
-		8A407F601F3533455FB52A12 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = Info.plist; path = /Users/jonathan/OriginMonitor/Info.plist; sourceTree = "<absolute>"; };
+		79ABD44EA6B5D1E1C4BBC373 /* app.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; name = app.icns; path = app.icns; sourceTree = "<absolute>"; };
+		8A407F601F3533455FB52A12 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = Info.plist; path = Info.plist; sourceTree = "<absolute>"; };
 		8D9815BDB5BD9F90D2BC05C5 /* AGL.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AGL.framework; path = /System/Library/Frameworks/AGL.framework; sourceTree = "<absolute>"; };
-		99EC490FCEDE74CBE17A744A /* TelescopeDataProcessor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = TelescopeDataProcessor.cpp; path = /Users/jonathan/OriginMonitor/TelescopeDataProcessor.cpp; sourceTree = "<absolute>"; };
-		9E8A7A19ED1FF7D5B6F89B9C /* TelescopeData.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = TelescopeData.hpp; path = /Users/jonathan/OriginMonitor/TelescopeData.hpp; sourceTree = "<absolute>"; };
+		99EC490FCEDE74CBE17A744A /* TelescopeDataProcessor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = TelescopeDataProcessor.cpp; path = TelescopeDataProcessor.cpp; sourceTree = "<absolute>"; };
+		9E8A7A19ED1FF7D5B6F89B9C /* TelescopeData.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = TelescopeData.hpp; path = TelescopeData.hpp; sourceTree = "<absolute>"; };
 		A1A67BEAA744704B29168D39 /* IOKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOKit.framework; path = /System/Library/Frameworks/IOKit.framework; sourceTree = "<absolute>"; };
 		ABE7EA862DC8F2BF002E63E0 /* AutoDownloader.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = AutoDownloader.hpp; sourceTree = "<group>"; };
 		ABE7EA872DC8F2BF002E63E0 /* AutoDownloader.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = AutoDownloader.cpp; sourceTree = "<group>"; };
 		ABE7EA8A2DC90215002E63E0 /* moc_AutoDownloader.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_AutoDownloader.cpp; path = build/moc/moc_AutoDownloader.cpp; sourceTree = "<group>"; };
 		CBB5D29B2C34BC7472FAD754 /* QtNetwork.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QtNetwork.framework; path = /opt/homebrew/lib/QtNetwork.framework; sourceTree = "<absolute>"; };
-		D0D9E5DB1234ACDE50D6E692 /* main.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = main.cpp; path = /Users/jonathan/OriginMonitor/main.cpp; sourceTree = "<absolute>"; };
+		D0D9E5DB1234ACDE50D6E692 /* main.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = main.cpp; path = main.cpp; sourceTree = "<absolute>"; };
 		D4B32C2222F82AC56BADEB21 /* OpenGL.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = OpenGL.framework; path = /System/Library/Frameworks/OpenGL.framework; sourceTree = "<absolute>"; };
 		DC4C2E7E45CB83B707419776 /* QtWidgets.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QtWidgets.framework; path = /opt/homebrew/lib/QtWidgets.framework; sourceTree = "<absolute>"; };
-		E523E597F7572C8401E120BD /* TelescopeGUI.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = TelescopeGUI.hpp; path = /Users/jonathan/OriginMonitor/TelescopeGUI.hpp; sourceTree = "<absolute>"; };
+		E523E597F7572C8401E120BD /* TelescopeGUI.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = TelescopeGUI.hpp; path = TelescopeGUI.hpp; sourceTree = "<absolute>"; };
 		FCC237CA5AD60B9BA4447615 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = /System/Library/Frameworks/Foundation.framework; sourceTree = "<absolute>"; };
 /* End PBXFileReference section */
 
@@ -281,7 +281,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "cp -r $BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME /Users/jonathan/OriginMonitor/build";
+			shellScript = "cp -r $BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME build";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
@@ -342,7 +342,7 @@
 					"/opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/macx-clang",
 				);
 				INFOPLIST_FILE = Info.plist;
-				INSTALL_DIR = /Users/jonathan/OriginMonitor/build/;
+				INSTALL_DIR = build/;
 				LDPLUSPLUS = "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++";
 				LIBRARY_SEARCH_PATHS = (
 					/opt/homebrew/share/qt/plugins/permissions,
@@ -434,7 +434,7 @@
 					"/opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/macx-clang",
 				);
 				INFOPLIST_FILE = Info.plist;
-				INSTALL_DIR = /Users/jonathan/OriginMonitor/build/;
+				INSTALL_DIR = build/;
 				LDPLUSPLUS = "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++";
 				LIBRARY_SEARCH_PATHS = (
 					/opt/homebrew/share/qt/plugins/permissions,
