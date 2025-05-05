@@ -364,7 +364,8 @@ void TelescopeGUI::setupUI() {
     tabWidget->addTab(createDewHeaterTab(), "Dew Heater");
     tabWidget->addTab(createOrientationTab(), "Orientation");
     tabWidget->addTab(createCommandTab(), "Commands");
-    
+    tabWidget->addTab(createDownloadTab(), "Auto Download");
+   
     mainLayout->addWidget(tabWidget);
 }
 
@@ -880,3 +881,227 @@ void TelescopeGUI::updateLastUpdateLabel(QLabel *label, const QDateTime &lastUpd
         label->setText("Never");
     }
 }
+
+
+// Add the implementation of createDownloadTab()
+QWidget* TelescopeGUI::createDownloadTab() {
+    QWidget *tab = new QWidget();
+    QVBoxLayout *mainLayout = new QVBoxLayout(tab);
+    
+    // Download path selection
+    QGroupBox *pathGroup = new QGroupBox("Download Path", tab);
+    QHBoxLayout *pathLayout = new QHBoxLayout(pathGroup);
+    
+    downloadPathEdit = new QLineEdit(QDir::homePath() + "/CelestronOriginDownloads", pathGroup);
+    pathLayout->addWidget(downloadPathEdit);
+    
+    browseButton = new QPushButton("Browse", pathGroup);
+    connect(browseButton, &QPushButton::clicked, this, [this]() {
+        QString dir = QFileDialog::getExistingDirectory(this, "Select Download Directory",
+                                                      downloadPathEdit->text(),
+                                                      QFileDialog::ShowDirsOnly |
+                                                      QFileDialog::DontResolveSymlinks);
+        if (!dir.isEmpty()) {
+            downloadPathEdit->setText(dir);
+        }
+    });
+    pathLayout->addWidget(browseButton);
+    
+    mainLayout->addWidget(pathGroup);
+    
+    // Control buttons
+    QHBoxLayout *controlLayout = new QHBoxLayout();
+    
+    startDownloadButton = new QPushButton("Start Automatic Download", tab);
+    connect(startDownloadButton, &QPushButton::clicked, this, &TelescopeGUI::startAutomaticDownload);
+    controlLayout->addWidget(startDownloadButton);
+    
+    stopDownloadButton = new QPushButton("Stop Download", tab);
+    stopDownloadButton->setEnabled(false);
+    connect(stopDownloadButton, &QPushButton::clicked, this, &TelescopeGUI::stopAutomaticDownload);
+    controlLayout->addWidget(stopDownloadButton);
+    
+    mainLayout->addLayout(controlLayout);
+    
+    // Progress display
+    QGroupBox *progressGroup = new QGroupBox("Download Progress", tab);
+    QVBoxLayout *progressLayout = new QVBoxLayout(progressGroup);
+    
+    QLabel *overallLabel = new QLabel("Overall Progress:", progressGroup);
+    progressLayout->addWidget(overallLabel);
+    
+    overallProgressBar = new QProgressBar(progressGroup);
+    overallProgressBar->setRange(0, 100);
+    overallProgressBar->setValue(0);
+    progressLayout->addWidget(overallProgressBar);
+    
+    currentFileLabel = new QLabel("Current File:", progressGroup);
+    progressLayout->addWidget(currentFileLabel);
+    
+    currentFileProgressBar = new QProgressBar(progressGroup);
+    currentFileProgressBar->setRange(0, 100);
+    currentFileProgressBar->setValue(0);
+    progressLayout->addWidget(currentFileProgressBar);
+    
+    mainLayout->addWidget(progressGroup);
+    
+    // Download log
+    QGroupBox *logGroup = new QGroupBox("Download Log", tab);
+    QVBoxLayout *logLayout = new QVBoxLayout(logGroup);
+    
+    downloadLogList = new QListWidget(logGroup);
+    logLayout->addWidget(downloadLogList);
+    
+    mainLayout->addWidget(logGroup);
+    
+    return tab;
+}
+
+// Add the implementation of startAutomaticDownload()
+void TelescopeGUI::startAutomaticDownload() {
+    if (!isConnected) {
+        QMessageBox::warning(this, "Not Connected", "Please connect to a telescope first");
+        return;
+    }
+    
+    if (isDownloading) {
+        return;
+    }
+    
+    QString downloadPath = downloadPathEdit->text();
+    
+    // Create directory if it doesn't exist
+    QDir dir(downloadPath);
+    if (!dir.exists()) {
+        if (!dir.mkpath(".")) {
+            QMessageBox::warning(this, "Error", "Failed to create download directory");
+            return;
+        }
+    }
+    
+    // Create auto downloader if needed
+    if (!autoDownloader) {
+        autoDownloader = new AutoDownloader(webSocket, connectedIpAddress, downloadPath, this);
+        
+        // Connect signals
+        connect(autoDownloader, &AutoDownloader::directoryDownloadStarted, 
+                this, &TelescopeGUI::onDirectoryDownloadStarted);
+        connect(autoDownloader, &AutoDownloader::fileDownloadStarted, 
+                this, &TelescopeGUI::onFileDownloadStarted);
+        connect(autoDownloader, &AutoDownloader::fileDownloaded, 
+                this, &TelescopeGUI::onFileDownloaded);
+        connect(autoDownloader, &AutoDownloader::directoryDownloaded, 
+                this, &TelescopeGUI::onDirectoryDownloaded);
+        connect(autoDownloader, &AutoDownloader::allDownloadsComplete, 
+                this, &TelescopeGUI::onAllDownloadsComplete);
+        connect(autoDownloader, &AutoDownloader::downloadProgress, 
+                this, &TelescopeGUI::updateDownloadProgress);
+    } else {
+        // Update download path
+        autoDownloader->setDownloadPath(downloadPath);
+    }
+    
+    // Start download
+    isDownloading = true;
+    startDownloadButton->setEnabled(false);
+    stopDownloadButton->setEnabled(true);
+    browseButton->setEnabled(false);
+    downloadPathEdit->setEnabled(false);
+    
+    // Reset progress indicators
+    overallProgressBar->setValue(0);
+    currentFileProgressBar->setValue(0);
+    currentFileLabel->setText("Current File: Initializing...");
+    
+    // Clear log
+    downloadLogList->clear();
+    
+    // Add start entry to log
+    QListWidgetItem *item = new QListWidgetItem(QString("Starting automatic download to %1").arg(downloadPath));
+    downloadLogList->addItem(item);
+    downloadLogList->scrollToBottom();
+    
+    // Start the download
+    autoDownloader->startDownload();
+}
+
+// Add the implementation of stopAutomaticDownload()
+void TelescopeGUI::stopAutomaticDownload() {
+    if (!isDownloading || !autoDownloader) {
+        return;
+    }
+    
+    // Stop the download
+    autoDownloader->stopDownload();
+    
+    // Update UI
+    isDownloading = false;
+    startDownloadButton->setEnabled(true);
+    stopDownloadButton->setEnabled(false);
+    browseButton->setEnabled(true);
+    downloadPathEdit->setEnabled(true);
+    
+    // Add stop entry to log
+    QListWidgetItem *item = new QListWidgetItem("Download stopped by user");
+    downloadLogList->addItem(item);
+    downloadLogList->scrollToBottom();
+}
+
+// Add the implementation of updateDownloadProgress()
+void TelescopeGUI::updateDownloadProgress(const QString &currentFile, int filesCompleted, 
+                                        int totalFiles, qint64 bytesReceived, qint64 bytesTotal) {
+    // Update current file progress
+    if (bytesTotal > 0) {
+        int percent = (int)((bytesReceived * 100) / bytesTotal);
+        currentFileProgressBar->setValue(percent);
+    }
+    
+    // Update current file label
+    currentFileLabel->setText(QString("Current File: %1").arg(currentFile));
+    
+    // Update overall progress
+    if (totalFiles > 0) {
+        int percent = (int)((filesCompleted * 100) / totalFiles);
+        overallProgressBar->setValue(percent);
+    }
+}
+
+// Add the implementation of event handlers
+void TelescopeGUI::onDirectoryDownloadStarted(const QString &directory) {
+    QListWidgetItem *item = new QListWidgetItem(QString("Starting download of directory: %1").arg(directory));
+    downloadLogList->addItem(item);
+    downloadLogList->scrollToBottom();
+}
+
+void TelescopeGUI::onFileDownloadStarted(const QString &fileName) {
+    QListWidgetItem *item = new QListWidgetItem(QString("Downloading: %1").arg(fileName));
+    downloadLogList->addItem(item);
+    downloadLogList->scrollToBottom();
+}
+
+void TelescopeGUI::onFileDownloaded(const QString &fileName, bool success) {
+    QString status = success ? "Success" : "Failed";
+    QListWidgetItem *item = new QListWidgetItem(QString("Download %1: %2").arg(status, fileName));
+    downloadLogList->addItem(item);
+    downloadLogList->scrollToBottom();
+}
+
+void TelescopeGUI::onDirectoryDownloaded(const QString &directory) {
+    QListWidgetItem *item = new QListWidgetItem(QString("Completed download of directory: %1").arg(directory));
+    downloadLogList->addItem(item);
+    downloadLogList->scrollToBottom();
+}
+
+void TelescopeGUI::onAllDownloadsComplete() {
+    QListWidgetItem *item = new QListWidgetItem("All downloads complete!");
+    downloadLogList->addItem(item);
+    downloadLogList->scrollToBottom();
+    
+    // Update UI
+    isDownloading = false;
+    startDownloadButton->setEnabled(true);
+    stopDownloadButton->setEnabled(false);
+    browseButton->setEnabled(true);
+    downloadPathEdit->setEnabled(true);
+}
+

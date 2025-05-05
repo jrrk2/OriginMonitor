@@ -17,7 +17,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
-// #include <QFile>
+#include <QFileDialog>
 #include <QTextStream>
 #include <QJsonObject>
 #include <QJsonDocument>
@@ -26,6 +26,7 @@
 
 #include "TelescopeDataProcessor.hpp"
 #include "CommandInterface.hpp"
+#include "AutoDownloader.hpp"
 
 /**
  * @brief Main application window for the telescope monitor
@@ -127,6 +128,56 @@ private slots:
      * @brief Update the time display
      */
     void updateTimeDisplay();
+    /**
+     * @brief Start automatic download of observations
+     */
+    void startAutomaticDownload();
+    
+    /**
+     * @brief Stop automatic download of observations
+     */
+    void stopAutomaticDownload();
+    
+    /**
+     * @brief Update download progress
+     * @param currentFile The current file being downloaded
+     * @param filesCompleted The number of files completed
+     * @param totalFiles The total number of files to download
+     * @param bytesReceived The number of bytes received for the current file
+     * @param bytesTotal The total number of bytes for the current file
+     */
+    void updateDownloadProgress(const QString &currentFile, int filesCompleted, 
+                              int totalFiles, qint64 bytesReceived, qint64 bytesTotal);
+    
+    /**
+     * @brief Handle when a directory download starts
+     * @param directory The name of the directory
+     */
+    void onDirectoryDownloadStarted(const QString &directory);
+    
+    /**
+     * @brief Handle when a file download starts
+     * @param fileName The name of the file
+     */
+    void onFileDownloadStarted(const QString &fileName);
+    
+    /**
+     * @brief Handle when a file has been downloaded
+     * @param fileName The name of the file
+     * @param success Whether the download was successful
+     */
+    void onFileDownloaded(const QString &fileName, bool success);
+    
+    /**
+     * @brief Handle when a directory has been downloaded
+     * @param directory The name of the directory
+     */
+    void onDirectoryDownloaded(const QString &directory);
+    
+    /**
+     * @brief Handle when all downloads are complete
+     */
+    void onAllDownloadsComplete();
     
 private:
     /**
@@ -168,7 +219,7 @@ private:
     void analyzeImageForFocus(const QByteArray &imageData);
     // Optionally add a variable to store focus scores
     QList<double> focusScores;
-  
+
     // Tab creation methods
     QWidget* createMountTab();
     QWidget* createCameraTab();
@@ -179,6 +230,7 @@ private:
     QWidget* createDewHeaterTab();
     QWidget* createOrientationTab();
     QWidget* createCommandTab();
+    QWidget* createDownloadTab();
     
     // Class members
     TelescopeDataProcessor *dataProcessor;
@@ -272,5 +324,22 @@ private:
     QLabel *orientationLastUpdateLabel;
 
     CommandInterface *commandInterface;
+
+   // Download tab widgets
+    QLineEdit *downloadPathEdit;
+    QPushButton *browseButton;
+    QPushButton *startDownloadButton;
+    QPushButton *stopDownloadButton;
+    QProgressBar *overallProgressBar;
+    QProgressBar *currentFileProgressBar;
+    QLabel *currentFileLabel;
+    QListWidget *downloadLogList;
+    
+    // Auto downloader
+    AutoDownloader *autoDownloader;
+    bool isDownloading = false;
+    
     bool debug = false;
+
+  
 };
