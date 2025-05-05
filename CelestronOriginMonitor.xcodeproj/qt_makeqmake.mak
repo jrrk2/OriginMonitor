@@ -353,7 +353,6 @@ CelestronOriginMonitor.xcodeproj/project.pbxproj: CelestronOriginMonitor.pro /op
 		/opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/macx-clang/qmake.conf \
 		/opt/homebrew/share/qt/mkspecs/macx-xcode/qmake.conf \
 		/opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/features/spec_post.prf \
-		.qmake.stash \
 		/opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/features/exclusive_builds.prf \
 		/opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/features/mac/sdk.prf \
 		/opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/features/toolchain.prf \
@@ -734,7 +733,6 @@ CelestronOriginMonitor.xcodeproj/project.pbxproj: CelestronOriginMonitor.pro /op
 /opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/macx-clang/qmake.conf:
 /opt/homebrew/share/qt/mkspecs/macx-xcode/qmake.conf:
 /opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/features/spec_post.prf:
-.qmake.stash:
 /opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/features/exclusive_builds.prf:
 /opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/features/mac/sdk.prf:
 /opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/features/toolchain.prf:

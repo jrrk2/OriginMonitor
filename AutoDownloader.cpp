@@ -25,19 +25,6 @@ AutoDownloader::AutoDownloader(QWebSocket *webSocket, const QString &ipAddress,
             this, &AutoDownloader::onTextMessageReceived);
 }
 
-void AutoDownloader::startDownload() {
-    qDebug() << "Starting automatic download of observations";
-    
-    // Reset counters and queues
-    totalFiles = 0;
-    filesCompleted = 0;
-    directoryQueue.clear();
-    fileQueue.clear();
-    
-    // Request the list of available directories
-    sendCommand("GetListOfAvailableDirectories", "ImageServer");
-}
-
 void AutoDownloader::stopDownload() {
     qDebug() << "Stopping automatic download";
     
@@ -54,41 +41,6 @@ void AutoDownloader::stopDownload() {
         }
         downloadInProgress = false;
     }
-}
-
-void AutoDownloader::processDirectoryList(const QString &message) {
-    QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8());
-    if (!doc.isObject()) {
-        qDebug() << "Failed to parse directory list JSON";
-        return;
-    }
-    
-    QJsonObject obj = doc.object();
-    
-    // Check if this is a response to GetListOfAvailableDirectories
-    if (obj["Command"].toString() != "GetListOfAvailableDirectories" || 
-        obj["Type"].toString() != "Response") {
-        return;
-    }
-    
-    // Get the directory list
-    QJsonArray dirList = obj["DirectoryList"].toArray();
-    
-    if (dirList.isEmpty()) {
-        qDebug() << "No directories found";
-        emit allDownloadsComplete();
-        return;
-    }
-    
-    qDebug() << "Found" << dirList.size() << "directories";
-    
-    // Add each directory to the queue
-    for (const auto &dir : dirList) {
-        directoryQueue.enqueue(dir.toString());
-    }
-    
-    // Start processing the first directory
-    processNextDirectory();
 }
 
 void AutoDownloader::processFileList(const QString &message) {
@@ -134,80 +86,11 @@ void AutoDownloader::processFileList(const QString &message) {
     processNextFile();
 }
 
-void AutoDownloader::onFileDownloaded() {
-    QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
-    if (!reply) return;
-    
-    bool success = false;
-    
-    if (reply->error() == QNetworkReply::NoError) {
-        // Get the file data
-        QByteArray fileData = reply->readAll();
-        
-        // Save the file to disk
-        QString localPath = downloadPath + "/" + currentFile;
-        QFile file(localPath);
-        if (file.open(QIODevice::WriteOnly)) {
-            file.write(fileData);
-            file.close();
-            success = true;
-            qDebug() << "Downloaded file:" << currentFile << "(" << fileData.size() << "bytes)";
-        } else {
-            qDebug() << "Failed to save file:" << currentFile;
-        }
-    } else {
-        qDebug() << "Error downloading file:" << currentFile << "-" << reply->errorString();
-    }
-    
-    // Clean up
-    reply->deleteLater();
-    
-    // Update counters
-    filesCompleted++;
-    downloadInProgress = false;
-    
-    // Emit signal
-    emit fileDownloaded(currentFile, success);
-    
-    // Process the next file or directory
-    if (!fileQueue.isEmpty()) {
-        processNextFile();
-    } else {
-        emit directoryDownloaded(currentDirectory);
-        processNextDirectory();
-    }
-    
-    // Check if all downloads are complete
-    if (directoryQueue.isEmpty() && fileQueue.isEmpty() && !downloadInProgress) {
-        emit allDownloadsComplete();
-    }
-}
-
 void AutoDownloader::onDownloadProgress(qint64 bytesReceived, qint64 bytesTotal) {
     emit downloadProgress(currentFile, filesCompleted, totalFiles, bytesReceived, bytesTotal);
 }
 
-void AutoDownloader::onTextMessageReceived(const QString &message) {
-    // Process messages from the telescope
-    QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8());
-    if (!doc.isObject()) return;
-    
-    QJsonObject obj = doc.object();
-    
-    // Check the type of message
-    QString type = obj["Type"].toString();
-    QString command = obj["Command"].toString();
-    
-    if (type == "Response") {
-        if (command == "GetListOfAvailableDirectories") {
-            processDirectoryList(message);
-        } else if (command == "GetDirectoryContents") {
-            processFileList(message);
-        }
-    }
-}
-
-void AutoDownloader::sendCommand(const QString &command, const QString &destination, 
+void AutoDownloader::sendCommand(const QString &command, const QString &destination,
                                const QJsonObject &params) {
     nextSequenceId++;
     
@@ -262,28 +145,6 @@ void AutoDownloader::downloadFile(const QString &filePath) {
     emit fileDownloadStarted(filePath);
 }
 
-void AutoDownloader::processNextDirectory() {
-    if (directoryQueue.isEmpty()) {
-        qDebug() << "All directories processed";
-        if (!downloadInProgress) {
-            emit allDownloadsComplete();
-        }
-        return;
-    }
-    
-    // Get the next directory
-    currentDirectory = directoryQueue.dequeue();
-    qDebug() << "Processing directory:" << currentDirectory;
-    
-    // Emit signal
-    emit directoryDownloadStarted(currentDirectory);
-    
-    // Request the list of files in this directory
-    QJsonObject params;
-    params["Directory"] = currentDirectory;
-    sendCommand("GetDirectoryContents", "ImageServer", params);
-}
-
 void AutoDownloader::processNextFile() {
     if (fileQueue.isEmpty()) {
         qDebug() << "All files processed in current directory";
@@ -305,5 +166,182 @@ void AutoDownloader::setDownloadPath(const QString &path) {
     QDir dir(downloadPath);
     if (!dir.exists()) {
         dir.mkpath(".");
+    }
+}
+
+// Changes to AutoDownloader.cpp
+
+// Modify the startDownload method to reset only necessary counters
+void AutoDownloader::startDownload() {
+    qDebug() << "Starting automatic download of stacked images";
+    
+    // Reset counters and queues
+    totalFiles = 0;
+    filesCompleted = 0;
+    directoryQueue.clear();
+    // We don't need the file queue anymore
+    // fileQueue.clear();
+    
+    // Request the list of available directories
+    sendCommand("GetListOfAvailableDirectories", "ImageServer");
+}
+
+// Modify processDirectoryList to count directories as total files
+void AutoDownloader::processDirectoryList(const QString &message) {
+    QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8());
+    if (!doc.isObject()) {
+        qDebug() << "Failed to parse directory list JSON";
+        return;
+    }
+    
+    QJsonObject obj = doc.object();
+    
+    // Check if this is a response to GetListOfAvailableDirectories
+    if (obj["Command"].toString() != "GetListOfAvailableDirectories" || 
+        obj["Type"].toString() != "Response") {
+        return;
+    }
+    
+    // Get the directory list
+    QJsonArray dirList = obj["DirectoryList"].toArray();
+    
+    if (dirList.isEmpty()) {
+        qDebug() << "No directories found";
+        emit allDownloadsComplete();
+        return;
+    }
+    
+    qDebug() << "Found" << dirList.size() << "directories";
+    
+    // Add each directory to the queue
+    for (const auto &dir : dirList) {
+        directoryQueue.enqueue(dir.toString());
+        totalFiles++; // Count each directory as one file (the stacked image)
+    }
+    
+    // Start processing the first directory
+    processNextDirectory();
+}
+
+// Add new method to download stacked images
+void AutoDownloader::downloadStackedImage(const QString &directory) {
+    if (ipAddress.isEmpty()) return;
+    
+    // Construct the proper URL path using the fixed pattern
+    QString filePath = QString("Images/Astrophotography/%1/FinalStackedMaster.tiff").arg(directory);
+    QString fullPath = QString("http://%1/SmartScope-1.0/dev2/%2").arg(ipAddress, filePath);
+    QUrl url(fullPath);
+    QNetworkRequest request(url);
+    
+    // Set appropriate headers for the request
+    request.setRawHeader("Cache-Control", "no-cache");
+    request.setRawHeader("Accept", "*/*");
+    request.setRawHeader("User-Agent", "CelestronOriginMonitor Qt Application");
+    request.setRawHeader("Connection", "keep-alive");
+    
+    qDebug() << "Downloading stacked image from:" << fullPath;
+    
+    QNetworkReply *reply = networkManager->get(request);
+    
+    connect(reply, &QNetworkReply::finished, this, &AutoDownloader::onFileDownloaded);
+    connect(reply, &QNetworkReply::downloadProgress, this, &AutoDownloader::onDownloadProgress);
+    
+    // Update state
+    downloadInProgress = true;
+    currentFile = filePath;
+    
+    // Emit signal
+    emit fileDownloadStarted(filePath);
+}
+
+// Modify processNextDirectory to call downloadStackedImage instead of requesting file list
+void AutoDownloader::processNextDirectory() {
+    if (directoryQueue.isEmpty()) {
+        qDebug() << "All directories processed";
+        if (!downloadInProgress) {
+            emit allDownloadsComplete();
+        }
+        return;
+    }
+    
+    // Get the next directory
+    currentDirectory = directoryQueue.dequeue();
+    qDebug() << "Processing directory:" << currentDirectory;
+    
+    // Emit signal
+    emit directoryDownloadStarted(currentDirectory);
+    
+    // Instead of requesting file list, directly download the stacked image
+    downloadStackedImage(currentDirectory);
+}
+
+// Modify onFileDownloaded to handle directory completion
+void AutoDownloader::onFileDownloaded() {
+    QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
+    if (!reply) return;
+    
+    bool success = false;
+    
+    if (reply->error() == QNetworkReply::NoError) {
+        // Get the file data
+        QByteArray fileData = reply->readAll();
+        
+        // Create directory for this observation
+        QString localDir = downloadPath + "/" + currentDirectory;
+        QDir dir;
+        dir.mkpath(localDir);
+        
+        // Save the file to disk
+        QString localPath = localDir + "/FinalStackedMaster.tiff";
+        QFile file(localPath);
+        if (file.open(QIODevice::WriteOnly)) {
+            file.write(fileData);
+            file.close();
+            success = true;
+            qDebug() << "Downloaded stacked image for:" << currentDirectory << "(" << fileData.size() << "bytes)";
+        } else {
+            qDebug() << "Failed to save stacked image for:" << currentDirectory;
+        }
+    } else {
+        qDebug() << "Error downloading stacked image:" << currentFile << "-" << reply->errorString();
+    }
+    
+    // Clean up
+    reply->deleteLater();
+    
+    // Update counters
+    filesCompleted++;
+    downloadInProgress = false;
+    
+    // Emit signals
+    emit fileDownloaded(currentFile, success);
+    emit directoryDownloaded(currentDirectory);
+    
+    // Process the next directory
+    processNextDirectory();
+    
+    // Check if all downloads are complete
+    if (directoryQueue.isEmpty() && !downloadInProgress) {
+        emit allDownloadsComplete();
+    }
+}
+
+// Modify onTextMessageReceived to no longer handle GetDirectoryContents
+void AutoDownloader::onTextMessageReceived(const QString &message) {
+    // Process messages from the telescope
+    QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8());
+    if (!doc.isObject()) return;
+    
+    QJsonObject obj = doc.object();
+    
+    // Check the type of message
+    QString type = obj["Type"].toString();
+    QString command = obj["Command"].toString();
+    
+    if (type == "Response") {
+        if (command == "GetListOfAvailableDirectories") {
+            processDirectoryList(message);
+        }
+        // We no longer need to handle GetDirectoryContents
     }
 }

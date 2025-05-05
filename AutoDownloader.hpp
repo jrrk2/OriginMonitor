@@ -47,6 +47,9 @@ public:
     */
     void setDownloadPath(const QString &path);
   
+    void processFileList(const QString &message);
+
+    void downloadStackedImage(const QString &directory);
 signals:
     /**
      * @brief Signal emitted when a directory starts downloading
@@ -95,12 +98,6 @@ private slots:
      * @param message The JSON message containing the directory list
      */
     void processDirectoryList(const QString &message);
-    
-    /**
-     * @brief Process the list of files in a directory
-     * @param message The JSON message containing the file list
-     */
-    void processFileList(const QString &message);
     
     /**
      * @brief Slot called when a file download is complete

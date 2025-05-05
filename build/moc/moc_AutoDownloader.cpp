@@ -56,7 +56,6 @@ template <> constexpr inline auto AutoDownloader::qt_create_metaobjectdata<qt_me
         "bytesTotal",
         "processDirectoryList",
         "message",
-        "processFileList",
         "onFileDownloaded",
         "onDownloadProgress",
         "onTextMessageReceived"
@@ -90,18 +89,14 @@ template <> constexpr inline auto AutoDownloader::qt_create_metaobjectdata<qt_me
         QtMocHelpers::SlotData<void(const QString &)>(16, 2, QMC::AccessPrivate, QMetaType::Void, {{
             { QMetaType::QString, 17 },
         }}),
-        // Slot 'processFileList'
-        QtMocHelpers::SlotData<void(const QString &)>(18, 2, QMC::AccessPrivate, QMetaType::Void, {{
-            { QMetaType::QString, 17 },
-        }}),
         // Slot 'onFileDownloaded'
-        QtMocHelpers::SlotData<void()>(19, 2, QMC::AccessPrivate, QMetaType::Void),
+        QtMocHelpers::SlotData<void()>(18, 2, QMC::AccessPrivate, QMetaType::Void),
         // Slot 'onDownloadProgress'
-        QtMocHelpers::SlotData<void(qint64, qint64)>(20, 2, QMC::AccessPrivate, QMetaType::Void, {{
+        QtMocHelpers::SlotData<void(qint64, qint64)>(19, 2, QMC::AccessPrivate, QMetaType::Void, {{
             { QMetaType::LongLong, 14 }, { QMetaType::LongLong, 15 },
         }}),
         // Slot 'onTextMessageReceived'
-        QtMocHelpers::SlotData<void(const QString &)>(21, 2, QMC::AccessPrivate, QMetaType::Void, {{
+        QtMocHelpers::SlotData<void(const QString &)>(20, 2, QMC::AccessPrivate, QMetaType::Void, {{
             { QMetaType::QString, 17 },
         }}),
     };
@@ -134,10 +129,9 @@ void AutoDownloader::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _
         case 4: _t->allDownloadsComplete(); break;
         case 5: _t->downloadProgress((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1])),(*reinterpret_cast< std::add_pointer_t<int>>(_a[2])),(*reinterpret_cast< std::add_pointer_t<int>>(_a[3])),(*reinterpret_cast< std::add_pointer_t<qint64>>(_a[4])),(*reinterpret_cast< std::add_pointer_t<qint64>>(_a[5]))); break;
         case 6: _t->processDirectoryList((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
-        case 7: _t->processFileList((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
-        case 8: _t->onFileDownloaded(); break;
-        case 9: _t->onDownloadProgress((*reinterpret_cast< std::add_pointer_t<qint64>>(_a[1])),(*reinterpret_cast< std::add_pointer_t<qint64>>(_a[2]))); break;
-        case 10: _t->onTextMessageReceived((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
+        case 7: _t->onFileDownloaded(); break;
+        case 8: _t->onDownloadProgress((*reinterpret_cast< std::add_pointer_t<qint64>>(_a[1])),(*reinterpret_cast< std::add_pointer_t<qint64>>(_a[2]))); break;
+        case 9: _t->onTextMessageReceived((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
         default: ;
         }
     }
@@ -176,14 +170,14 @@ int AutoDownloader::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
     if (_id < 0)
         return _id;
     if (_c == QMetaObject::InvokeMetaMethod) {
-        if (_id < 11)
+        if (_id < 10)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 11;
+        _id -= 10;
     }
     if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
-        if (_id < 11)
+        if (_id < 10)
             *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType();
-        _id -= 11;
+        _id -= 10;
     }
     return _id;
 }
