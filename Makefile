@@ -98,3 +98,6 @@ debug:
 
 open: build/exported/CelestronOriginMonitor.app
 	open build/exported/CelestronOriginMonitor.app
+
+moc:
+	for i in moc_AutoDownloader.cpp moc_CommandInterface.cpp moc_TelescopeDataProcessor.cpp moc_TelescopeGUI.cpp; do /opt/homebrew/Cellar/qt/6.9.0/share/qt/libexec/moc `echo $$i|sed -e 's=^moc_==' -e 's=.cpp=.hpp='` -o build/moc/$$i; done

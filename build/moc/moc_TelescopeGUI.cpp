@@ -7,8 +7,6 @@
 *****************************************************************************/
 
 #include "../../TelescopeGUI.hpp"
-#include <QtGui/qtextcursor.h>
-#include <QtNetwork/QSslError>
 #include <QtCore/qmetatype.h>
 
 #include <QtCore/qtmochelpers.h>
@@ -74,7 +72,14 @@ template <> constexpr inline auto TelescopeGUI::qt_create_metaobjectdata<qt_meta
         "onFileDownloaded",
         "success",
         "onDirectoryDownloaded",
-        "onAllDownloadsComplete"
+        "onAllDownloadsComplete",
+        "startSlewAndImage",
+        "cancelSlewAndImage",
+        "slewAndImageTimerTimeout",
+        "updateSlewAndImageStatus",
+        "initializeTelescope",
+        "startTelescopeAlignment",
+        "checkMountStatus"
     };
 
     QtMocHelpers::UintData qt_methods {
@@ -139,6 +144,20 @@ template <> constexpr inline auto TelescopeGUI::qt_create_metaobjectdata<qt_meta
         }}),
         // Slot 'onAllDownloadsComplete'
         QtMocHelpers::SlotData<void()>(34, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'startSlewAndImage'
+        QtMocHelpers::SlotData<void()>(35, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'cancelSlewAndImage'
+        QtMocHelpers::SlotData<void()>(36, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'slewAndImageTimerTimeout'
+        QtMocHelpers::SlotData<void()>(37, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'updateSlewAndImageStatus'
+        QtMocHelpers::SlotData<void()>(38, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'initializeTelescope'
+        QtMocHelpers::SlotData<void()>(39, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'startTelescopeAlignment'
+        QtMocHelpers::SlotData<void()>(40, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'checkMountStatus'
+        QtMocHelpers::SlotData<void()>(41, 2, QMC::AccessPrivate, QMetaType::Void),
     };
     QtMocHelpers::UintData qt_properties {
     };
@@ -186,6 +205,13 @@ void TelescopeGUI::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _id
         case 21: _t->onFileDownloaded((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1])),(*reinterpret_cast< std::add_pointer_t<bool>>(_a[2]))); break;
         case 22: _t->onDirectoryDownloaded((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
         case 23: _t->onAllDownloadsComplete(); break;
+        case 24: _t->startSlewAndImage(); break;
+        case 25: _t->cancelSlewAndImage(); break;
+        case 26: _t->slewAndImageTimerTimeout(); break;
+        case 27: _t->updateSlewAndImageStatus(); break;
+        case 28: _t->initializeTelescope(); break;
+        case 29: _t->startTelescopeAlignment(); break;
+        case 30: _t->checkMountStatus(); break;
         default: ;
         }
     }
@@ -210,14 +236,14 @@ int TelescopeGUI::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
     if (_id < 0)
         return _id;
     if (_c == QMetaObject::InvokeMetaMethod) {
-        if (_id < 24)
+        if (_id < 31)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 24;
+        _id -= 31;
     }
     if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
-        if (_id < 24)
+        if (_id < 31)
             *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType();
-        _id -= 24;
+        _id -= 31;
     }
     return _id;
 }

@@ -364,8 +364,9 @@ void TelescopeGUI::setupUI() {
     tabWidget->addTab(createDewHeaterTab(), "Dew Heater");
     tabWidget->addTab(createOrientationTab(), "Orientation");
     tabWidget->addTab(createCommandTab(), "Commands");
+    tabWidget->addTab(createSlewAndImageTab(), "Slew && Image");   
     tabWidget->addTab(createDownloadTab(), "Auto Download");
-   
+    
     mainLayout->addWidget(tabWidget);
 }
 
@@ -1103,5 +1104,484 @@ void TelescopeGUI::onAllDownloadsComplete() {
     stopDownloadButton->setEnabled(false);
     browseButton->setEnabled(true);
     downloadPathEdit->setEnabled(true);
+}
+
+QWidget* TelescopeGUI::createSlewAndImageTab() {
+    QWidget *tab = new QWidget();
+    QVBoxLayout *mainLayout = new QVBoxLayout(tab);
+    
+    // Initialize section
+    QGroupBox *initGroup = new QGroupBox("Telescope Initialization", tab);
+    QVBoxLayout *initLayout = new QVBoxLayout(initGroup);
+    
+    // Status display
+    QHBoxLayout *statusLayout = new QHBoxLayout();
+    statusLayout->addWidget(new QLabel("Alignment Status:"));
+    alignmentStatusLabel = new QLabel("Unknown", initGroup);
+    statusLayout->addWidget(alignmentStatusLabel);
+    
+    statusLayout->addWidget(new QLabel("Mount Status:"));
+    mountStatusLabel = new QLabel("Unknown", initGroup);
+    statusLayout->addWidget(mountStatusLabel);
+    
+    initLayout->addLayout(statusLayout);
+    
+    // Initialization button
+    QHBoxLayout *initButtonLayout = new QHBoxLayout();
+    initializeButton = new QPushButton("Initialize Telescope", initGroup);
+    connect(initializeButton, &QPushButton::clicked, this, &TelescopeGUI::initializeTelescope);
+    initButtonLayout->addWidget(initializeButton);
+    
+    // Auto align button (if needed later)
+    autoAlignButton = new QPushButton("Start Alignment (if needed)", initGroup);
+    connect(autoAlignButton, &QPushButton::clicked, this, &TelescopeGUI::startTelescopeAlignment);
+    autoAlignButton->setEnabled(false); // Disabled initially
+    initButtonLayout->addWidget(autoAlignButton);
+    
+    initLayout->addLayout(initButtonLayout);
+    
+    mainLayout->addWidget(initGroup);
+    
+    // Target selection section (existing code)
+    QGroupBox *targetGroup = new QGroupBox("Target Selection", tab);
+    QGridLayout *targetLayout = new QGridLayout(targetGroup);
+    
+    // Built-in targets
+    targetLayout->addWidget(new QLabel("Select Target:"), 0, 0);
+    targetComboBox = new QComboBox(targetGroup);
+    
+    // Add some common targets with their J2000 coordinates
+    targetComboBox->addItem("Custom Coordinates");
+    targetComboBox->addItem("Cor Caroli - α CVn", "12h56m01.67s +38°19'06.2\"");
+    targetComboBox->addItem("Mizar - ζ UMa", "13h23m55.5s +54°55'31\"");
+    targetComboBox->addItem("Vega - α Lyr", "18h36m56.3s +38°47'01\"");
+    targetComboBox->addItem("Deneb - α Cyg", "20h41m25.9s +45°16'49\"");
+    targetComboBox->addItem("Altair - α Aql", "19h50m47.0s +08°52'06\"");
+    targetComboBox->addItem("Polaris - α UMi", "02h31m49.1s +89°15'51\"");
+    targetComboBox->addItem("M31 - Andromeda Galaxy", "00h42m44.3s +41°16'09\"");
+    targetComboBox->addItem("M42 - Orion Nebula", "05h35m17.3s -05°23'28\"");
+    targetComboBox->addItem("M45 - Pleiades", "03h47m24.0s +24°07'00\"");
+    targetComboBox->addItem("M51 - Whirlpool Galaxy", "13h29m52.7s +47°11'43\"");
+    
+    targetLayout->addWidget(targetComboBox, 0, 1);
+    
+    // Custom coordinates for when "Custom Coordinates" is selected
+    QGroupBox *customGroup = new QGroupBox("Custom Target", targetGroup);
+    QGridLayout *customLayout = new QGridLayout(customGroup);
+    
+    customLayout->addWidget(new QLabel("Name:"), 0, 0);
+    customNameEdit = new QLineEdit(customGroup);
+    customNameEdit->setPlaceholderText("Enter target name");
+    customLayout->addWidget(customNameEdit, 0, 1);
+    
+    customLayout->addWidget(new QLabel("RA (decimal hours):"), 1, 0);
+    customRaEdit = new QLineEdit(customGroup);
+    customRaEdit->setPlaceholderText("e.g. 12.934");
+    customLayout->addWidget(customRaEdit, 1, 1);
+    
+    customLayout->addWidget(new QLabel("Dec (decimal degrees):"), 2, 0);
+    customDecEdit = new QLineEdit(customGroup);
+    customDecEdit->setPlaceholderText("e.g. 38.318");
+    customLayout->addWidget(customDecEdit, 2, 1);
+    
+    // Connect the combo box selection change to enable/disable custom fields
+    connect(targetComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), 
+            [this](int index) {
+        bool isCustom = (index == 0);
+        customNameEdit->setEnabled(isCustom);
+        customRaEdit->setEnabled(isCustom);
+        customDecEdit->setEnabled(isCustom);
+    });
+    
+    // Initially disable custom fields if not on custom option
+    bool isCustom = (targetComboBox->currentIndex() == 0);
+    customNameEdit->setEnabled(isCustom);
+    customRaEdit->setEnabled(isCustom);
+    customDecEdit->setEnabled(isCustom);
+    
+    targetLayout->addWidget(customGroup, 1, 0, 1, 2);
+    
+    // Duration section
+    QGroupBox *durationGroup = new QGroupBox("Imaging Duration", tab);
+    QHBoxLayout *durationLayout = new QHBoxLayout(durationGroup);
+    
+    durationLayout->addWidget(new QLabel("Image for:"));
+    durationSpinBox = new QSpinBox(durationGroup);
+    durationSpinBox->setRange(1, 3600);  // 1 second to 1 hour
+    durationSpinBox->setValue(300);      // Default 5 minutes
+    durationSpinBox->setSuffix(" seconds");
+    durationLayout->addWidget(durationSpinBox);
+    
+    // Control buttons
+    QHBoxLayout *buttonLayout = new QHBoxLayout();
+    
+    startSlewButton = new QPushButton("Start Slew && Imaging", tab);
+    connect(startSlewButton, &QPushButton::clicked, this, &TelescopeGUI::startSlewAndImage);
+    buttonLayout->addWidget(startSlewButton);
+    
+    cancelSlewButton = new QPushButton("Cancel", tab);
+    cancelSlewButton->setEnabled(false);
+    connect(cancelSlewButton, &QPushButton::clicked, this, &TelescopeGUI::cancelSlewAndImage);
+    buttonLayout->addWidget(cancelSlewButton);
+    
+    // Status display
+    QGroupBox *statusGroup = new QGroupBox("Operation Status", tab);
+    QVBoxLayout *statusGroupLayout = new QVBoxLayout(statusGroup);
+    
+    slewStatusLabel = new QLabel("Ready", statusGroup);
+    statusGroupLayout->addWidget(slewStatusLabel);
+    
+    slewProgressBar = new QProgressBar(statusGroup);
+    slewProgressBar->setRange(0, 100);
+    slewProgressBar->setValue(0);
+    statusGroupLayout->addWidget(slewProgressBar);
+    
+    // Add all components to main layout
+    mainLayout->addWidget(targetGroup);
+    mainLayout->addWidget(durationGroup);
+    mainLayout->addLayout(buttonLayout);
+    mainLayout->addWidget(statusGroup);
+    
+    // Add a spacer to push everything up
+    mainLayout->addStretch(1);
+    
+    // Create timers for the operation
+    slewAndImageTimer = new QTimer(this);
+    slewAndImageTimer->setSingleShot(false);
+    slewAndImageTimer->setInterval(1000);  // 1 second updates
+    connect(slewAndImageTimer, &QTimer::timeout, this, &TelescopeGUI::slewAndImageTimerTimeout);
+    
+    statusUpdateTimer = new QTimer(this);
+    statusUpdateTimer->setSingleShot(false);
+    statusUpdateTimer->setInterval(500);  // 0.5 second updates for status
+    connect(statusUpdateTimer, &QTimer::timeout, this, &TelescopeGUI::updateSlewAndImageStatus);
+    
+    // Start periodic status checking
+    QTimer *mountCheckTimer = new QTimer(this);
+    mountCheckTimer->setSingleShot(false);
+    mountCheckTimer->setInterval(2000);  // 2 second checks for mount status
+    connect(mountCheckTimer, &QTimer::timeout, this, &TelescopeGUI::checkMountStatus);
+    mountCheckTimer->start();
+    
+    return tab;
+}
+
+void TelescopeGUI::startSlewAndImage() {
+    if (!isConnected) {
+        QMessageBox::warning(this, "Not Connected", "Please connect to a telescope first");
+        return;
+    }
+    
+    if (isSlewingAndImaging) {
+        return;
+    }
+    
+    // Get the target information
+    QString targetName;
+    double ra = 0.0;
+    double dec = 0.0;
+    
+    if (targetComboBox->currentIndex() == 0) {
+        // Custom coordinates
+        targetName = customNameEdit->text().trimmed();
+        if (targetName.isEmpty()) {
+            QMessageBox::warning(this, "Missing Target Name", "Please enter a target name");
+            return;
+        }
+        
+        bool raOk = false;
+        bool decOk = false;
+        ra = customRaEdit->text().toDouble(&raOk);
+        dec = customDecEdit->text().toDouble(&decOk);
+        
+        if (!raOk || !decOk || ra < 0 || ra >= 24 || dec < -90 || dec > 90) {
+            QMessageBox::warning(this, "Invalid Coordinates", 
+                                "Please enter valid coordinates:\n- RA between 0 and 24 hours\n- Dec between -90 and +90 degrees");
+            return;
+        }
+    } else {
+        // Selected target
+        targetName = targetComboBox->currentText().split(" - ").at(0);
+        
+        // Parse the coordinates from the data
+        QString coords = targetComboBox->currentData().toString();
+        
+        // Convert RA from HH:MM:SS.S format to decimal hours
+        QRegularExpression raRegex("(\\d+)h(\\d+)m([\\d.]+)s");
+        QRegularExpressionMatch raMatch = raRegex.match(coords);
+        
+        if (raMatch.hasMatch()) {
+            int hours = raMatch.captured(1).toInt();
+            int minutes = raMatch.captured(2).toInt();
+            double seconds = raMatch.captured(3).toDouble();
+            
+            ra = hours + (minutes / 60.0) + (seconds / 3600.0);
+        }
+        
+        // Convert Dec from DD:MM:SS format to decimal degrees
+        QRegularExpression decRegex("([+-]?\\d+)°(\\d+)'([\\d.]+)\"");
+        QRegularExpressionMatch decMatch = decRegex.match(coords);
+        
+        if (decMatch.hasMatch()) {
+            int degrees = decMatch.captured(1).toInt();
+            int minutes = decMatch.captured(2).toInt();
+            double seconds = decMatch.captured(3).toDouble();
+            
+            dec = abs(degrees) + (minutes / 60.0) + (seconds / 3600.0);
+            if (degrees < 0) dec = -dec;
+        }
+    }
+    
+    // Convert RA and Dec to radians as required by the telescope
+    double raRadians = ra * M_PI / 12.0;  // 12 hours = π radians
+    double decRadians = dec * M_PI / 180.0;  // 180 degrees = π radians
+    
+    qDebug() << "Slewing to target:" << targetName;
+    qDebug() << "RA (hours):" << ra << "Dec (degrees):" << dec;
+    qDebug() << "RA (radians):" << raRadians << "Dec (radians):" << decRadians;
+    
+    // Get the imaging duration
+    int durationSeconds = durationSpinBox->value();
+    imagingTimeRemaining = durationSeconds;
+    
+    // Update UI
+    isSlewingAndImaging = true;
+    startSlewButton->setEnabled(false);
+    cancelSlewButton->setEnabled(true);
+    targetComboBox->setEnabled(false);
+    customNameEdit->setEnabled(false);
+    customRaEdit->setEnabled(false);
+    customDecEdit->setEnabled(false);
+    durationSpinBox->setEnabled(false);
+    
+    // Set initial status
+    slewStatusLabel->setText("Slewing to target...");
+    slewProgressBar->setValue(0);
+    
+    // Start the status update timer
+    statusUpdateTimer->start();
+    
+    // Generate a UUID for the imaging session
+    QUuid uuid = QUuid::createUuid();
+    currentImagingTargetUuid = uuid.toString(QUuid::WithoutBraces);
+    
+    // Send the GotoRaDec command
+    QJsonObject gotoCommand;
+    gotoCommand["Command"] = "GotoRaDec";
+    gotoCommand["Destination"] = "Mount";
+    gotoCommand["SequenceID"] = 1000;
+    gotoCommand["Source"] = "QtApp";
+    gotoCommand["Type"] = "Command";
+    gotoCommand["Ra"] = raRadians;
+    gotoCommand["Dec"] = decRadians;
+    
+    sendJsonMessage(gotoCommand);
+}
+
+void TelescopeGUI::updateSlewAndImageStatus() {
+    if (!isSlewingAndImaging) {
+        return;
+    }
+    
+    const TelescopeData &data = dataProcessor->getData();
+    
+    // Check if we're still slewing
+    if (data.mount.isGotoOver == false) {
+        slewStatusLabel->setText("Slewing to target...");
+        // We don't know how far along the slew is, so just pulse the progress bar
+        int currentValue = slewProgressBar->value();
+        slewProgressBar->setValue((currentValue + 5) % 100);
+        return;
+    }
+    
+    // If we've completed the slew but haven't started imaging yet
+    if (data.mount.isGotoOver && !slewAndImageTimer->isActive()) {
+        // Start imaging
+        slewStatusLabel->setText("Slew complete. Starting imaging...");
+        slewProgressBar->setValue(0);
+        
+        // Send the RunImaging command
+        QJsonObject runImagingCommand;
+        runImagingCommand["Command"] = "RunImaging";
+        runImagingCommand["Destination"] = "TaskController";
+        runImagingCommand["SequenceID"] = 1001;
+        runImagingCommand["Source"] = "QtApp";
+        runImagingCommand["Type"] = "Command";
+        runImagingCommand["Name"] = targetComboBox->currentIndex() == 0 ? 
+                                  customNameEdit->text() : 
+                                  targetComboBox->currentText().split(" - ").at(0);
+        runImagingCommand["SaveRawImage"] = true;
+        runImagingCommand["Uuid"] = currentImagingTargetUuid;
+        
+        // Send the command
+        sendJsonMessage(runImagingCommand);
+        
+        // Wait for a brief moment to ensure the command is processed
+        QTimer::singleShot(500, this, [this]() {
+            // Start the countdown timer
+            slewAndImageTimer->start();
+        });
+    }
+    
+    // If the imaging timer is running, update the progress
+    if (slewAndImageTimer->isActive()) {
+        // Calculate progress as a percentage
+        int durationSeconds = durationSpinBox->value();
+        int progress = 100 - ((imagingTimeRemaining * 100) / durationSeconds);
+        
+        slewStatusLabel->setText(QString("Imaging in progress: %1 seconds remaining").arg(imagingTimeRemaining));
+        slewProgressBar->setValue(progress);
+    }
+}
+
+void TelescopeGUI::slewAndImageTimerTimeout() {
+    imagingTimeRemaining--;
+    
+    if (imagingTimeRemaining <= 0) {
+        // Time's up, stop imaging
+        cancelSlewAndImage();
+    }
+}
+
+void TelescopeGUI::cancelSlewAndImage() {
+    if (!isSlewingAndImaging) {
+        return;
+    }
+    
+    // Stop timers
+    statusUpdateTimer->stop();
+    slewAndImageTimer->stop();
+    
+    // Cancel any ongoing slew
+    QJsonObject cancelCommand;
+    cancelCommand["Command"] = "AbortAxisMovement";
+    cancelCommand["Destination"] = "Mount";
+    cancelCommand["SequenceID"] = 1002;
+    cancelCommand["Source"] = "QtApp";
+    cancelCommand["Type"] = "Command";
+    
+    sendJsonMessage(cancelCommand);
+    
+    // Cancel any imaging
+    QJsonObject cancelImagingCommand;
+    cancelImagingCommand["Command"] = "CancelImaging";
+    cancelImagingCommand["Destination"] = "TaskController";
+    cancelImagingCommand["SequenceID"] = 1003;
+    cancelImagingCommand["Source"] = "QtApp";
+    cancelImagingCommand["Type"] = "Command";
+    
+    sendJsonMessage(cancelImagingCommand);
+    
+    // Reset UI
+    isSlewingAndImaging = false;
+    startSlewButton->setEnabled(true);
+    cancelSlewButton->setEnabled(false);
+    targetComboBox->setEnabled(true);
+    
+    // Re-enable custom fields if appropriate
+    bool isCustom = (targetComboBox->currentIndex() == 0);
+    customNameEdit->setEnabled(isCustom);
+    customRaEdit->setEnabled(isCustom);
+    customDecEdit->setEnabled(isCustom);
+    
+    durationSpinBox->setEnabled(true);
+    
+    slewStatusLabel->setText("Imaging cancelled");
+    slewProgressBar->setValue(0);
+}
+
+void TelescopeGUI::initializeTelescope() {
+    if (!isConnected) {
+        QMessageBox::warning(this, "Not Connected", "Please connect to a telescope first");
+        return;
+    }
+    
+    // Use the exact initialization command from init.txt
+    QJsonObject runInitCommand;
+    runInitCommand["Command"] = "RunInitialize";
+    runInitCommand["Destination"] = "TaskController";
+    runInitCommand["SequenceID"] = 1001;
+    runInitCommand["Source"] = "QtApp";
+    runInitCommand["Type"] = "Command";
+    
+    // Get current date and time - you can also use fixed values from init.txt
+    QDateTime now = QDateTime::currentDateTime();
+    QString dateStr = now.toString("dd MM yyyy");
+    QString timeStr = now.toString("HH:mm:ss");
+    
+    // Use location values from init.txt - Cambridge, UK coordinates
+    runInitCommand["Date"] = "06 05 2025"; // Or use dateStr for current date
+    runInitCommand["FakeInitialize"] = false;
+    runInitCommand["Latitude"] = 0.9118493267600084;  // In radians (Cambridge, UK)
+    runInitCommand["Longitude"] = 0.0013880067713051129;  // In radians
+    runInitCommand["Time"] = "20:37:39"; // Or use timeStr for current time
+    runInitCommand["TimeZone"] = "Europe/London";
+    
+    sendJsonMessage(runInitCommand);
+    
+    slewStatusLabel->setText("Initializing telescope...");
+    initializeButton->setEnabled(false);
+    
+    // Enable the alignment button after initialization
+    QTimer::singleShot(5000, this, [this]() {
+        autoAlignButton->setEnabled(true);
+        initializeButton->setEnabled(true);
+        slewStatusLabel->setText("Initialization completed. Check alignment status.");
+    });
+}
+
+void TelescopeGUI::startTelescopeAlignment() {
+    if (!isConnected) {
+        QMessageBox::warning(this, "Not Connected", "Please connect to a telescope first");
+        return;
+    }
+    
+    // Send the StartAlignment command
+    QJsonObject alignCommand;
+    alignCommand["Command"] = "StartAlignment";
+    alignCommand["Destination"] = "Mount";
+    alignCommand["SequenceID"] = 1002;
+    alignCommand["Source"] = "QtApp";
+    alignCommand["Type"] = "Command";
+    
+    sendJsonMessage(alignCommand);
+    
+    slewStatusLabel->setText("Starting alignment procedure...");
+    
+    // Note: In a real implementation, we would need to guide the user through
+    // the complete alignment procedure, which includes manually centering stars
+    // and adding alignment points. This is just a simplified version.
+}
+
+void TelescopeGUI::checkMountStatus() {
+    if (!isConnected) {
+        alignmentStatusLabel->setText("Not connected");
+        mountStatusLabel->setText("Not connected");
+        return;
+    }
+    
+    // Get the current status from the data processor
+    const TelescopeData &data = dataProcessor->getData();
+    
+    // Update the alignment status
+    alignmentStatusLabel->setText(data.mount.isAligned ? "Aligned" : "Not Aligned");
+    
+    // Update the mount status
+    QString mountStatus;
+    if (data.mount.isGotoOver && !data.mount.isTracking) {
+        mountStatus = "Ready (Idle)";
+    } else if (!data.mount.isGotoOver) {
+        mountStatus = "Slewing";
+    } else if (data.mount.isTracking) {
+        mountStatus = "Tracking";
+    } else {
+        mountStatus = "Unknown";
+    }
+    
+    mountStatusLabel->setText(mountStatus);
+    
+    // Enable/disable slewing based on status
+    bool canSlew = data.mount.isAligned && data.mount.isGotoOver;
+    startSlewButton->setEnabled(canSlew && !isSlewingAndImaging);
 }
 

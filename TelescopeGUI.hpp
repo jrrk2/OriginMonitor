@@ -5,6 +5,7 @@
 #include <QHBoxLayout>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QSpinBox>
 #include <QPushButton>
 #include <QLabel>
 #include <QListWidget>
@@ -178,7 +179,15 @@ private slots:
      * @brief Handle when all downloads are complete
      */
     void onAllDownloadsComplete();
-    
+
+    void startSlewAndImage();
+    void cancelSlewAndImage();
+    void slewAndImageTimerTimeout();
+    void updateSlewAndImageStatus();
+    void initializeTelescope();
+    void startTelescopeAlignment();
+    void checkMountStatus();
+
 private:
     /**
      * @brief Set up the UI elements
@@ -231,6 +240,7 @@ private:
     QWidget* createOrientationTab();
     QWidget* createCommandTab();
     QWidget* createDownloadTab();
+    QWidget* createSlewAndImageTab();
     
     // Class members
     TelescopeDataProcessor *dataProcessor;
@@ -338,7 +348,28 @@ private:
     // Auto downloader
     AutoDownloader *autoDownloader;
     bool isDownloading = false;
-    
+
+    // Add more private members for the new tab
+    QComboBox *targetComboBox;
+    QLineEdit *customRaEdit;
+    QLineEdit *customDecEdit;
+    QLineEdit *customNameEdit;
+    QSpinBox *durationSpinBox;
+    QPushButton *startSlewButton;
+    QPushButton *cancelSlewButton;
+    QProgressBar *slewProgressBar;
+    QLabel *slewStatusLabel;
+    QTimer *slewAndImageTimer;
+    QTimer *statusUpdateTimer;
+    bool isSlewingAndImaging = false;
+    int imagingTimeRemaining = 0;
+    QString currentImagingTargetUuid;
+
+    QLabel *alignmentStatusLabel;
+    QLabel *mountStatusLabel;
+    QPushButton *initializeButton;
+    QPushButton *autoAlignButton;
+  
     bool debug = false;
 
   
