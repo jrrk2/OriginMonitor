@@ -7,6 +7,8 @@
 *****************************************************************************/
 
 #include "../../TelescopeGUI.hpp"
+#include <QtGui/qtextcursor.h>
+#include <QtNetwork/QSslError>
 #include <QtCore/qmetatype.h>
 
 #include <QtCore/qtmochelpers.h>
@@ -79,7 +81,16 @@ template <> constexpr inline auto TelescopeGUI::qt_create_metaobjectdata<qt_meta
         "updateSlewAndImageStatus",
         "initializeTelescope",
         "startTelescopeAlignment",
-        "checkMountStatus"
+        "checkMountStatus",
+        "startAlpacaServer",
+        "stopAlpacaServer",
+        "onAlpacaServerStarted",
+        "onAlpacaServerStopped",
+        "onAlpacaRequestReceived",
+        "method",
+        "path",
+        "clearAlpacaLog",
+        "saveAlpacaLog"
     };
 
     QtMocHelpers::UintData qt_methods {
@@ -158,6 +169,22 @@ template <> constexpr inline auto TelescopeGUI::qt_create_metaobjectdata<qt_meta
         QtMocHelpers::SlotData<void()>(40, 2, QMC::AccessPrivate, QMetaType::Void),
         // Slot 'checkMountStatus'
         QtMocHelpers::SlotData<void()>(41, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'startAlpacaServer'
+        QtMocHelpers::SlotData<void()>(42, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'stopAlpacaServer'
+        QtMocHelpers::SlotData<void()>(43, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'onAlpacaServerStarted'
+        QtMocHelpers::SlotData<void()>(44, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'onAlpacaServerStopped'
+        QtMocHelpers::SlotData<void()>(45, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'onAlpacaRequestReceived'
+        QtMocHelpers::SlotData<void(const QString &, const QString &)>(46, 2, QMC::AccessPrivate, QMetaType::Void, {{
+            { QMetaType::QString, 47 }, { QMetaType::QString, 48 },
+        }}),
+        // Slot 'clearAlpacaLog'
+        QtMocHelpers::SlotData<void()>(49, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'saveAlpacaLog'
+        QtMocHelpers::SlotData<void()>(50, 2, QMC::AccessPrivate, QMetaType::Void),
     };
     QtMocHelpers::UintData qt_properties {
     };
@@ -212,6 +239,13 @@ void TelescopeGUI::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _id
         case 28: _t->initializeTelescope(); break;
         case 29: _t->startTelescopeAlignment(); break;
         case 30: _t->checkMountStatus(); break;
+        case 31: _t->startAlpacaServer(); break;
+        case 32: _t->stopAlpacaServer(); break;
+        case 33: _t->onAlpacaServerStarted(); break;
+        case 34: _t->onAlpacaServerStopped(); break;
+        case 35: _t->onAlpacaRequestReceived((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1])),(*reinterpret_cast< std::add_pointer_t<QString>>(_a[2]))); break;
+        case 36: _t->clearAlpacaLog(); break;
+        case 37: _t->saveAlpacaLog(); break;
         default: ;
         }
     }
@@ -236,14 +270,14 @@ int TelescopeGUI::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
     if (_id < 0)
         return _id;
     if (_c == QMetaObject::InvokeMetaMethod) {
-        if (_id < 31)
+        if (_id < 38)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 31;
+        _id -= 38;
     }
     if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
-        if (_id < 31)
+        if (_id < 38)
             *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType();
-        _id -= 31;
+        _id -= 38;
     }
     return _id;
 }

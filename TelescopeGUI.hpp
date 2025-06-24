@@ -1,5 +1,8 @@
 #pragma once
 
+class AlpacaServer;
+class OriginBackend;
+
 #include <QMainWindow>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -24,6 +27,11 @@
 #include <QJsonDocument>
 #include <QRegularExpression>
 #include <QPixmap>
+#include <QSpinBox>
+#include <QTextEdit>
+#include <QCheckBox>
+#include <QScrollBar>
+#include <QFileDialog>
 
 #include "TelescopeDataProcessor.hpp"
 #include "CommandInterface.hpp"
@@ -187,6 +195,14 @@ private slots:
     void initializeTelescope();
     void startTelescopeAlignment();
     void checkMountStatus();
+
+    void startAlpacaServer();
+    void stopAlpacaServer();
+    void onAlpacaServerStarted();
+    void onAlpacaServerStopped();
+    void onAlpacaRequestReceived(const QString& method, const QString& path);
+    void clearAlpacaLog();
+    void saveAlpacaLog();
 
 private:
     /**
@@ -369,7 +385,25 @@ private:
     QLabel *mountStatusLabel;
     QPushButton *initializeButton;
     QPushButton *autoAlignButton;
-  
+
+    // NEW: Alpaca server integration
+    AlpacaServer* alpacaServer;
+    OriginBackend* originBackend;
+    
+    // Alpaca tab widgets
+    QPushButton* alpacaStartButton;
+    QPushButton* alpacaStopButton;
+    QLabel* alpacaStatusLabel;
+    QLabel* alpacaPortLabel;
+    QSpinBox* alpacaPortSpinBox;
+    QLineEdit* alpacaServerNameEdit;
+    QTextEdit* alpacaLogTextEdit;
+    QLabel* alpacaRequestCountLabel;
+    QCheckBox* alpacaAutoStartCheckBox;
+    QCheckBox* alpacaDiscoveryCheckBox;
+
+    QWidget* createAlpacaTab();
+    
     bool debug = false;
 
   

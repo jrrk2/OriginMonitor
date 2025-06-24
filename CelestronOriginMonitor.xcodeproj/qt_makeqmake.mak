@@ -353,6 +353,7 @@ CelestronOriginMonitor.xcodeproj/project.pbxproj: CelestronOriginMonitor.pro /op
 		/opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/macx-clang/qmake.conf \
 		/opt/homebrew/share/qt/mkspecs/macx-xcode/qmake.conf \
 		/opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/features/spec_post.prf \
+		.qmake.stash \
 		/opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/features/exclusive_builds.prf \
 		/opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/features/mac/sdk.prf \
 		/opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/features/toolchain.prf \
@@ -386,6 +387,7 @@ CelestronOriginMonitor.xcodeproj/project.pbxproj: CelestronOriginMonitor.pro /op
 		/opt/homebrew/share/qt/plugins/permissions/libqdarwincamerapermission.prl \
 		/opt/homebrew/lib/QtWidgets.framework/Resources/QtWidgets.prl \
 		/opt/homebrew/lib/QtGui.framework/Resources/QtGui.prl \
+		/opt/homebrew/lib/QtHttpServer.framework/Resources/QtHttpServer.prl \
 		/opt/homebrew/lib/QtWebSockets.framework/Resources/QtWebSockets.prl \
 		/opt/homebrew/lib/QtNetwork.framework/Resources/QtNetwork.prl \
 		/opt/homebrew/lib/QtCore.framework/Resources/QtCore.prl
@@ -733,6 +735,7 @@ CelestronOriginMonitor.xcodeproj/project.pbxproj: CelestronOriginMonitor.pro /op
 /opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/macx-clang/qmake.conf:
 /opt/homebrew/share/qt/mkspecs/macx-xcode/qmake.conf:
 /opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/features/spec_post.prf:
+.qmake.stash:
 /opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/features/exclusive_builds.prf:
 /opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/features/mac/sdk.prf:
 /opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/features/toolchain.prf:
@@ -766,6 +769,7 @@ CelestronOriginMonitor.pro:
 /opt/homebrew/share/qt/plugins/permissions/libqdarwincamerapermission.prl:
 /opt/homebrew/lib/QtWidgets.framework/Resources/QtWidgets.prl:
 /opt/homebrew/lib/QtGui.framework/Resources/QtGui.prl:
+/opt/homebrew/lib/QtHttpServer.framework/Resources/QtHttpServer.prl:
 /opt/homebrew/lib/QtWebSockets.framework/Resources/QtWebSockets.prl:
 /opt/homebrew/lib/QtNetwork.framework/Resources/QtNetwork.prl:
 /opt/homebrew/lib/QtCore.framework/Resources/QtCore.prl:

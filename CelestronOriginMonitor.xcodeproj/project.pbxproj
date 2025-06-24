@@ -3,16 +3,36 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 46;
+	objectVersion = 54;
 	objects = {
 
+/* Begin PBXAggregateTarget section */
+		60D2B72C51FE5ED604D254CB /* Qt Preprocess */ = {
+			isa = PBXAggregateTarget;
+			buildConfigurationList = 6CC3B5D2136C7CD6A5CF5A59 /* Build configuration list for PBXNativeTarget "CelestronOriginMonitor" */;
+			buildPhases = (
+				5E618435888B9D49F8540165 /* Qt Qmake */,
+				7EF0942E79C014DCEC8976BC /* Qt Preprocessors */,
+			);
+			dependencies = (
+			);
+			name = "Qt Preprocess";
+			productName = "Qt Preprocess";
+		};
+/* End PBXAggregateTarget section */
+
 /* Begin PBXBuildFile section */
+		034ED4AAD568CD9B9C6425CB /* dummy.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = 821298A917E5BFA9064C9F3C /* dummy.cpp */; settings = {ATTRIBUTES = (); }; };
+		0821A1E436DB45C7AF2ED093 /* moc_OriginBackend.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = 151E271A992F683D870E20F5 /* moc_OriginBackend.cpp */; settings = {ATTRIBUTES = (); }; };
+		0AEAED0949E0473E61749D33 /* OriginBackend.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = CE4D4DC88478CE7E1DF4FD8B /* OriginBackend.cpp */; settings = {ATTRIBUTES = (); }; };
 		1165A193E90A0EAC8EB7CA7F /* main.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = D0D9E5DB1234ACDE50D6E692 /* main.cpp */; settings = {ATTRIBUTES = (); }; };
 		1D9C5357D7F920E11903B686 /* TelescopeGUI.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = 1AAB1C2001DFCED0D39230BD /* TelescopeGUI.cpp */; settings = {ATTRIBUTES = (); }; };
 		38E7C438D5325CA0A308DF2D /* QtCore.framework in Link Binary With Libraries */ = {isa = PBXBuildFile; fileRef = 53419A4ADDA92E410E5591BA /* QtCore.framework */; };
+		50FAB4451FB04CC1E828B8B7 /* AlpacaServer.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = 9F2611DF561BC47DA8A9AA26 /* AlpacaServer.cpp */; settings = {ATTRIBUTES = (); }; };
 		61EEC397DC8556BF8C4E36A7 /* ImageIO.framework in Link Binary With Libraries */ = {isa = PBXBuildFile; fileRef = 3A8EF9C62A8D4790CBB89CEA /* ImageIO.framework */; };
 		6E3F264E3CC006F6F90C5B2B /* moc_TelescopeDataProcessor.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = 53E86DC12FDD0538BF429FBC /* moc_TelescopeDataProcessor.cpp */; settings = {ATTRIBUTES = (); }; };
 		74BF0F5DB898DFB68EFC276A /* qdarwincamerapermission in Link Binary With Libraries */ = {isa = PBXBuildFile; fileRef = 1A19EC4C1AD4D902A3BC744F /* qdarwincamerapermission */; };
+		7C293A88F7701A535FDDF36B /* QtHttpServer.framework in Link Binary With Libraries */ = {isa = PBXBuildFile; fileRef = 89F3DDAC7ACB6624E14A2A3B /* QtHttpServer.framework */; };
 		7C30F361268D052FF71E287F /* QtWidgets.framework in Link Binary With Libraries */ = {isa = PBXBuildFile; fileRef = DC4C2E7E45CB83B707419776 /* QtWidgets.framework */; };
 		8771A8C96E9C391044035D99 /* OpenGL.framework in Link Binary With Libraries */ = {isa = PBXBuildFile; fileRef = D4B32C2222F82AC56BADEB21 /* OpenGL.framework */; };
 		88519BC274A018FBAEC4AC8B /* moc_CommandInterface.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = 1DF5D4EE001E4955A537115F /* moc_CommandInterface.cpp */; settings = {ATTRIBUTES = (); }; };
@@ -22,8 +42,13 @@
 		960E3D60EFF2145ADC39FE02 /* QtWebSockets.framework in Link Binary With Libraries */ = {isa = PBXBuildFile; fileRef = 51AFF3EE4809E09FAEE5F07D /* QtWebSockets.framework */; };
 		A5F48226AD16997661123CAF /* QtGui.framework in Link Binary With Libraries */ = {isa = PBXBuildFile; fileRef = 75BB98347AA20D28579DDB5E /* QtGui.framework */; };
 		A99B2AA0F9CBBDD12BA126A4 /* DiskArbitration.framework in Link Binary With Libraries */ = {isa = PBXBuildFile; fileRef = 2B774D8E4178765CE52EAAF5 /* DiskArbitration.framework */; };
-		ABE7EA882DC8F2BF002E63E0 /* AutoDownloader.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = ABE7EA872DC8F2BF002E63E0 /* AutoDownloader.cpp */; };
-		ABE7EA8B2DC90215002E63E0 /* moc_AutoDownloader.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = ABE7EA8A2DC90215002E63E0 /* moc_AutoDownloader.cpp */; };
+		AB19AC492E0735BB00E961DC /* AutoDownloader.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = AB19AC482E0735BB00E961DC /* AutoDownloader.cpp */; };
+		AB19AC502E07372000E961DC /* moc_TelescopeGUI.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = AB19AC4F2E07372000E961DC /* moc_TelescopeGUI.cpp */; };
+		AB19AC512E07372000E961DC /* moc_OriginBackend.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = AB19AC4D2E07372000E961DC /* moc_OriginBackend.cpp */; };
+		AB19AC522E07372000E961DC /* moc_AutoDownloader.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = AB19AC4B2E07372000E961DC /* moc_AutoDownloader.cpp */; };
+		AB19AC532E07372000E961DC /* moc_TelescopeDataProcessor.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = AB19AC4E2E07372000E961DC /* moc_TelescopeDataProcessor.cpp */; };
+		AB19AC542E07372000E961DC /* moc_AlpacaServer.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = AB19AC4A2E07372000E961DC /* moc_AlpacaServer.cpp */; };
+		AB19AC552E07372000E961DC /* moc_CommandInterface.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = AB19AC4C2E07372000E961DC /* moc_CommandInterface.cpp */; };
 		B3FE8FAC746D3D5BB24FA398 /* Metal.framework in Link Binary With Libraries */ = {isa = PBXBuildFile; fileRef = 1B2543FCC48E9436F21C4F63 /* Metal.framework */; };
 		C9229A2804E82E53AE87E1CD /* TelescopeDataProcessor.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = 99EC490FCEDE74CBE17A744A /* TelescopeDataProcessor.cpp */; settings = {ATTRIBUTES = (); }; };
 		CCA737EE379CDB10CC9A0F23 /* AVFoundation.framework in Link Binary With Libraries */ = {isa = PBXBuildFile; fileRef = 21F907AB8D19BD779147A085 /* AVFoundation.framework */; };
@@ -32,8 +57,19 @@
 		F26454630C80841CBDCFE1CA /* Foundation.framework in Link Binary With Libraries */ = {isa = PBXBuildFile; fileRef = FCC237CA5AD60B9BA4447615 /* Foundation.framework */; };
 		F2A75ACAC9DF6A3F4E5711E7 /* AppKit.framework in Link Binary With Libraries */ = {isa = PBXBuildFile; fileRef = 723F90793B2C195E2CCB2233 /* AppKit.framework */; };
 		F30795E5207D73289814C47C /* UniformTypeIdentifiers.framework in Link Binary With Libraries */ = {isa = PBXBuildFile; fileRef = 5F9A4B2B3FF5EC87C57CF6B4 /* UniformTypeIdentifiers.framework */; };
+		F5328B181A3F30EFCBC1950D /* moc_AlpacaServer.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = 292CC91CFF338C0F01855713 /* moc_AlpacaServer.cpp */; settings = {ATTRIBUTES = (); }; };
 		F6AFB04FAA5880567B97E54B /* CommandInterface.cpp in Compile Sources */ = {isa = PBXBuildFile; fileRef = 49A6EAC8502D0EA7E134FFBA /* CommandInterface.cpp */; settings = {ATTRIBUTES = (); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		AB19AC472E07355300E961DC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 6DB9C3763D02B1415CD9D565 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 60D2B72C51FE5ED604D254CB;
+			remoteInfo = "Qt Preprocess";
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
 		99542592E9780B9225F24AA8 /* Embed Frameworks */ = {
@@ -49,40 +85,52 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		151E271A992F683D870E20F5 /* moc_OriginBackend.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_OriginBackend.cpp; path = /Users/jonathan/OriginMonitor/build/moc/moc_OriginBackend.cpp; sourceTree = "<absolute>"; };
+		189E0E1F9B36008FBAEE71F1 /* .qmake.stash */ = {isa = PBXFileReference; lastKnownFileType = text; name = .qmake.stash; path = /Users/jonathan/OriginMonitor/.qmake.stash; sourceTree = "<absolute>"; };
 		1A19EC4C1AD4D902A3BC744F /* qdarwincamerapermission */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = qdarwincamerapermission; path = "/opt/homebrew/share/qt/plugins/permissions/libqdarwincamerapermission$(QT_LIBRARY_SUFFIX).a"; sourceTree = "<absolute>"; };
-		1AAB1C2001DFCED0D39230BD /* TelescopeGUI.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = TelescopeGUI.cpp; sourceTree = "<absolute>"; };
+		1AAB1C2001DFCED0D39230BD /* TelescopeGUI.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = TelescopeGUI.cpp; path = /Users/jonathan/OriginMonitor/TelescopeGUI.cpp; sourceTree = "<absolute>"; };
 		1B2543FCC48E9436F21C4F63 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = /System/Library/Frameworks/Metal.framework; sourceTree = "<absolute>"; };
-		1DF5D4EE001E4955A537115F /* moc_CommandInterface.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_CommandInterface.cpp; path = build/moc/moc_CommandInterface.cpp; sourceTree = "<absolute>"; };
+		1DF5D4EE001E4955A537115F /* moc_CommandInterface.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_CommandInterface.cpp; path = /Users/jonathan/OriginMonitor/build/moc/moc_CommandInterface.cpp; sourceTree = "<absolute>"; };
 		21F907AB8D19BD779147A085 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = /System/Library/Frameworks/AVFoundation.framework; sourceTree = "<absolute>"; };
+		292CC91CFF338C0F01855713 /* moc_AlpacaServer.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_AlpacaServer.cpp; path = /Users/jonathan/OriginMonitor/build/moc/moc_AlpacaServer.cpp; sourceTree = "<absolute>"; };
 		2B774D8E4178765CE52EAAF5 /* DiskArbitration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = DiskArbitration.framework; path = /System/Library/Frameworks/DiskArbitration.framework; sourceTree = "<absolute>"; };
-		3381C1AA85FE6C33A62B3BD1 /* CelestronOriginMonitor.pro */ = {isa = PBXFileReference; lastKnownFileType = text; path = CelestronOriginMonitor.pro; sourceTree = "<absolute>"; };
-		388C5447E3655250F3030A8E /* celestronoriginmonitor_plugin_import.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = celestronoriginmonitor_plugin_import.cpp; sourceTree = "<absolute>"; };
+		3381C1AA85FE6C33A62B3BD1 /* CelestronOriginMonitor.pro */ = {isa = PBXFileReference; lastKnownFileType = text; name = CelestronOriginMonitor.pro; path = /Users/jonathan/OriginMonitor/CelestronOriginMonitor.pro; sourceTree = "<absolute>"; };
+		388C5447E3655250F3030A8E /* celestronoriginmonitor_plugin_import.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = celestronoriginmonitor_plugin_import.cpp; path = /Users/jonathan/OriginMonitor/celestronoriginmonitor_plugin_import.cpp; sourceTree = "<absolute>"; };
 		3A8EF9C62A8D4790CBB89CEA /* ImageIO.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ImageIO.framework; path = /System/Library/Frameworks/ImageIO.framework; sourceTree = "<absolute>"; };
-		49A6EAC8502D0EA7E134FFBA /* CommandInterface.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CommandInterface.cpp; sourceTree = "<absolute>"; };
+		461538073FEE7ADE4D23D131 /* AlpacaServer.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = AlpacaServer.hpp; path = /Users/jonathan/OriginMonitor/AlpacaServer.hpp; sourceTree = "<absolute>"; };
+		49A6EAC8502D0EA7E134FFBA /* CommandInterface.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = CommandInterface.cpp; path = /Users/jonathan/OriginMonitor/CommandInterface.cpp; sourceTree = "<absolute>"; };
 		51AFF3EE4809E09FAEE5F07D /* QtWebSockets.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QtWebSockets.framework; path = /opt/homebrew/lib/QtWebSockets.framework; sourceTree = "<absolute>"; };
 		53419A4ADDA92E410E5591BA /* QtCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QtCore.framework; path = /opt/homebrew/lib/QtCore.framework; sourceTree = "<absolute>"; };
-		53E86DC12FDD0538BF429FBC /* moc_TelescopeDataProcessor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_TelescopeDataProcessor.cpp; path = build/moc/moc_TelescopeDataProcessor.cpp; sourceTree = "<absolute>"; };
+		53E86DC12FDD0538BF429FBC /* moc_TelescopeDataProcessor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_TelescopeDataProcessor.cpp; path = /Users/jonathan/OriginMonitor/build/moc/moc_TelescopeDataProcessor.cpp; sourceTree = "<absolute>"; };
 		5F9A4B2B3FF5EC87C57CF6B4 /* UniformTypeIdentifiers.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UniformTypeIdentifiers.framework; path = /System/Library/Frameworks/UniformTypeIdentifiers.framework; sourceTree = "<absolute>"; };
-		608A9CA5FE47F12E1F418EB6 /* moc_TelescopeGUI.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_TelescopeGUI.cpp; path = build/moc/moc_TelescopeGUI.cpp; sourceTree = "<absolute>"; };
-		6A15892B2101068DCFC2CC6C /* CommandInterface.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CommandInterface.hpp; sourceTree = "<absolute>"; };
+		608A9CA5FE47F12E1F418EB6 /* moc_TelescopeGUI.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_TelescopeGUI.cpp; path = /Users/jonathan/OriginMonitor/build/moc/moc_TelescopeGUI.cpp; sourceTree = "<absolute>"; };
+		6A15892B2101068DCFC2CC6C /* CommandInterface.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = CommandInterface.hpp; path = /Users/jonathan/OriginMonitor/CommandInterface.hpp; sourceTree = "<absolute>"; };
 		714DE62F489E7B5EB62BD7E0 /* CelestronOriginMonitor.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CelestronOriginMonitor.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		723F90793B2C195E2CCB2233 /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppKit.framework; path = /System/Library/Frameworks/AppKit.framework; sourceTree = "<absolute>"; };
-		72CD5FAECFC6C1C5E48D69B2 /* TelescopeDataProcessor.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = TelescopeDataProcessor.hpp; sourceTree = "<absolute>"; };
+		72CD5FAECFC6C1C5E48D69B2 /* TelescopeDataProcessor.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = TelescopeDataProcessor.hpp; path = /Users/jonathan/OriginMonitor/TelescopeDataProcessor.hpp; sourceTree = "<absolute>"; };
 		75BB98347AA20D28579DDB5E /* QtGui.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QtGui.framework; path = /opt/homebrew/lib/QtGui.framework; sourceTree = "<absolute>"; };
-		79ABD44EA6B5D1E1C4BBC373 /* app.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = app.icns; sourceTree = "<absolute>"; };
-		8A407F601F3533455FB52A12 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<absolute>"; };
+		821298A917E5BFA9064C9F3C /* dummy.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = dummy.cpp; path = /opt/homebrew/share/qt/mkspecs/features/data/dummy.cpp; sourceTree = "<absolute>"; };
+		89F3DDAC7ACB6624E14A2A3B /* QtHttpServer.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QtHttpServer.framework; path = /opt/homebrew/lib/QtHttpServer.framework; sourceTree = "<absolute>"; };
+		8A407F601F3533455FB52A12 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = Info.plist; path = /Users/jonathan/OriginMonitor/Info.plist; sourceTree = "<absolute>"; };
 		8D9815BDB5BD9F90D2BC05C5 /* AGL.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AGL.framework; path = /System/Library/Frameworks/AGL.framework; sourceTree = "<absolute>"; };
-		99EC490FCEDE74CBE17A744A /* TelescopeDataProcessor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = TelescopeDataProcessor.cpp; sourceTree = "<absolute>"; };
-		9E8A7A19ED1FF7D5B6F89B9C /* TelescopeData.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = TelescopeData.hpp; sourceTree = "<absolute>"; };
+		99EC490FCEDE74CBE17A744A /* TelescopeDataProcessor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = TelescopeDataProcessor.cpp; path = /Users/jonathan/OriginMonitor/TelescopeDataProcessor.cpp; sourceTree = "<absolute>"; };
+		9E8A7A19ED1FF7D5B6F89B9C /* TelescopeData.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = TelescopeData.hpp; path = /Users/jonathan/OriginMonitor/TelescopeData.hpp; sourceTree = "<absolute>"; };
+		9F2611DF561BC47DA8A9AA26 /* AlpacaServer.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = AlpacaServer.cpp; path = /Users/jonathan/OriginMonitor/AlpacaServer.cpp; sourceTree = "<absolute>"; };
 		A1A67BEAA744704B29168D39 /* IOKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOKit.framework; path = /System/Library/Frameworks/IOKit.framework; sourceTree = "<absolute>"; };
-		ABE7EA862DC8F2BF002E63E0 /* AutoDownloader.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = AutoDownloader.hpp; sourceTree = "<group>"; };
-		ABE7EA872DC8F2BF002E63E0 /* AutoDownloader.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = AutoDownloader.cpp; sourceTree = "<group>"; };
-		ABE7EA8A2DC90215002E63E0 /* moc_AutoDownloader.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_AutoDownloader.cpp; path = build/moc/moc_AutoDownloader.cpp; sourceTree = "<group>"; };
+		AB19AC482E0735BB00E961DC /* AutoDownloader.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = AutoDownloader.cpp; sourceTree = "<group>"; };
+		AB19AC4A2E07372000E961DC /* moc_AlpacaServer.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_AlpacaServer.cpp; path = build/moc/moc_AlpacaServer.cpp; sourceTree = "<group>"; };
+		AB19AC4B2E07372000E961DC /* moc_AutoDownloader.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_AutoDownloader.cpp; path = build/moc/moc_AutoDownloader.cpp; sourceTree = "<group>"; };
+		AB19AC4C2E07372000E961DC /* moc_CommandInterface.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_CommandInterface.cpp; path = build/moc/moc_CommandInterface.cpp; sourceTree = "<group>"; };
+		AB19AC4D2E07372000E961DC /* moc_OriginBackend.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_OriginBackend.cpp; path = build/moc/moc_OriginBackend.cpp; sourceTree = "<group>"; };
+		AB19AC4E2E07372000E961DC /* moc_TelescopeDataProcessor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_TelescopeDataProcessor.cpp; path = build/moc/moc_TelescopeDataProcessor.cpp; sourceTree = "<group>"; };
+		AB19AC4F2E07372000E961DC /* moc_TelescopeGUI.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = moc_TelescopeGUI.cpp; path = build/moc/moc_TelescopeGUI.cpp; sourceTree = "<group>"; };
 		CBB5D29B2C34BC7472FAD754 /* QtNetwork.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QtNetwork.framework; path = /opt/homebrew/lib/QtNetwork.framework; sourceTree = "<absolute>"; };
-		D0D9E5DB1234ACDE50D6E692 /* main.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = main.cpp; sourceTree = "<absolute>"; };
+		CE4D4DC88478CE7E1DF4FD8B /* OriginBackend.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = OriginBackend.cpp; path = /Users/jonathan/OriginMonitor/OriginBackend.cpp; sourceTree = "<absolute>"; };
+		D0D9E5DB1234ACDE50D6E692 /* main.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = main.cpp; path = /Users/jonathan/OriginMonitor/main.cpp; sourceTree = "<absolute>"; };
 		D4B32C2222F82AC56BADEB21 /* OpenGL.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = OpenGL.framework; path = /System/Library/Frameworks/OpenGL.framework; sourceTree = "<absolute>"; };
 		DC4C2E7E45CB83B707419776 /* QtWidgets.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QtWidgets.framework; path = /opt/homebrew/lib/QtWidgets.framework; sourceTree = "<absolute>"; };
-		E523E597F7572C8401E120BD /* TelescopeGUI.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = TelescopeGUI.hpp; sourceTree = "<absolute>"; };
+		E523E597F7572C8401E120BD /* TelescopeGUI.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = TelescopeGUI.hpp; path = /Users/jonathan/OriginMonitor/TelescopeGUI.hpp; sourceTree = "<absolute>"; };
+		F8AB0E36DC5A61EEA2A0F7CB /* OriginBackend.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = OriginBackend.hpp; path = /Users/jonathan/OriginMonitor/OriginBackend.hpp; sourceTree = "<absolute>"; };
 		FCC237CA5AD60B9BA4447615 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = /System/Library/Frameworks/Foundation.framework; sourceTree = "<absolute>"; };
 /* End PBXFileReference section */
 
@@ -99,6 +147,7 @@
 				F2A75ACAC9DF6A3F4E5711E7 /* AppKit.framework in Link Binary With Libraries */,
 				61EEC397DC8556BF8C4E36A7 /* ImageIO.framework in Link Binary With Libraries */,
 				B3FE8FAC746D3D5BB24FA398 /* Metal.framework in Link Binary With Libraries */,
+				7C293A88F7701A535FDDF36B /* QtHttpServer.framework in Link Binary With Libraries */,
 				960E3D60EFF2145ADC39FE02 /* QtWebSockets.framework in Link Binary With Libraries */,
 				D5711FDC6A48F569044E27C9 /* QtNetwork.framework in Link Binary With Libraries */,
 				38E7C438D5325CA0A308DF2D /* QtCore.framework in Link Binary With Libraries */,
@@ -114,22 +163,37 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		25B08E2869634E9BCBA333A2 /* Generated Sources */ = {
+			isa = PBXGroup;
+			children = (
+				388C5447E3655250F3030A8E /* celestronoriginmonitor_plugin_import.cpp */,
+				C5C31264768DCC05446CDDCF /* build */,
+			);
+			name = "Generated Sources";
+			sourceTree = "<group>";
+		};
 		2EB56BE3C2D93CDAB0C52E67 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
-				ABE7EA872DC8F2BF002E63E0 /* AutoDownloader.cpp */,
+				AB19AC4A2E07372000E961DC /* moc_AlpacaServer.cpp */,
+				AB19AC4B2E07372000E961DC /* moc_AutoDownloader.cpp */,
+				AB19AC4C2E07372000E961DC /* moc_CommandInterface.cpp */,
+				AB19AC4D2E07372000E961DC /* moc_OriginBackend.cpp */,
+				AB19AC4E2E07372000E961DC /* moc_TelescopeDataProcessor.cpp */,
+				AB19AC4F2E07372000E961DC /* moc_TelescopeGUI.cpp */,
+				AB19AC482E0735BB00E961DC /* AutoDownloader.cpp */,
 				D0D9E5DB1234ACDE50D6E692 /* main.cpp */,
 				99EC490FCEDE74CBE17A744A /* TelescopeDataProcessor.cpp */,
 				49A6EAC8502D0EA7E134FFBA /* CommandInterface.cpp */,
 				1AAB1C2001DFCED0D39230BD /* TelescopeGUI.cpp */,
-				79ABD44EA6B5D1E1C4BBC373 /* app.icns */,
-				ABE7EA862DC8F2BF002E63E0 /* AutoDownloader.hpp */,
+				CE4D4DC88478CE7E1DF4FD8B /* OriginBackend.cpp */,
+				9F2611DF561BC47DA8A9AA26 /* AlpacaServer.cpp */,
 				9E8A7A19ED1FF7D5B6F89B9C /* TelescopeData.hpp */,
 				72CD5FAECFC6C1C5E48D69B2 /* TelescopeDataProcessor.hpp */,
 				6A15892B2101068DCFC2CC6C /* CommandInterface.hpp */,
 				E523E597F7572C8401E120BD /* TelescopeGUI.hpp */,
-				388C5447E3655250F3030A8E /* celestronoriginmonitor_plugin_import.cpp */,
-				C5C31264768DCC05446CDDCF /* build */,
+				F8AB0E36DC5A61EEA2A0F7CB /* OriginBackend.hpp */,
+				461538073FEE7ADE4D23D131 /* AlpacaServer.hpp */,
 			);
 			name = Sources;
 			sourceTree = "<group>";
@@ -138,6 +202,7 @@
 			isa = PBXGroup;
 			children = (
 				3381C1AA85FE6C33A62B3BD1 /* CelestronOriginMonitor.pro */,
+				189E0E1F9B36008FBAEE71F1 /* .qmake.stash */,
 				8A407F601F3533455FB52A12 /* Info.plist */,
 			);
 			name = "Supporting Files";
@@ -149,7 +214,8 @@
 				53E86DC12FDD0538BF429FBC /* moc_TelescopeDataProcessor.cpp */,
 				1DF5D4EE001E4955A537115F /* moc_CommandInterface.cpp */,
 				608A9CA5FE47F12E1F418EB6 /* moc_TelescopeGUI.cpp */,
-				ABE7EA8A2DC90215002E63E0 /* moc_AutoDownloader.cpp */,
+				151E271A992F683D870E20F5 /* moc_OriginBackend.cpp */,
+				292CC91CFF338C0F01855713 /* moc_AlpacaServer.cpp */,
 			);
 			name = moc;
 			sourceTree = "<group>";
@@ -165,6 +231,7 @@
 				723F90793B2C195E2CCB2233 /* AppKit.framework */,
 				3A8EF9C62A8D4790CBB89CEA /* ImageIO.framework */,
 				1B2543FCC48E9436F21C4F63 /* Metal.framework */,
+				89F3DDAC7ACB6624E14A2A3B /* QtHttpServer.framework */,
 				51AFF3EE4809E09FAEE5F07D /* QtWebSockets.framework */,
 				CBB5D29B2C34BC7472FAD754 /* QtNetwork.framework */,
 				53419A4ADDA92E410E5591BA /* QtCore.framework */,
@@ -175,6 +242,14 @@
 				D4B32C2222F82AC56BADEB21 /* OpenGL.framework */,
 			);
 			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		B8254625CFD509ED2A24A166 /* Sources [moc_predefs] */ = {
+			isa = PBXGroup;
+			children = (
+				821298A917E5BFA9064C9F3C /* dummy.cpp */,
+			);
+			name = "Sources [moc_predefs]";
 			sourceTree = "<group>";
 		};
 		C5C31264768DCC05446CDDCF /* build */ = {
@@ -189,6 +264,8 @@
 			isa = PBXGroup;
 			children = (
 				2EB56BE3C2D93CDAB0C52E67 /* Sources */,
+				25B08E2869634E9BCBA333A2 /* Generated Sources */,
+				B8254625CFD509ED2A24A166 /* Sources [moc_predefs] */,
 				74B182DB50CB5611B5C1C297 /* Supporting Files */,
 				AF39DD055C3EF8226FBE929D /* Frameworks */,
 				FE0A091FDBFB3E9C31B7A1BD /* Products */,
@@ -220,6 +297,7 @@
 			buildRules = (
 			);
 			dependencies = (
+				B3F1C1C7A6DDD6345FF35A2E /* PBXTargetDependency */,
 			);
 			name = CelestronOriginMonitor;
 			productInstallPath = build/;
@@ -233,12 +311,6 @@
 		6DB9C3763D02B1415CD9D565 /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
-				TargetAttributes = {
-					5B0675F20537B313CA276AE6 = {
-						DevelopmentTeam = Y53675G8V9;
-						ProvisioningStyle = Manual;
-					};
-				};
 			};
 			buildConfigurationList = DAC4C1AA5EDEA1C85E9CA5E6 /* Build configuration list for PBXProject "CelestronOriginMonitor" */;
 			compatibilityVersion = "Xcode 3.2";
@@ -254,6 +326,7 @@
 			projectRoot = "";
 			targets = (
 				5B0675F20537B313CA276AE6 /* CelestronOriginMonitor */,
+				60D2B72C51FE5ED604D254CB /* Qt Preprocess */,
 			);
 		};
 /* End PBXProject section */
@@ -270,6 +343,49 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		5E618435888B9D49F8540165 /* Qt Qmake */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Qt Qmake";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "make -C /Users/jonathan/OriginMonitor -f CelestronOriginMonitor.xcodeproj/qt_makeqmake.mak";
+			showEnvVarsInLog = 0;
+		};
+		7EF0942E79C014DCEC8976BC /* Qt Preprocessors */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				/opt/homebrew/share/qt/mkspecs/features/data/dummy.cpp,
+				TelescopeDataProcessor.hpp,
+				CommandInterface.hpp,
+				TelescopeGUI.hpp,
+				OriginBackend.hpp,
+				AlpacaServer.hpp,
+			);
+			name = "Qt Preprocessors";
+			outputPaths = (
+				build/moc/moc_predefs.h,
+				build/moc/moc_TelescopeDataProcessor.cpp,
+				build/moc/moc_CommandInterface.cpp,
+				build/moc/moc_TelescopeGUI.cpp,
+				build/moc/moc_OriginBackend.cpp,
+				build/moc/moc_AlpacaServer.cpp,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "make -C /Users/jonathan/OriginMonitor -f CelestronOriginMonitor.xcodeproj/qt_preprocess.mak";
+			showEnvVarsInLog = 0;
+		};
 		9C316F444A62BF296E3E1F25 /* Project Copy */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
@@ -282,7 +398,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "cp -r $BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME build";
+			shellScript = "cp -r $BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME /Users/jonathan/OriginMonitor/build";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
@@ -293,20 +409,38 @@
 			buildActionMask = 2147483647;
 			files = (
 				1165A193E90A0EAC8EB7CA7F /* main.cpp in Compile Sources */,
+				AB19AC492E0735BB00E961DC /* AutoDownloader.cpp in Compile Sources */,
 				C9229A2804E82E53AE87E1CD /* TelescopeDataProcessor.cpp in Compile Sources */,
 				F6AFB04FAA5880567B97E54B /* CommandInterface.cpp in Compile Sources */,
 				1D9C5357D7F920E11903B686 /* TelescopeGUI.cpp in Compile Sources */,
-				ABE7EA8B2DC90215002E63E0 /* moc_AutoDownloader.cpp in Compile Sources */,
+				0AEAED0949E0473E61749D33 /* OriginBackend.cpp in Compile Sources */,
+				50FAB4451FB04CC1E828B8B7 /* AlpacaServer.cpp in Compile Sources */,
+				AB19AC502E07372000E961DC /* moc_TelescopeGUI.cpp in Compile Sources */,
+				AB19AC512E07372000E961DC /* moc_OriginBackend.cpp in Compile Sources */,
+				AB19AC522E07372000E961DC /* moc_AutoDownloader.cpp in Compile Sources */,
+				AB19AC532E07372000E961DC /* moc_TelescopeDataProcessor.cpp in Compile Sources */,
+				AB19AC542E07372000E961DC /* moc_AlpacaServer.cpp in Compile Sources */,
+				AB19AC552E07372000E961DC /* moc_CommandInterface.cpp in Compile Sources */,
 				947F16CDE606FD0105CEAE4F /* celestronoriginmonitor_plugin_import.cpp in Compile Sources */,
 				6E3F264E3CC006F6F90C5B2B /* moc_TelescopeDataProcessor.cpp in Compile Sources */,
 				88519BC274A018FBAEC4AC8B /* moc_CommandInterface.cpp in Compile Sources */,
 				9352F1449D6822A7CF109107 /* moc_TelescopeGUI.cpp in Compile Sources */,
-				ABE7EA882DC8F2BF002E63E0 /* AutoDownloader.cpp in Compile Sources */,
+				0821A1E436DB45C7AF2ED093 /* moc_OriginBackend.cpp in Compile Sources */,
+				F5328B181A3F30EFCBC1950D /* moc_AlpacaServer.cpp in Compile Sources */,
+				034ED4AAD568CD9B9C6425CB /* dummy.cpp in Compile Sources */,
 			);
 			name = "Compile Sources";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		B3F1C1C7A6DDD6345FF35A2E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 60D2B72C51FE5ED604D254CB /* Qt Preprocess */;
+			targetProxy = AB19AC472E07355300E961DC /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		339EE1B2CC4FC24589A0EA95 /* Release */ = {
@@ -332,18 +466,19 @@
 					.,
 					/opt/homebrew/lib/QtWidgets.framework/Headers,
 					/opt/homebrew/lib/QtGui.framework/Headers,
+					/opt/homebrew/lib/QtHttpServer.framework/Headers,
 					/opt/homebrew/lib/QtWebSockets.framework/Headers,
 					/opt/homebrew/lib/QtNetwork.framework/Headers,
 					/opt/homebrew/lib/QtCore.framework/Headers,
 					build/moc,
-					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.4.sdk/System/Library/Frameworks/OpenGL.framework/Headers,
-					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.4.sdk/System/Library/Frameworks/AGL.framework/Headers,
-					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.4.sdk/System/Library/Frameworks/OpenGL.framework/Headers,
-					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.4.sdk/System/Library/Frameworks/AGL.framework/Headers,
+					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk/System/Library/Frameworks/OpenGL.framework/Headers,
+					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk/System/Library/Frameworks/AGL.framework/Headers,
+					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk/System/Library/Frameworks/OpenGL.framework/Headers,
+					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk/System/Library/Frameworks/AGL.framework/Headers,
 					"/opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/macx-clang",
 				);
 				INFOPLIST_FILE = Info.plist;
-				INSTALL_DIR = build/;
+				INSTALL_DIR = /Users/jonathan/OriginMonitor/build/;
 				LDPLUSPLUS = "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++";
 				LIBRARY_SEARCH_PATHS = (
 					/opt/homebrew/share/qt/plugins/permissions,
@@ -360,6 +495,7 @@
 					"-DQT_NO_DEBUG",
 					"-DQT_WIDGETS_LIB",
 					"-DQT_GUI_LIB",
+					"-DQT_HTTPSERVER_LIB",
 					"-DQT_WEBSOCKETS_LIB",
 					"-DQT_NETWORK_LIB",
 					"-DQT_CORE_LIB",
@@ -375,6 +511,7 @@
 					"-DQT_NO_DEBUG",
 					"-DQT_WIDGETS_LIB",
 					"-DQT_GUI_LIB",
+					"-DQT_HTTPSERVER_LIB",
 					"-DQT_WEBSOCKETS_LIB",
 					"-DQT_NETWORK_LIB",
 					"-DQT_CORE_LIB",
@@ -424,18 +561,19 @@
 					.,
 					/opt/homebrew/lib/QtWidgets.framework/Headers,
 					/opt/homebrew/lib/QtGui.framework/Headers,
+					/opt/homebrew/lib/QtHttpServer.framework/Headers,
 					/opt/homebrew/lib/QtWebSockets.framework/Headers,
 					/opt/homebrew/lib/QtNetwork.framework/Headers,
 					/opt/homebrew/lib/QtCore.framework/Headers,
 					build/moc,
-					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.4.sdk/System/Library/Frameworks/OpenGL.framework/Headers,
-					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.4.sdk/System/Library/Frameworks/AGL.framework/Headers,
-					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.4.sdk/System/Library/Frameworks/OpenGL.framework/Headers,
-					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.4.sdk/System/Library/Frameworks/AGL.framework/Headers,
+					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk/System/Library/Frameworks/OpenGL.framework/Headers,
+					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk/System/Library/Frameworks/AGL.framework/Headers,
+					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk/System/Library/Frameworks/OpenGL.framework/Headers,
+					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk/System/Library/Frameworks/AGL.framework/Headers,
 					"/opt/homebrew/Cellar/qt/6.9.0/share/qt/mkspecs/macx-clang",
 				);
 				INFOPLIST_FILE = Info.plist;
-				INSTALL_DIR = build/;
+				INSTALL_DIR = /Users/jonathan/OriginMonitor/build/;
 				LDPLUSPLUS = "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++";
 				LIBRARY_SEARCH_PATHS = (
 					/opt/homebrew/share/qt/plugins/permissions,
@@ -453,6 +591,7 @@
 					"-DQT_NO_DEBUG",
 					"-DQT_WIDGETS_LIB",
 					"-DQT_GUI_LIB",
+					"-DQT_HTTPSERVER_LIB",
 					"-DQT_WEBSOCKETS_LIB",
 					"-DQT_NETWORK_LIB",
 					"-DQT_CORE_LIB",
@@ -468,6 +607,7 @@
 					"-DQT_NO_DEBUG",
 					"-DQT_WIDGETS_LIB",
 					"-DQT_GUI_LIB",
+					"-DQT_HTTPSERVER_LIB",
 					"-DQT_WEBSOCKETS_LIB",
 					"-DQT_NETWORK_LIB",
 					"-DQT_CORE_LIB",
@@ -498,15 +638,11 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = NO;
 				"ARCHS[sdk=macosx*]" = arm64;
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Developer ID Application";
-				CODE_SIGN_STYLE = Manual;
 				COPY_PHASE_STRIP = NO;
-				DEVELOPMENT_TEAM = "";
-				"DEVELOPMENT_TEAM[sdk=macosx*]" = Y53675G8V9;
+				DEVELOPMENT_TEAM = Y53675G8V9;
 				ENABLE_BITCODE = NO;
-				PRODUCT_BUNDLE_IDENTIFIER = uk.kimmitt.CelestronOriginMonitor;
+				PRODUCT_BUNDLE_IDENTIFIER = com.yourdomain.CelestronOriginMonitor;
 				PRODUCT_NAME = CelestronOriginMonitor;
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				QMAKE_FULL_VERSION = 1.0.0;
 				QMAKE_PKGINFO_TYPEINFO = "????";
 				QMAKE_SHORT_VERSION = 1.0;
@@ -520,17 +656,13 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = NO;
 				"ARCHS[sdk=macosx*]" = arm64;
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Developer ID Application";
-				CODE_SIGN_STYLE = Manual;
 				COPY_PHASE_STRIP = NO;
-				DEVELOPMENT_TEAM = "";
-				"DEVELOPMENT_TEAM[sdk=macosx*]" = Y53675G8V9;
+				DEVELOPMENT_TEAM = Y53675G8V9;
 				ENABLE_BITCODE = NO;
 				GCC_OPTIMIZATION_LEVEL = 0;
 				ONLY_ACTIVE_ARCH = YES;
-				PRODUCT_BUNDLE_IDENTIFIER = uk.kimmitt.CelestronOriginMonitor;
+				PRODUCT_BUNDLE_IDENTIFIER = com.yourdomain.CelestronOriginMonitor;
 				PRODUCT_NAME = CelestronOriginMonitor;
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				QMAKE_FULL_VERSION = 1.0.0;
 				QMAKE_PKGINFO_TYPEINFO = "????";
 				QMAKE_SHORT_VERSION = 1.0;

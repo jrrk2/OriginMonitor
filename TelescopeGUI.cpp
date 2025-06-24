@@ -1,5 +1,7 @@
 #include "TelescopeGUI.hpp"
 #include "CommandInterface.hpp"
+#include "AlpacaServer.hpp"
+#include "OriginBackend.hpp"
 #include <cmath>
 
 TelescopeGUI::TelescopeGUI(QWidget *parent) : QMainWindow(parent) {
@@ -17,6 +19,27 @@ TelescopeGUI::TelescopeGUI(QWidget *parent) : QMainWindow(parent) {
     connect(dataProcessor, &TelescopeDataProcessor::diskStatusUpdated, this, &TelescopeGUI::updateDiskDisplay);
     connect(dataProcessor, &TelescopeDataProcessor::dewHeaterStatusUpdated, this, &TelescopeGUI::updateDewHeaterDisplay);
     connect(dataProcessor, &TelescopeDataProcessor::orientationStatusUpdated, this, &TelescopeGUI::updateOrientationDisplay);
+
+    // NEW: Initialize Alpaca components
+    originBackend = new OriginBackend(this);
+    alpacaServer = new AlpacaServer(this);
+    alpacaServer->setTelescopeBackend(originBackend);
+    
+    // Connect Alpaca server signals
+    connect(alpacaServer, &AlpacaServer::serverStarted, this, &TelescopeGUI::onAlpacaServerStarted);
+    connect(alpacaServer, &AlpacaServer::serverStopped, this, &TelescopeGUI::onAlpacaServerStopped);
+    connect(alpacaServer, &AlpacaServer::requestReceived, this, &TelescopeGUI::onAlpacaRequestReceived);
+    
+    // Connect Origin backend signals
+    connect(originBackend, &OriginBackend::connected, this, [this]() {
+        alpacaLogTextEdit->append(QString("[%1] Origin telescope connected")
+                                 .arg(QTime::currentTime().toString()));
+    });
+    
+    connect(originBackend, &OriginBackend::disconnected, this, [this]() {
+        alpacaLogTextEdit->append(QString("[%1] Origin telescope disconnected")
+                                 .arg(QTime::currentTime().toString()));
+    });
     
     setupUI();
     setupWebSocket();
@@ -366,6 +389,7 @@ void TelescopeGUI::setupUI() {
     tabWidget->addTab(createCommandTab(), "Commands");
     tabWidget->addTab(createSlewAndImageTab(), "Slew && Image");   
     tabWidget->addTab(createDownloadTab(), "Auto Download");
+    tabWidget->addTab(createAlpacaTab(), "Alpaca Server");  // NEW TAB
     
     mainLayout->addWidget(tabWidget);
 }
@@ -1264,6 +1288,232 @@ QWidget* TelescopeGUI::createSlewAndImageTab() {
     mountCheckTimer->start();
     
     return tab;
+}
+
+
+// Add this method to TelescopeGUI.cpp:
+QWidget* TelescopeGUI::createAlpacaTab()
+{
+    QWidget *tab = new QWidget();
+    QVBoxLayout *mainLayout = new QVBoxLayout(tab);
+    
+    // Server Control Section
+    QGroupBox *controlGroup = new QGroupBox("Alpaca Server Control", tab);
+    QGridLayout *controlLayout = new QGridLayout(controlGroup);
+    
+    // Port configuration
+    controlLayout->addWidget(new QLabel("Port:"), 0, 0);
+    alpacaPortSpinBox = new QSpinBox(controlGroup);
+    alpacaPortSpinBox->setRange(1024, 65535);
+    alpacaPortSpinBox->setValue(11111); // Default Alpaca port
+    controlLayout->addWidget(alpacaPortSpinBox, 0, 1);
+    
+    // Server name
+    controlLayout->addWidget(new QLabel("Server Name:"), 1, 0);
+    alpacaServerNameEdit = new QLineEdit("Celestron Origin Alpaca Server", controlGroup);
+    controlLayout->addWidget(alpacaServerNameEdit, 1, 1);
+    
+    // Auto-start option
+    alpacaAutoStartCheckBox = new QCheckBox("Auto-start server on application launch", controlGroup);
+    controlLayout->addWidget(alpacaAutoStartCheckBox, 2, 0, 1, 2);
+    
+    // Discovery broadcast option
+    alpacaDiscoveryCheckBox = new QCheckBox("Enable discovery broadcasts", controlGroup);
+    alpacaDiscoveryCheckBox->setChecked(true);
+    controlLayout->addWidget(alpacaDiscoveryCheckBox, 3, 0, 1, 2);
+    
+    // Control buttons
+    QHBoxLayout *buttonLayout = new QHBoxLayout();
+    alpacaStartButton = new QPushButton("Start Server", controlGroup);
+    alpacaStopButton = new QPushButton("Stop Server", controlGroup);
+    alpacaStopButton->setEnabled(false);
+    
+    connect(alpacaStartButton, &QPushButton::clicked, this, &TelescopeGUI::startAlpacaServer);
+    connect(alpacaStopButton, &QPushButton::clicked, this, &TelescopeGUI::stopAlpacaServer);
+    
+    buttonLayout->addWidget(alpacaStartButton);
+    buttonLayout->addWidget(alpacaStopButton);
+    buttonLayout->addStretch();
+    
+    controlLayout->addLayout(buttonLayout, 4, 0, 1, 2);
+    
+    mainLayout->addWidget(controlGroup);
+    
+    // Status Section
+    QGroupBox *statusGroup = new QGroupBox("Server Status", tab);
+    QGridLayout *statusLayout = new QGridLayout(statusGroup);
+    
+    statusLayout->addWidget(new QLabel("Status:"), 0, 0);
+    alpacaStatusLabel = new QLabel("Stopped", statusGroup);
+    alpacaStatusLabel->setStyleSheet("color: red;");
+    statusLayout->addWidget(alpacaStatusLabel, 0, 1);
+    
+    statusLayout->addWidget(new QLabel("Port:"), 1, 0);
+    alpacaPortLabel = new QLabel("N/A", statusGroup);
+    statusLayout->addWidget(alpacaPortLabel, 1, 1);
+    
+    statusLayout->addWidget(new QLabel("Requests:"), 2, 0);
+    alpacaRequestCountLabel = new QLabel("0", statusGroup);
+    statusLayout->addWidget(alpacaRequestCountLabel, 2, 1);
+    
+    mainLayout->addWidget(statusGroup);
+    
+    // Connection Info Section
+    QGroupBox *connectionGroup = new QGroupBox("Connection Information", tab);
+    QVBoxLayout *connectionLayout = new QVBoxLayout(connectionGroup);
+    
+    QLabel *infoLabel = new QLabel(connectionGroup);
+    infoLabel->setText(
+        "<b>Alpaca API Endpoints:</b><br>"
+        "• Telescope: http://localhost:11111/api/v1/telescope/0/<br>"
+        "• Camera: http://localhost:11111/api/v1/camera/0/<br>"
+        "• Management: http://localhost:11111/management/v1/<br><br>"
+        
+        "<b>Compatible Software:</b><br>"
+        "• ASCOM Alpaca clients via bridge<br>"
+        "• SkySafari mobile app<br>"
+        "• Custom scripts using HTTP API<br>"
+        "• Web-based control interfaces<br><br>"
+        
+        "<b>Discovery:</b><br>"
+        "• Broadcasts on UDP port 32227<br>"
+        "• Compatible clients can auto-discover"
+    );
+    infoLabel->setWordWrap(true);
+    connectionLayout->addWidget(infoLabel);
+    
+    mainLayout->addWidget(connectionGroup);
+    
+    // Request Log Section
+    QGroupBox *logGroup = new QGroupBox("Request Log", tab);
+    QVBoxLayout *logLayout = new QVBoxLayout(logGroup);
+    
+    alpacaLogTextEdit = new QTextEdit(logGroup);
+    alpacaLogTextEdit->setMaximumHeight(200);
+    alpacaLogTextEdit->setFont(QFont("Monaco", 10)); // Monospace font
+    logLayout->addWidget(alpacaLogTextEdit);
+    
+    // Log control buttons
+    QHBoxLayout *logButtonLayout = new QHBoxLayout();
+    QPushButton *clearLogButton = new QPushButton("Clear Log", logGroup);
+    QPushButton *saveLogButton = new QPushButton("Save Log", logGroup);
+    
+    connect(clearLogButton, &QPushButton::clicked, this, &TelescopeGUI::clearAlpacaLog);
+    connect(saveLogButton, &QPushButton::clicked, this, &TelescopeGUI::saveAlpacaLog);
+    
+    logButtonLayout->addWidget(clearLogButton);
+    logButtonLayout->addWidget(saveLogButton);
+    logButtonLayout->addStretch();
+    
+    logLayout->addLayout(logButtonLayout);
+    
+    mainLayout->addWidget(logGroup);
+    
+    // Add stretch to push everything up
+    mainLayout->addStretch();
+    
+    return tab;
+}
+
+// Add these slot implementations to TelescopeGUI.cpp:
+
+void TelescopeGUI::startAlpacaServer()
+{
+    int port = alpacaPortSpinBox->value();
+    
+    alpacaLogTextEdit->append(QString("[%1] Starting Alpaca server on port %2...")
+                             .arg(QTime::currentTime().toString())
+                             .arg(port));
+    
+    if (alpacaServer->start(port)) {
+        alpacaLogTextEdit->append(QString("[%1] Server started successfully")
+                                 .arg(QTime::currentTime().toString()));
+    } else {
+        alpacaLogTextEdit->append(QString("[%1] Failed to start server")
+                                 .arg(QTime::currentTime().toString()));
+    }
+}
+
+void TelescopeGUI::stopAlpacaServer()
+{
+    alpacaLogTextEdit->append(QString("[%1] Stopping Alpaca server...")
+                             .arg(QTime::currentTime().toString()));
+    
+    alpacaServer->stop();
+    
+    alpacaLogTextEdit->append(QString("[%1] Server stopped")
+                             .arg(QTime::currentTime().toString()));
+}
+
+void TelescopeGUI::onAlpacaServerStarted()
+{
+    alpacaStatusLabel->setText("Running");
+    alpacaStatusLabel->setStyleSheet("color: green;");
+    alpacaPortLabel->setText(QString::number(alpacaPortSpinBox->value()));
+    
+    alpacaStartButton->setEnabled(false);
+    alpacaStopButton->setEnabled(true);
+    alpacaPortSpinBox->setEnabled(false);
+    
+    alpacaLogTextEdit->append(QString("[%1] Alpaca server is now accepting connections")
+                             .arg(QTime::currentTime().toString()));
+    alpacaLogTextEdit->append(QString("[%1] Discovery broadcasts enabled on UDP port 32227")
+                             .arg(QTime::currentTime().toString()));
+}
+
+void TelescopeGUI::onAlpacaServerStopped()
+{
+    alpacaStatusLabel->setText("Stopped");
+    alpacaStatusLabel->setStyleSheet("color: red;");
+    alpacaPortLabel->setText("N/A");
+    
+    alpacaStartButton->setEnabled(true);
+    alpacaStopButton->setEnabled(false);
+    alpacaPortSpinBox->setEnabled(true);
+}
+
+void TelescopeGUI::onAlpacaRequestReceived(const QString& method, const QString& path)
+{
+    static int requestCount = 0;
+    requestCount++;
+    
+    alpacaRequestCountLabel->setText(QString::number(requestCount));
+    
+    // Add to log with timestamp
+    alpacaLogTextEdit->append(QString("[%1] %2 %3")
+                             .arg(QTime::currentTime().toString())
+                             .arg(method)
+                             .arg(path));
+    
+    // Auto-scroll to bottom
+    alpacaLogTextEdit->verticalScrollBar()->setValue(
+        alpacaLogTextEdit->verticalScrollBar()->maximum());
+}
+
+void TelescopeGUI::clearAlpacaLog()
+{
+    alpacaLogTextEdit->clear();
+    alpacaRequestCountLabel->setText("0");
+}
+
+void TelescopeGUI::saveAlpacaLog()
+{
+    QString fileName = QFileDialog::getSaveFileName(this,
+        "Save Alpaca Log", 
+        QString("alpaca_log_%1.txt").arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss")),
+        "Text Files (*.txt)");
+    
+    if (!fileName.isEmpty()) {
+        QFile file(fileName);
+        if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream out(&file);
+            out << alpacaLogTextEdit->toPlainText();
+            
+            alpacaLogTextEdit->append(QString("[%1] Log saved to %2")
+                                     .arg(QTime::currentTime().toString())
+                                     .arg(fileName));
+        }
+    }
 }
 
 void TelescopeGUI::startSlewAndImage() {
