@@ -26,7 +26,7 @@ bool TelescopeDataProcessor::processJsonPacket(const QByteArray &jsonData) {
     QString type = obj["Type"].toString();
     
     // Only process notifications
-    if (type != "Notification") {
+    if (type != "Notification" && type != "Response") {
         qDebug() << "Ignoring non-notification packet";
         return false;
     }

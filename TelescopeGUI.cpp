@@ -1186,6 +1186,8 @@ QWidget* TelescopeGUI::createSlewAndImageTab() {
     targetComboBox->addItem("M42 - Orion Nebula", "05h35m17.3s -05°23'28\"");
     targetComboBox->addItem("M45 - Pleiades", "03h47m24.0s +24°07'00\"");
     targetComboBox->addItem("M51 - Whirlpool Galaxy", "13h29m52.7s +47°11'43\"");
+    targetComboBox->addItem("Virgo - Supercluster", "12h24m36.0s +8°0'00\"");
+    targetComboBox->addItem("Virgo - Galaxy1", "12h24m12.0s +7°57'07\"");
     
     targetLayout->addWidget(targetComboBox, 0, 1);
     
