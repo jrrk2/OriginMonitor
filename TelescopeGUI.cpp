@@ -1732,11 +1732,11 @@ void TelescopeGUI::initializeTelescope() {
     QString timeStr = now.toString("HH:mm:ss");
     
     // Use location values from init.txt - Cambridge, UK coordinates
-    runInitCommand["Date"] = "06 05 2025"; // Or use dateStr for current date
+    runInitCommand["Date"] = dateStr; // Or use dateStr for current date
     runInitCommand["FakeInitialize"] = false;
     runInitCommand["Latitude"] = 0.9118493267600084;  // In radians (Cambridge, UK)
     runInitCommand["Longitude"] = 0.0013880067713051129;  // In radians
-    runInitCommand["Time"] = "20:37:39"; // Or use timeStr for current time
+    runInitCommand["Time"] = timeStr; // Or use timeStr for current time
     runInitCommand["TimeZone"] = "Europe/London";
     
     sendJsonMessage(runInitCommand);
