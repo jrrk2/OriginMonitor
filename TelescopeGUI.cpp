@@ -19,6 +19,8 @@ TelescopeGUI::TelescopeGUI(QWidget *parent)
     // IMPORTANT: Create the backend first
     //
     originBackend = new OriginBackend(this);
+    connect(originBackend, &OriginBackend::connected, this, &TelescopeGUI::onWebSocketConnected);
+    connect(originBackend, &OriginBackend::disconnected, this, &TelescopeGUI::onWebSocketDisconnected);
 
     //
     // Get the SAME data processor that OriginBackend feeds
@@ -290,6 +292,9 @@ void TelescopeGUI::processPendingDatagrams() {
                     }
                     
                     telescopeListWidget->addItem(displayText);
+                    if (telescopeIpLineEdit && telescopeIpLineEdit->text().trimmed().isEmpty()) {
+                        telescopeIpLineEdit->setText(telescopeIP);
+                    }
                     
                     statusLabel->setText(QString("Found Celestron Origin telescope at %1").arg(telescopeIP));
                 }
@@ -299,30 +304,41 @@ void TelescopeGUI::processPendingDatagrams() {
 }
 
 void TelescopeGUI::connectToSelectedTelescope() {    
-    QListWidgetItem *selectedItem = telescopeListWidget->currentItem();
-    QString text;
-    if (!selectedItem) {
-        statusLabel->setText("Selected default telescope");
-        text = "192.168.1.195";
-    }
-    else
-          text = selectedItem->text();
-
-    // Extract the IP address from the selected item
-    QRegularExpression ipRegex("\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b");
-    QRegularExpressionMatch match = ipRegex.match(text);
-    
-    if (!match.hasMatch()) {
-        statusLabel->setText("Could not find IP address in selected item");
+    if (originBackend->isConnected()) {
+        originBackend->disconnectFromTelescope();
         return;
     }
-    
-    QString ipAddress = match.captured(0);
+
+    QListWidgetItem *selectedItem = telescopeListWidget->currentItem();
+    QString ipAddress = telescopeIpLineEdit->text().trimmed();
+
+    if (ipAddress.isEmpty() && selectedItem) {
+        // Extract the IP address from the selected item
+        QRegularExpression ipRegex("\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b");
+        QRegularExpressionMatch match = ipRegex.match(selectedItem->text());
+        if (match.hasMatch()) {
+            ipAddress = match.captured(0);
+        }
+    }
+
+    if (ipAddress.isEmpty()) {
+        statusLabel->setText("Enter a telescope IP address or select a discovered telescope");
+        return;
+    }
+
+    telescopeIpLineEdit->setText(ipAddress);
+    QSettings settings;
+    settings.setValue("connection/telescopeIp", ipAddress);
+
     statusLabel->setText(QString("Connecting to telescope at %1...").arg(ipAddress));
     
-    originBackend->connectToTelescope(ipAddress, 80);
-    // Store the currently connected IP
-    connectedIpAddress = ipAddress;
+    if (originBackend->connectToTelescope(ipAddress, 80)) {
+        // Store the currently connected IP
+        connectedIpAddress = ipAddress;
+    } else {
+        connectedIpAddress.clear();
+        statusLabel->setText(QString("Failed to connect to telescope at %1").arg(ipAddress));
+    }
 }
 
 void TelescopeGUI::onWebSocketConnected() {
@@ -490,6 +506,21 @@ void TelescopeGUI::setupUI() {
     
     // Status and controls
     QHBoxLayout *controlLayout = new QHBoxLayout();
+
+    QHBoxLayout *addressLayout = new QHBoxLayout();
+    addressLayout->addWidget(new QLabel("Telescope IP:", discoveryBox));
+    telescopeIpLineEdit = new QLineEdit(discoveryBox);
+    telescopeIpLineEdit->setPlaceholderText("Enter IP address, or select a discovered telescope below");
+    QSettings settings;
+    telescopeIpLineEdit->setText(settings.value("connection/telescopeIp").toString());
+    connect(telescopeIpLineEdit, &QLineEdit::editingFinished, this, [this]() {
+        const QString ipAddress = telescopeIpLineEdit->text().trimmed();
+        telescopeIpLineEdit->setText(ipAddress);
+        QSettings settings;
+        settings.setValue("connection/telescopeIp", ipAddress);
+    });
+    addressLayout->addWidget(telescopeIpLineEdit, 1);
+    discoveryLayout->addLayout(addressLayout);
     
     QPushButton *discoverButton = new QPushButton("Discover Telescopes", discoveryBox);
     connect(discoverButton, &QPushButton::clicked, this, &TelescopeGUI::startDiscovery);
@@ -506,6 +537,16 @@ void TelescopeGUI::setupUI() {
     
     // Telescope list
     telescopeListWidget = new QListWidget(discoveryBox);
+    connect(telescopeListWidget, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
+        QRegularExpression ipRegex("\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b");
+        QRegularExpressionMatch match = ipRegex.match(item->text());
+        if (match.hasMatch()) {
+            const QString ipAddress = match.captured(0);
+            telescopeIpLineEdit->setText(ipAddress);
+            QSettings settings;
+            settings.setValue("connection/telescopeIp", ipAddress);
+        }
+    });
     discoveryLayout->addWidget(telescopeListWidget);
     
     mainLayout->addWidget(discoveryBox);

@@ -14,6 +14,9 @@
  */
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
+    QApplication::setOrganizationName("OriginMonitor");
+    QApplication::setApplicationName("OriginMonitor");
+    QApplication::setApplicationDisplayName("Celestron Origin Monitor");
 
     // Create and show the main window
     TelescopeGUI *gui = new TelescopeGUI();

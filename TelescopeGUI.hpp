@@ -12,6 +12,7 @@ class AlignmentController;
 #include <QSpinBox>
 #include <QPushButton>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QTabWidget>
 #include <QSplitter>
@@ -36,6 +37,7 @@ class AlignmentController;
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QFrame>
+#include <QSettings>
 
 #include "TelescopeDataProcessor.hpp"
 #include "CommandInterface.hpp"
@@ -234,6 +236,7 @@ private:
     
     // UI elements
     QListWidget *telescopeListWidget;
+    QLineEdit *telescopeIpLineEdit;
     QPushButton *connectButton;
     QLabel *statusLabel;
     
