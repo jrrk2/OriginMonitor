@@ -1,0 +1,199 @@
+#include "SkyMonitor.hpp"
+#include "FocusAnalyzer.hpp"
+
+#include <QDir>
+#include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <algorithm>
+#include <cmath>
+
+namespace {
+constexpr double kPi = 3.14159265358979323846;
+QString baseDir() { return QDir::homePath() + "/Pictures/CelestronOrigin"; }
+QString safeName(const QString& s) { QString o = s; for (QChar& c : o) if (!c.isLetterOrNumber() && c != '-' && c != '_') c = '_'; return o.isEmpty() ? "target" : o; }
+}
+
+SkyMonitor::SkyMonitor() { loadSkyMap(); }
+
+QJsonObject SkyMonitor::settings() const
+{
+    return QJsonObject{{"lat_deg", m_site.latDeg}, {"lon_deg", m_site.lonDeg}, {"black_level", m_blackLevel}, {"auto_stack", m_autoStack},
+                       {"min_transparency", m_minTransparency}, {"target", m_target}};
+}
+
+QString SkyMonitor::stackDirectory() const { return baseDir() + "/stacks/" + safeName(m_target); }
+
+QJsonObject SkyMonitor::setTarget(const QString& name, double raHours, double decDeg, bool reset)
+{
+    if (m_stack.frames() > 0) saveStack();
+    m_target = name.isEmpty() ? "auto" : name;
+    m_targetKnown = raHours >= 0 && raHours < 24 && decDeg >= -90 && decDeg <= 90;
+    if (m_targetKnown) m_targetPos = {raHours, decDeg};
+    m_stack.reset(); m_sinceSave = 0;
+    bool resumed = false;
+    if (!reset) resumed = m_stack.load(stackDirectory());
+    QJsonObject o{{"ok", true}, {"target", m_target}, {"resumed", resumed}, {"stack", m_stack.summary()}};
+    return o;
+}
+
+bool SkyMonitor::saveStack() { return m_stack.frames() > 0 && m_stack.save(stackDirectory()); }
+
+QJsonObject SkyMonitor::stackSummary() const
+{
+    QJsonObject o = m_stack.summary();
+    o["target"] = m_target; o["directory"] = stackDirectory();
+    return o;
+}
+
+QString SkyMonitor::mapKey(double az, double alt) { return QString("%1_%2").arg(int(std::floor(az / 10.0)) * 10).arg(int(std::floor(alt / 5.0)) * 5); }
+
+void SkyMonitor::loadSkyMap()
+{
+    QFile f(baseDir() + "/sky_map.json");
+    if (!f.open(QIODevice::ReadOnly)) return;
+    const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+    m_skyMap = o["bins"].toObject();
+    const QJsonObject d = o["dark_rate"].toObject();
+    for (auto it = d.begin(); it != d.end(); ++it) m_darkRate[it.key()] = it.value().toDouble();
+}
+
+void SkyMonitor::saveSkyMap() const
+{
+    QDir().mkpath(baseDir());
+    QJsonObject d; for (auto it = m_darkRate.begin(); it != m_darkRate.end(); ++it) d[it.key()] = it.value();
+    QFile f(baseDir() + "/sky_map.json");
+    if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(QJsonObject{{"bins", m_skyMap}, {"dark_rate", d}}).toJson(QJsonDocument::Indented));
+}
+
+void SkyMonitor::noteSkyMap(double az, double alt, bool good, const QDateTime& utc)
+{
+    if (alt < 0) return;
+    const QString key = mapKey(az, alt);
+    QJsonObject b = m_skyMap[key].toObject();
+    b[good ? "good" : "bad"] = b[good ? "good" : "bad"].toInt() + 1;
+    const QString field = good ? "good_dates" : "bad_dates", day = utc.date().toString(Qt::ISODate);
+    QJsonArray dates = b[field].toArray();
+    bool have = false; for (const auto& v : dates) if (v.toString() == day) have = true;
+    if (!have) { dates.append(day); while (dates.size() > 30) dates.removeFirst(); }
+    b[field] = dates;
+    m_skyMap[key] = b;
+    if (++m_mapDirty >= 20) { saveSkyMap(); m_mapDirty = 0; }
+}
+
+QJsonObject SkyMonitor::obstructionMap() const
+{
+    // A bin is "suspect" when bad frames were seen on at least two different nights and no good frame was ever seen there
+    QJsonArray suspect, mixed;
+    for (auto it = m_skyMap.begin(); it != m_skyMap.end(); ++it) {
+        const QJsonObject b = it.value().toObject();
+        const int good = b["good"].toInt(), bad = b["bad"].toInt(), badNights = b["bad_dates"].toArray().size();
+        QJsonObject e{{"bin", it.key()}, {"good", good}, {"bad", bad}, {"bad_nights", badNights}, {"good_nights", b["good_dates"].toArray().size()}};
+        if (good == 0 && bad >= 3 && badNights >= 2) suspect.append(e); else if (bad > 0) mixed.append(e);
+    }
+    return QJsonObject{{"ok", true}, {"likely_obstructed", suspect}, {"sometimes_bad", mixed}, {"bins_total", m_skyMap.size()}};
+}
+
+QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int iso, double raRad, double decRad, const QDateTime& utc)
+{
+    SkyFrame F = analyseFrame(fits);
+    FocusResult focus = focusFromFrame(F);
+    QJsonObject o = focus.toJson();
+    o["time"] = utc.toString(Qt::ISODateWithMs);
+    o["exposure"] = exposureS; o["iso"] = iso;
+    if (!F.valid) { o["verdict"] = "unreadable"; o["reasons"] = QJsonArray{F.note}; return o; }
+
+    // --- geometry
+    const Astro::Equatorial pointing{raRad * 12.0 / kPi, decRad * 180.0 / kPi};
+    const Astro::AltAz aa = Astro::altAz(pointing, m_site, utc);
+    const double sunAlt = Astro::altAz(Astro::sunPosition(utc), m_site, utc).alt;
+    const double moonAlt = Astro::moonAltitude(m_site, utc), moonIll = Astro::moonIllumination(utc), moonSep = Astro::moonSeparationDeg(pointing, utc);
+    o["ra_hours"] = pointing.raHours; o["dec_deg"] = pointing.decDeg; o["alt_deg"] = aa.alt; o["az_deg"] = aa.az;
+    o["sun_alt_deg"] = sunAlt; o["moon_alt_deg"] = moonAlt; o["moon_illumination"] = moonIll; o["moon_separation_deg"] = moonSep;
+    o["target"] = m_target;
+    double offTarget = 0;
+    if (m_targetKnown) { offTarget = Astro::separationDeg(pointing, m_targetPos); o["off_target_deg"] = offTarget; }
+
+    // --- sky level and gradient
+    const double bgRate = std::max(0.0, F.background - m_blackLevel) / std::max(exposureS, 1e-6);
+    const double gradient = skyGradient(F);
+    o["sky_rate"] = bgRate; o["sky_gradient_sigma"] = gradient;
+    o["stars_detected"] = int(F.stars.size()); o["layout_green_main_diagonal"] = F.greenOnMainDiagonal;
+    const QString isoKey = QString("iso%1").arg(iso);
+    const bool dark = sunAlt < -18 && moonAlt < -5;
+    if (dark && bgRate > 0 && (!m_darkRate.contains(isoKey) || bgRate < m_darkRate[isoKey])) { m_darkRate[isoKey] = bgRate; ++m_mapDirty; }
+    double excess = 0;
+    if (m_darkRate.contains(isoKey) && m_darkRate[isoKey] > 0) { excess = bgRate / m_darkRate[isoKey] - 1.0; o["sky_excess_over_dark"] = excess; }
+
+    // --- registration against the target's stack and per-tile coverage
+    QStringList reasons; QString verdict = "clear";
+    LiveStacker::Report rep;
+    const bool haveStack = m_stack.hasReference();
+    const bool pointingOk = !m_targetKnown || offTarget < 0.5;
+    if (!pointingOk) { verdict = "off_target"; reasons << QString("mount is %1 deg from the target position").arg(offTarget, 0, 'f', 2); }
+    if (haveStack && pointingOk) {
+        rep = m_stack.assess(F, exposureS);                 // register and measure first; only frames judged usable are stacked
+        QJsonObject reg{{"inliers", rep.inliers}, {"rms_px", rep.rms}, {"rotation_deg", rep.rotationDeg}, {"shift_px", rep.shiftPx}, {"matched_fraction", rep.matchedFraction},
+                        {"transparency", rep.transparency}, {"raw_transparency", rep.rawTransparency}, {"stacked", rep.accepted && m_autoStack}, {"frames_in_stack", rep.frames}};
+        if (!rep.reason.isEmpty()) reg["refused_because"] = rep.reason;
+        QJsonArray cov; double worst = 1; int weak = 0;
+        for (int i = 0; i < LiveStacker::Report::kTilesX * LiveStacker::Report::kTilesY; ++i) {
+            const double c = rep.tileExpected[i] >= 3 ? double(rep.tileFound[i]) / rep.tileExpected[i] : -1.0;
+            cov.append(c);
+            if (c >= 0) { worst = std::min(worst, c); if (c < 0.3) ++weak; }
+        }
+        reg["tile_coverage"] = cov; reg["tile_grid"] = QString("%1x%2 row-major from top-left of the stack frame").arg(LiveStacker::Report::kTilesX).arg(LiveStacker::Report::kTilesY);
+        o["registration"] = reg;
+        if (rep.inliers == 0 || rep.reason == "no star-pattern match") {
+            verdict = "cloudy"; reasons << QString("cannot register: %1 stars detected").arg(F.stars.size());
+        } else if (rep.rawTransparency > 0) {
+            if (rep.transparency < 0.5) { verdict = "cloudy"; reasons << QString("transparency %1").arg(rep.transparency, 0, 'f', 2); }
+            else if (rep.transparency < 0.8) { verdict = "hazy"; reasons << QString("transparency %1").arg(rep.transparency, 0, 'f', 2); }
+            if (weak >= 2 && verdict != "cloudy") { verdict = "patchy"; reasons << QString("%1 of 12 tiles have under 30% of their stars (cloud edge or obstruction)").arg(weak); }
+        }
+    } else if (!haveStack && pointingOk) {
+        // First frame of a target: becomes the reference if it has enough stars
+        rep = m_autoStack ? m_stack.add(F, exposureS, m_minTransparency) : LiveStacker::Report();
+        o["registration"] = QJsonObject{{"reference_frame", rep.accepted}, {"stacked", rep.accepted}, {"frames_in_stack", rep.frames}};
+        if (!rep.accepted && m_autoStack) { verdict = F.stars.size() < 12 ? "cloudy" : "unknown"; reasons << rep.reason; }
+        if (F.stars.size() < 25) { verdict = "cloudy"; reasons << QString("only %1 stars detected").arg(F.stars.size()); }
+    }
+
+    // Stack the frame only if it is a usable one: clouds, patchy obstruction and wrong pointing would dilute the stack
+    const bool stackable = haveStack && pointingOk && (verdict == "clear" || verdict == "hazy");
+    if (stackable && m_autoStack) {
+        const LiveStacker::Report added = m_stack.add(F, exposureS, m_minTransparency);
+        rep.accepted = added.accepted; rep.frames = added.frames;
+        QJsonObject reg = o["registration"].toObject(); reg["stacked"] = added.accepted; reg["frames_in_stack"] = added.frames;
+        if (!added.reason.isEmpty()) reg["refused_because"] = added.reason;
+        o["registration"] = reg;
+    } else if (haveStack) {
+        QJsonObject reg = o["registration"].toObject(); reg["stacked"] = false; reg["frames_in_stack"] = m_stack.frames();
+        if (verdict != "clear" && verdict != "hazy") reg["refused_because"] = "frame judged " + verdict;
+        o["registration"] = reg;
+    }
+
+    // --- sky brightness context (never overrides cloud, but explains it and flags what the moon or dawn are doing)
+    QStringList notes;
+    if (sunAlt > -12) notes << (sunAlt > -6 ? "bright twilight" : "twilight");
+    if (moonAlt > 0 && moonIll > 0.05 && (excess > 0.3 || gradient > 8)) notes << QString("moon glow (moon alt %1, illumination %2, separation %3 deg)").arg(moonAlt, 0, 'f', 0).arg(moonIll, 0, 'f', 2).arg(moonSep, 0, 'f', 0);
+    else if (excess > 0.5 && dark) notes << "sky brighter than the dark baseline without the moon or sun up (light pollution, thin cloud lit from below, or dew)";
+    if (verdict == "clear" && !notes.isEmpty() && (moonAlt > 0 && moonIll > 0.05 && (excess > 0.3 || gradient > 8))) verdict = "moon_glow";
+    if (verdict == "clear" && sunAlt > -12) verdict = "twilight";
+    if (aa.alt < 20) notes << QString("low altitude (%1 deg): extinction, murk and obstructions likely").arg(aa.alt, 0, 'f', 0);
+    o["notes"] = QJsonArray::fromStringList(notes);
+    if (focus.valid && haveStack) { /* focus drift is left to the caller: compare hfr_px with earlier frames */ }
+
+    // --- obstruction memory: only frames whose geometry is trustworthy count
+    const bool good = verdict == "clear" || verdict == "moon_glow" || verdict == "twilight" || verdict == "hazy";
+    if (pointingOk && verdict != "unknown") noteSkyMap(aa.az, aa.alt, good, utc);
+    o["sky_map_bin"] = mapKey(aa.az, aa.alt);
+    const QJsonObject bin = m_skyMap[mapKey(aa.az, aa.alt)].toObject();
+    o["sky_map_history"] = QJsonObject{{"good", bin["good"].toInt()}, {"bad", bin["bad"].toInt()}, {"bad_nights", bin["bad_dates"].toArray().size()}, {"good_nights", bin["good_dates"].toArray().size()}};
+
+    o["verdict"] = verdict; o["reasons"] = QJsonArray::fromStringList(reasons);
+    o["stack"] = stackSummary();
+    if (stackable && m_autoStack && rep.accepted && ++m_sinceSave >= 10) { saveStack(); m_sinceSave = 0; }
+    if (m_mapDirty >= 20) { saveSkyMap(); m_mapDirty = 0; }
+    return o;
+}

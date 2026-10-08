@@ -28,5 +28,8 @@ struct FocusResult {
     QJsonObject toJson() const;
 };
 
+struct SkyFrame;
+/// Score an already analysed frame (the stacker and the focus score share one star finder).
+FocusResult focusFromFrame(const SkyFrame& frame);
 /// Score a FITS file held in memory (BITPIX 16 only). Thread-safe, no Qt event loop needed.
 FocusResult evaluateFocus(const QByteArray& fitsData);

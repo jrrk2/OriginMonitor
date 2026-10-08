@@ -122,6 +122,12 @@ def main():
     for name in ("ping", "status", "manual", "auto", "focuser", "focuser-settings", "mount", "quit"):
         sub.add_parser(name)
     c = sub.add_parser("connect"); c.add_argument("host")
+    an = sub.add_parser("analysis"); an.add_argument("--history", type=int, default=0)
+    ev = sub.add_parser("events"); ev.add_argument("--since", type=float, default=0)
+    tg = sub.add_parser("target"); tg.add_argument("name", nargs="?"); tg.add_argument("--ra-hours", type=float); tg.add_argument("--dec-deg", type=float); tg.add_argument("--reset", action="store_true")
+    sub.add_parser("stack"); sub.add_parser("sky-map")
+    mo = sub.add_parser("monitor"); mo.add_argument("--lat", type=float); mo.add_argument("--lon", type=float); mo.add_argument("--black-level", type=float)
+    mo.add_argument("--auto-stack", choices=["on", "off"]); mo.add_argument("--min-transparency", type=float)
     fo = sub.add_parser("focus"); fo.add_argument("--history", type=int, default=0, help="also return the newest N scores")
     s = sub.add_parser("set")
     s.add_argument("--exposure", type=float); s.add_argument("--iso", type=int)
@@ -144,6 +150,21 @@ def main():
         out = call(a.port, cmd="set", **{k: v for k, v in vars(a).items() if k in ("exposure", "iso", "binning") and v is not None})
     elif a.cmd == "snapshot":
         out = call(a.port, cmd="snapshot", timeout=a.timeout, **({"dir": a.dir} if a.dir else {}))
+    elif a.cmd == "analysis":
+        out = call(a.port, cmd="analysis", history=a.history)
+    elif a.cmd == "events":
+        out = call(a.port, cmd="events", since=a.since)
+    elif a.cmd == "target":
+        out = call(a.port, cmd="target", **({"name": a.name} if a.name else {}), **({"ra_hours": a.ra_hours} if a.ra_hours is not None else {}),
+                   **({"dec_deg": a.dec_deg} if a.dec_deg is not None else {}), reset=a.reset)
+    elif a.cmd == "stack":
+        out = call(a.port, cmd="stack")
+    elif a.cmd == "sky-map":
+        out = call(a.port, cmd="sky_map")
+    elif a.cmd == "monitor":
+        kw = {k: v for k, v in (("lat_deg", a.lat), ("lon_deg", a.lon), ("black_level", a.black_level), ("min_transparency", a.min_transparency)) if v is not None}
+        if a.auto_stack: kw["auto_stack"] = a.auto_stack == "on"
+        out = call(a.port, cmd="monitor", **kw)
     elif a.cmd == "focus":
         out = call(a.port, cmd="focus_status", history=a.history)
     elif a.cmd == "focuser":

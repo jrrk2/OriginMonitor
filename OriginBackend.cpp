@@ -61,6 +61,7 @@ OriginBackend::OriginBackend(QObject *parent)
         qWarning() << "WebSocket error:" << error << m_webSocket->errorString();
         logWebSocketMessage("ERROR", QString("Code: %1, Message: %2")
                            .arg(error).arg(m_webSocket->errorString()));
+        recordEvent("connection_error", m_webSocket->errorString(), QJsonObject{{"code", int(error)}});
     });
 
     // Connect data processor signals
@@ -815,6 +816,7 @@ void OriginBackend::onWebSocketDisconnected()
     }
     
     stopContinuousSnapshots();
+    recordEvent("disconnected", "websocket connection to the telescope was lost");
     emit disconnected();
 }
 
@@ -828,7 +830,19 @@ void OriginBackend::onTextMessageReceived(const QString &message)
     }
     
     QJsonObject obj = doc.object();
-    
+
+    // Forward telescope-reported errors to the event feed
+    {
+        const QString errMsg = obj["ErrorMessage"].toString();
+        const int errCode = obj["ErrorCode"].toInt(0);
+        const QString cmd = obj["Command"].toString(), type = obj["Type"].toString(), state = obj["State"].toString();
+        const QString lower = (cmd + " " + type + " " + state).toLower();
+        if (errCode != 0 || !errMsg.isEmpty())
+            recordEvent("telescope_error", QString("%1 %2: %3 (code %4)").arg(obj["Source"].toString(), cmd, errMsg, QString::number(errCode)), obj);
+        else if (lower.contains("error") || lower.contains("fault") || lower.contains("alert") || lower.contains("warn") || lower.contains("fail") || lower.contains("alarm"))
+            recordEvent("telescope_alert", QString("%1 %2 %3 %4").arg(obj["Source"].toString(), cmd, type, state).trimmed(), obj);
+    }
+
     // Still emit for other listeners
     emit messageReceived(obj);
     
@@ -1077,6 +1091,7 @@ void OriginBackend::requestImage(const QString &filePath, bool isSnapshot) {
             }
         } else {
             qWarning() << "Download error:" << reply->errorString();
+            recordEvent("download_error", reply->errorString());
             m_snapshotInProgress = false;
             if (reply->property("isTiff").toBool()) {
                 stopContinuousSnapshots();
@@ -1183,18 +1198,19 @@ void OriginBackend::setCameraConnected(bool connected)
     qDebug() << "  Camera logical after:" << m_status.isCameraLogicallyConnected;
 }
 
-// Focus figure of merit for every snapshot, kept in memory, logged to focus_log.csv next to the snapshots and announced by focusEvaluated()
+// Sky analysis for every snapshot (focus, transparency, tile coverage, sky level, moon/sun geometry, live stack), kept in memory, logged to
+// focus_log.csv next to the snapshots and announced by focusEvaluated(). The decision what to do about it is left to the caller.
 void OriginBackend::evaluateSnapshotFocus(const QString& filePath, const QByteArray& imageData, double ra, double dec, double exposure)
 {
-    const FocusResult r = evaluateFocus(imageData);
-    QJsonObject o = r.toJson();
-    o["time"] = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
-    o["exposure"] = exposure; o["ra_rad"] = ra; o["dec_rad"] = dec; o["file"] = filePath;
+    QJsonObject o = m_sky.process(imageData, exposure, m_currentISO, ra, dec, QDateTime::currentDateTimeUtc());
+    o["file"] = filePath; o["ra_rad"] = ra; o["dec_rad"] = dec;
     m_focusHistory.append(o);
     while (m_focusHistory.size() > 500) m_focusHistory.removeFirst();
 
-    if (r.valid) qInfo().nospace() << "Focus: HFR " << r.hfrPx << " px (" << r.hfrArcsec << "\") from " << r.stars << " stars, spread " << r.hfrSpreadPx << " px, " << r.elapsedMs << " ms";
-    else qInfo() << "Focus: not scored -" << r.note;
+    if (o["valid"].toBool()) qInfo().nospace() << "Sky: " << o["verdict"].toString() << ", HFR " << o["hfr_px"].toDouble() << " px from " << o["stars"].toInt() << " stars, transparency "
+        << o["registration"].toObject()["transparency"].toDouble() << ", stack " << o["stack"].toObject()["frames"].toInt() << " frames";
+    else qInfo() << "Sky: not scored -" << o["note"].toString() << o["verdict"].toString();
+    if (o["verdict"].toString() == "unreadable") recordEvent("image_unreadable", "snapshot could not be analysed: " + o["note"].toString());
 
     QDir dir(QDir::homePath() + "/Pictures/CelestronOrigin");
     if (dir.mkpath(".")) {
@@ -1202,12 +1218,37 @@ void OriginBackend::evaluateSnapshotFocus(const QString& filePath, const QByteAr
         const bool fresh = !log.exists();
         if (log.open(QIODevice::Append | QIODevice::Text)) {
             QTextStream t(&log);
-            if (fresh) t << "time,file,exposure,valid,stars,hfr_px,hfr_arcsec,hfr_spread_px,peak_fraction,background,noise\n";
-            t << o["time"].toString() << ',' << QFileInfo(filePath).fileName() << ',' << exposure << ',' << (r.valid ? 1 : 0) << ',' << r.stars << ','
-              << r.hfrPx << ',' << r.hfrArcsec << ',' << r.hfrSpreadPx << ',' << r.peakFraction << ',' << r.background << ',' << r.noise << '\n';
+            const QJsonObject reg = o["registration"].toObject();
+            if (fresh) t << "time,file,exposure,target,verdict,stars,hfr_px,hfr_arcsec,hfr_spread_px,transparency,matched_fraction,sky_rate,sky_gradient_sigma,alt_deg,az_deg,moon_alt_deg,moon_separation_deg,stack_frames\n";
+            t << o["time"].toString() << ',' << QFileInfo(filePath).fileName() << ',' << exposure << ',' << o["target"].toString() << ',' << o["verdict"].toString() << ',' << o["stars"].toInt() << ','
+              << o["hfr_px"].toDouble() << ',' << o["hfr_arcsec"].toDouble() << ',' << o["hfr_spread_px"].toDouble() << ',' << reg["transparency"].toDouble() << ',' << reg["matched_fraction"].toDouble() << ','
+              << o["sky_rate"].toDouble() << ',' << o["sky_gradient_sigma"].toDouble() << ',' << o["alt_deg"].toDouble() << ',' << o["az_deg"].toDouble() << ',' << o["moon_alt_deg"].toDouble() << ','
+              << o["moon_separation_deg"].toDouble() << ',' << o["stack"].toObject()["frames"].toInt() << '\n';
         }
     }
     emit focusEvaluated(o);
+}
+
+void OriginBackend::recordEvent(const QString& kind, const QString& text, const QJsonObject& detail)
+{
+    // identical consecutive events within 5 s are one event (the telescope repeats status errors every tick)
+    if (!m_events.isEmpty()) {
+        const QJsonObject& last = m_events.last();
+        if (last["kind"].toString() == kind && last["text"].toString() == text && QDateTime::fromString(last["time"].toString(), Qt::ISODateWithMs).msecsTo(QDateTime::currentDateTimeUtc()) < 5000) return;
+    }
+    QJsonObject e{{"seq", double(++m_eventSeq)}, {"time", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)}, {"kind", kind}, {"text", text}};
+    if (!detail.isEmpty()) e["detail"] = detail;
+    m_events.append(e);
+    while (m_events.size() > 500) m_events.removeFirst();
+    qWarning().noquote() << "EVENT" << kind << text;
+    emit eventRecorded(e);
+}
+
+QJsonObject OriginBackend::eventsSince(qint64 afterSeq, int limit) const
+{
+    QJsonArray a;
+    for (const QJsonObject& e : m_events) if (qint64(e["seq"].toDouble()) > afterSeq && a.size() < limit) a.append(e);
+    return QJsonObject{{"ok", true}, {"events", a}, {"next", double(m_eventSeq)}, {"connected", m_status.isConnected}};
 }
 
 QJsonArray OriginBackend::focusHistory(int count) const

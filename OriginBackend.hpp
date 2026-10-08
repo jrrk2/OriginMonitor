@@ -19,6 +19,7 @@
 #include <QWebSocket>
 #include "TelescopeDataProcessor.hpp"
 #include "FocusAnalyzer.hpp"
+#include "SkyMonitor.hpp"
 
 /**
  * @brief Backend adapter to connect Alpaca server to Celestron Origin telescope
@@ -126,6 +127,10 @@ public:
     // Focus quality of every snapshot (see FocusAnalyzer.hpp); history is capped, newest last
     QJsonObject lastFocus() const { return m_focusHistory.isEmpty() ? QJsonObject() : m_focusHistory.last(); }
     QJsonArray focusHistory(int count) const;
+    SkyMonitor& sky() { return m_sky; }                  // per-frame sky analysis and live stack (see SkyMonitor.hpp)
+    // Event feed for an external supervisor: telescope errors and alerts, connection loss, download failures.
+    QJsonObject eventsSince(qint64 afterSeq, int limit = 200) const;
+    void recordEvent(const QString& kind, const QString& text, const QJsonObject& detail = QJsonObject());
     double currentExposure() const { return m_currentExposure; }
     int currentISO() const { return m_currentISO; }
     int currentBinning() const { return m_currentBinning; }
@@ -146,6 +151,7 @@ signals:
     void snapshotRequested();
     void messageReceived(const QJsonObject& message);   // every JSON message from the telescope
     void continuousSnapshotsChanged(bool running);
+    void eventRecorded(const QJsonObject& event);
     void focusEvaluated(const QJsonObject& focus);       // after every snapshot: FocusResult::toJson() plus time, exposure, ra, dec, file
     void tiffImageDownloaded(const QString& filePath, const QByteArray& imageData,
                             double ra, double dec, double exposure);
@@ -210,6 +216,9 @@ private:
     bool m_snapshotInProgress;
     bool m_continuousSnapshots = false;
     QList<QJsonObject> m_focusHistory;
+    SkyMonitor m_sky;
+    QList<QJsonObject> m_events;
+    qint64 m_eventSeq = 0;
     void evaluateSnapshotFocus(const QString& filePath, const QByteArray& imageData, double ra, double dec, double exposure);
     // User's manual settings; the telescope reverts live-stream exposure/ISO after each sample capture
     double m_requestedExposure = 0.0;

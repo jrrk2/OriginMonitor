@@ -222,6 +222,32 @@ QJsonObject ControlServer::handle(const QJsonObject& req)
     }
 
     if (cmd == "snapshot") return doSnapshot(req);
+    if (cmd == "analysis") {                          // latest per-frame sky analysis, plus the newest "history" records
+        QJsonObject r{{"ok", true}, {"last", m_backend->lastFocus()}};
+        if (req["history"].toInt() > 0) r["history"] = m_backend->focusHistory(req["history"].toInt());
+        return r;
+    }
+    if (cmd == "events") return m_backend->eventsSince(qint64(req["since"].toDouble(0)), req["limit"].toInt(200));
+    if (cmd == "target") {                            // choose the live stack; resumes a saved stack of the same name unless reset
+        SkyMonitor& sky = m_backend->sky();
+        if (!req.contains("name")) return QJsonObject{{"ok", true}, {"target", sky.targetName()}, {"stack", sky.stackSummary()}};
+        return sky.setTarget(req["name"].toString(), req.contains("ra_hours") ? req["ra_hours"].toDouble() : -1, req.contains("dec_deg") ? req["dec_deg"].toDouble() : -999, req["reset"].toBool());
+    }
+    if (cmd == "stack") {                             // summary of the live stack; saves state and preview.png and returns their paths
+        SkyMonitor& sky = m_backend->sky();
+        QJsonObject r{{"ok", true}, {"stack", sky.stackSummary()}};
+        if (sky.stacker().frames() > 0 && sky.saveStack()) r["preview"] = sky.stackDirectory() + "/preview.png";
+        return r;
+    }
+    if (cmd == "sky_map") return m_backend->sky().obstructionMap();
+    if (cmd == "monitor") {                           // site, black level, auto-stacking and the transparency floor
+        SkyMonitor& sky = m_backend->sky();
+        if (req.contains("lat_deg") || req.contains("lon_deg")) { Astro::Site s = sky.site(); if (req.contains("lat_deg")) s.latDeg = req["lat_deg"].toDouble(); if (req.contains("lon_deg")) s.lonDeg = req["lon_deg"].toDouble(); sky.setSite(s); }
+        if (req.contains("black_level")) sky.setBlackLevel(req["black_level"].toDouble());
+        if (req.contains("auto_stack")) sky.setAutoStack(req["auto_stack"].toBool());
+        if (req.contains("min_transparency")) sky.setMinTransparency(req["min_transparency"].toDouble());
+        return QJsonObject{{"ok", true}, {"settings", sky.settings()}};
+    }
     if (cmd == "focus_status") {                      // last focus score, plus the newest "history" entries (default 0)
         QJsonObject r{{"ok", true}, {"last", m_backend->lastFocus()}};
         if (req["history"].toInt() > 0) r["history"] = m_backend->focusHistory(req["history"].toInt());

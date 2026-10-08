@@ -39,11 +39,21 @@ SOURCES += \
     CommandInterface.cpp \
     ControlServer.cpp \
     FocusAnalyzer.cpp \
+    SkyFrame.cpp \
+    Registration.cpp \
+    LiveStacker.cpp \
+    SkyMonitor.cpp \
+    Astro.cpp \
 
 # Original header files
 HEADERS += \
     ControlServer.hpp \
     FocusAnalyzer.hpp \
+    SkyFrame.hpp \
+    Registration.hpp \
+    LiveStacker.hpp \
+    SkyMonitor.hpp \
+    Astro.hpp \
     CoordinateUtils.hpp \
     MessierCatalog.hpp \
     TelescopeData.hpp \
