@@ -210,6 +210,26 @@ bool OriginBackend::takeSingleSnapshot()
   return takeSnapshot(m_currentExposure, m_currentISO, m_currentBinning);
 }
 
+bool OriginBackend::startContinuousSnapshots()
+{
+  if (m_continuousSnapshots) return true;
+  m_continuousSnapshots = true;
+  if (!takeSingleSnapshot()) {
+    m_continuousSnapshots = false;
+    return false;
+  }
+  emit continuousSnapshotsChanged(true);
+  return true;
+}
+
+void OriginBackend::stopContinuousSnapshots()
+{
+  if (!m_continuousSnapshots) return;
+  // Any snapshot already in flight will still complete and be saved
+  m_continuousSnapshots = false;
+  emit continuousSnapshotsChanged(false);
+}
+
 bool OriginBackend::takeSnapshot(double exposure, int iso, int binning)
 {
     qDebug() << "Taking snapshot: Exposure =" << exposure << "ISO =" << iso;
@@ -224,6 +244,12 @@ bool OriginBackend::takeSnapshot(double exposure, int iso, int binning)
     params["ExposureTime"] = exposure;
     params["ISO"] = iso;
     params["Binning"] = binning;
+    // Snapshots are always the raw 16-bit Bayer frame (FITS). Ask for that explicitly: older firmware defaulted to a
+    // debayered TIFF when "Debayer" was absent (logs Oct 2025 - Jan 2026), current firmware (Origin 1.5.6240) defaults
+    // to raw FITS, so relying on the default would change the file type after a firmware update.
+    if (m_requestedBitDepth != 16)
+        setCameraBitDepth(16);
+    params["Debayer"] = false;
     
     sendCommand("RunSampleCapture", "TaskController", params);
     return true;
@@ -252,6 +278,8 @@ bool OriginBackend::setCameraAutoMode()
     }
 
     QJsonObject cmd;
+    m_requestedExposure = 0.0;
+    m_requestedISO = 0;
     sendCommand("SetEnableAuto", "LiveStream", cmd);
     qDebug() << "Setting auto mode";
     return true;
@@ -646,6 +674,7 @@ bool OriginBackend::setCameraExposure(double seconds)
     QJsonObject cmd;
     if (!isConnected()) return false;
     cmd["Exposure"] = seconds;
+    m_requestedExposure = seconds;
     sendCommand("SetCaptureParameters", "Camera", cmd);
     return true;
 }
@@ -659,11 +688,29 @@ bool OriginBackend::setCameraBinning(int binning)
     return true;
 }
 
+bool OriginBackend::getFocuserAdvancedSettings()
+{
+    if (!isConnected()) return false;
+    sendCommand("GetFocuserAdvancedSettings", "Focuser");
+    return true;
+}
+
+bool OriginBackend::setCameraBitDepth(int bitDepth)
+{
+    QJsonObject cmd;
+    if (!isConnected()) return false;
+    cmd["BitDepth"] = bitDepth;
+    m_requestedBitDepth = bitDepth;
+    sendCommand("SetCaptureParameters", "Camera", cmd);
+    return true;
+}
+
 bool OriginBackend::setCameraISO(int iso)
 {
     QJsonObject cmd;
     if (!isConnected()) return false;
     cmd["ISO"] = iso;
+    m_requestedISO = iso;
     sendCommand("SetCaptureParameters", "Camera", cmd);
     return true;
 }
@@ -744,6 +791,7 @@ void OriginBackend::onWebSocketConnected()
 
     // Request initial status
     sendCommand("GetStatus", "Mount");
+    setCameraBitDepth(16);     // raw 16-bit Bayer snapshots (re-sent after each capture, the camera reverts it)
     
     emit connected();
 }
@@ -766,6 +814,7 @@ void OriginBackend::onWebSocketDisconnected()
         m_pingTimer->stop();
     }
     
+    stopContinuousSnapshots();
     emit disconnected();
 }
 
@@ -781,7 +830,7 @@ void OriginBackend::onTextMessageReceived(const QString &message)
     QJsonObject obj = doc.object();
     
     // Still emit for other listeners
-//    emit messageReceived(obj);
+    emit messageReceived(obj);
     
     // Process through data processor
     bool processed = m_dataProcessor->processJsonPacket(message.toUtf8());
@@ -808,6 +857,10 @@ void OriginBackend::onTextMessageReceived(const QString &message)
             m_currentExposure = obj["Exposure"].toDouble();
             m_currentBinning = obj["Binning"].toInt();
             m_currentISO = obj["ISO"].toInt();
+
+            // Keep the user's settings (cleared on switch to auto) rather than the telescope's reverted ones
+            if (m_requestedExposure > 0.0) m_currentExposure = m_requestedExposure;
+            if (m_requestedISO > 0) m_currentISO = m_requestedISO;
             
 	    // qDebug() << "Capture parameters: Exposure =" << m_currentExposure << "ISO =" << m_currentISO;
             
@@ -845,7 +898,9 @@ void OriginBackend::onTextMessageReceived(const QString &message)
             m_lastImageFilePath = filePath;
             
             // Determine type by extension
-            bool isTiff = filePath.endsWith(".tiff", Qt::CaseInsensitive) || 
+            // Snapshots arrive as ImageType SAMPLE_CAPTURE (currently a .png), live view as LIVE (.jpg)
+            bool isTiff = obj["ImageType"].toString() == "SAMPLE_CAPTURE" ||
+                         filePath.endsWith(".tiff", Qt::CaseInsensitive) || 
                          filePath.endsWith(".tif", Qt::CaseInsensitive);
             
 	    // qDebug() << "Image ready:" << filePath << (isTiff ? "(TIFF snapshot)" : "(JPEG live stream)");
@@ -857,7 +912,7 @@ void OriginBackend::onTextMessageReceived(const QString &message)
 	    }
 
             // Download the image
-            requestImage(filePath);
+            requestImage(filePath, isTiff);
         }
     }
 }
@@ -956,7 +1011,7 @@ void OriginBackend::updateStatusFromProcessor()
     emit statusUpdated();
 }
 
-void OriginBackend::requestImage(const QString &filePath) {
+void OriginBackend::requestImage(const QString &filePath, bool isSnapshot) {
     if (m_connectedHost.isEmpty()) return;
     
     QString fullPath = QString("http://%1/SmartScope-1.0/dev2/%2")
@@ -967,8 +1022,7 @@ void OriginBackend::requestImage(const QString &filePath) {
     request.setRawHeader("Cache-Control", "no-cache");
     request.setRawHeader("Accept", "*/*");
     
-    bool isTiff = filePath.endsWith(".tiff", Qt::CaseInsensitive) || 
-                  filePath.endsWith(".tif", Qt::CaseInsensitive);
+    bool isTiff = isSnapshot;
     
     // qDebug() << "Downloading:" << fullPath;
     
@@ -998,6 +1052,13 @@ void OriginBackend::requestImage(const QString &filePath) {
                 m_snapshotInProgress = false;
                 qDebug() << "Snapshot complete - resuming live stream";
                 emit tiffImageDownloaded(filePath, imageData, ra, dec, exposure);
+                // The telescope resets the live-stream exposure/ISO after a sample capture
+                if (m_requestedExposure > 0.0) setCameraExposure(m_requestedExposure);
+                if (m_requestedISO > 0) setCameraISO(m_requestedISO);
+                if (m_requestedBitDepth > 0) setCameraBitDepth(m_requestedBitDepth);
+                if (m_continuousSnapshots && !takeSingleSnapshot()) {
+                    stopContinuousSnapshots();
+                }
             } else {
                 // Live stream - could emit different signal or handle directly
                 // For now, your existing code handles this
@@ -1016,6 +1077,9 @@ void OriginBackend::requestImage(const QString &filePath) {
         } else {
             qWarning() << "Download error:" << reply->errorString();
             m_snapshotInProgress = false;
+            if (reply->property("isTiff").toBool()) {
+                stopContinuousSnapshots();
+            }
         }
         
         reply->deleteLater();

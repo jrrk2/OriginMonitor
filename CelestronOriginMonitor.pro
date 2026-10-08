@@ -37,9 +37,11 @@ SOURCES += \
     OriginBackend.cpp \
     LogReplayDialog.cpp \
     CommandInterface.cpp \
+    ControlServer.cpp \
 
 # Original header files
 HEADERS += \
+    ControlServer.hpp \
     CoordinateUtils.hpp \
     MessierCatalog.hpp \
     TelescopeData.hpp \

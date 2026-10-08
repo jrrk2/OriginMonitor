@@ -305,6 +305,7 @@ private:
     QSpinBox* binningSpinBox;
     QSpinBox* isoSpinBox;
     QPushButton* snapshotButton;
+    QPushButton* continuousButton;
     QProgressBar* snapshotProgressBar;
     
     // Disk tab widgets

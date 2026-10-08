@@ -113,9 +113,20 @@ public:
     bool setCameraExposure(double seconds);
     bool setCameraBinning(int binning);
     bool setCameraISO(int iso);
+    bool getFocuserAdvancedSettings();   // AutoFocusAfterGoto / temperature-shift autofocus flags
+    bool setCameraBitDepth(int bitDepth);  // internal: the app always uses 16 (raw 16-bit Bayer FITS snapshots)
     
     // Snapshot control
     bool takeSingleSnapshot();
+    bool startContinuousSnapshots();
+    void stopContinuousSnapshots();
+    bool isContinuousSnapshots() const { return m_continuousSnapshots; }
+    bool snapshotInProgress() const { return m_snapshotInProgress; }
+    double currentExposure() const { return m_currentExposure; }
+    int currentISO() const { return m_currentISO; }
+    int currentBinning() const { return m_currentBinning; }
+    QString connectedHost() const { return m_connectedHost; }
+    int lastSequenceId() const { return m_nextSequenceId - 1; }   // ID of the most recently sent command
     double radiansToHours(double radians);
     double radiansToDegrees(double radians);
 
@@ -129,6 +140,8 @@ signals:
     void captureParametersChanged(double exposure, int iso, int binning);
     void cameraInfoReceived(const QString& cameraID, const QString& model);
     void snapshotRequested();
+    void messageReceived(const QJsonObject& message);   // every JSON message from the telescope
+    void continuousSnapshotsChanged(bool running);
     void tiffImageDownloaded(const QString& filePath, const QByteArray& imageData,
                             double ra, double dec, double exposure);
     void liveImageDownloaded(const QByteArray& imageData, 
@@ -179,7 +192,7 @@ private:
     QJsonObject createCommand(const QString& command, const QString& destination, 
                              const QJsonObject& params = QJsonObject());
     void updateStatusFromProcessor();
-    void requestImage(const QString& filePath);
+    void requestImage(const QString& filePath, bool isSnapshot = false);
     double hoursToRadians(double hours);
     double degreesToRadians(double degrees);
     void stopParkMotion();  // Stop altitude motion during park/unpark
@@ -190,6 +203,11 @@ private:
     int m_currentISO;
     int m_currentBinning;
     bool m_snapshotInProgress;
+    bool m_continuousSnapshots = false;
+    // User's manual settings; the telescope reverts live-stream exposure/ISO after each sample capture
+    double m_requestedExposure = 0.0;
+    int m_requestedISO = 0;
+    int m_requestedBitDepth = 0;
     
     // Image metadata from last NewImageReady
     double m_lastImageRa;

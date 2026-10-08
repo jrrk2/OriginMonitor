@@ -3,6 +3,9 @@
 #include "OriginBackend.hpp"
 #include "MessierCatalog.hpp"
 #include <cmath>
+#include <algorithm>
+#include <vector>
+#include <QFile>
 
 TelescopeGUI::TelescopeGUI(QWidget *parent)
     : QMainWindow(parent)
@@ -135,8 +138,10 @@ TelescopeGUI::TelescopeGUI(QWidget *parent)
 		QDir().mkpath(baseDir);
 
 		// Generate filename with timestamp
-		QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
-		QString localPath = QString("%1/snapshot_%2.tiff").arg(baseDir, timestamp);
+		QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
+		QString ext = QFileInfo(filePath).suffix().toLower();
+		if (ext.isEmpty()) ext = "tiff";
+		QString localPath = QString("%1/snapshot_%2.%3").arg(baseDir, timestamp, ext);
 
 		// Save the TIFF data
 		QFile file(localPath);
@@ -1014,7 +1019,7 @@ QWidget* TelescopeGUI::createImageTab() {
     // Exposure Control
     cameraControlLayout->addWidget(new QLabel("Exposure (sec):"), ctrlRow, 0);
     exposureSpinBox = new QDoubleSpinBox(tab);
-    exposureSpinBox->setRange(0.001, 300.0);
+    exposureSpinBox->setRange(0.000001, 300.0);   // camera minimum is 1 us
     exposureSpinBox->setValue(0.1);
     exposureSpinBox->setDecimals(6);
     
@@ -1044,7 +1049,7 @@ QWidget* TelescopeGUI::createImageTab() {
             originBackend, &OriginBackend::setCameraISO);
     
     cameraControlLayout->addWidget(isoSpinBox, ctrlRow++, 1);
-    
+
     // Snapshot Button - connects to backend!
     snapshotButton = new QPushButton("Take Snapshot", tab);
     snapshotButton->setStyleSheet("font-weight: bold; padding: 8px; background-color: #4CAF50; color: white;");
@@ -1056,6 +1061,24 @@ QWidget* TelescopeGUI::createImageTab() {
     });
     
     cameraControlLayout->addWidget(snapshotButton, ctrlRow++, 1, 1, 2);
+
+    // Continuous series button - keeps taking snapshots back to back until stopped
+    continuousButton = new QPushButton("Start Continuous Snapshots", tab);
+    continuousButton->setStyleSheet("font-weight: bold; padding: 8px;");
+    connect(continuousButton, &QPushButton::clicked, this, [this]() {
+        if (originBackend->isContinuousSnapshots()) {
+            originBackend->stopContinuousSnapshots();
+        } else {
+            originBackend->startContinuousSnapshots();
+        }
+    });
+    connect(originBackend, &OriginBackend::continuousSnapshotsChanged,
+            this, [this](bool running) {
+        continuousButton->setText(running ? "Stop Continuous Snapshots"
+                                          : "Start Continuous Snapshots");
+        snapshotButton->setEnabled(!running);
+    });
+    cameraControlLayout->addWidget(continuousButton, ctrlRow++, 1, 1, 2);
     
     // Progress bar
     snapshotProgressBar = new QProgressBar(tab);
@@ -1167,7 +1190,7 @@ QWidget* TelescopeGUI::createImageTab() {
     connect(originBackend, &OriginBackend::imageReady,
 	    this, [this]() {
 		if (snapshotButton) {
-		    snapshotButton->setEnabled(true);
+		    snapshotButton->setEnabled(!originBackend->isContinuousSnapshots());
 		    snapshotButton->setText("Take Snapshot");
 		}
 		if (snapshotProgressBar) {
@@ -1236,6 +1259,52 @@ void TelescopeGUI::onSnapshotReady(const QString& fileLocation, double ra, doubl
     }
 }
 
+// Preview-only reader for the raw 16-bit Bayer FITS the camera delivers. The saved file is never modified:
+// this bins each 2x2 Bayer cell, applies a black/white stretch and returns an 8-bit image for the preview pane.
+static QImage fitsPreview(const QString& path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return QImage();
+    const QByteArray head = f.read(2880 * 4);
+    int width = 0, height = 0, bitpix = 0; double bzero = 0; qsizetype end = -1;
+    for (qsizetype i = 0; i + 80 <= head.size(); i += 80) {
+        const QByteArray card = head.mid(i, 80);
+        const QString key = QString::fromLatin1(card.left(8)).trimmed();
+        const QString val = QString::fromLatin1(card.mid(10, 20)).split('/').first().trimmed();
+        if (key == "NAXIS1") width = val.toInt();
+        else if (key == "NAXIS2") height = val.toInt();
+        else if (key == "BITPIX") bitpix = val.toInt();
+        else if (key == "BZERO") bzero = val.toDouble();
+        else if (key == "END") { end = i; break; }
+    }
+    if (end < 0 || bitpix != 16 || width < 2 || height < 2) return QImage();
+    f.seek(((end / 80 + 36) / 36) * 2880);                      // data starts after the last header block
+    const QByteArray data = f.read(qint64(width) * height * 2);
+    if (data.size() < qint64(width) * height * 2) return QImage();
+    const uchar* d = reinterpret_cast<const uchar*>(data.constData());
+    auto px = [&](int x, int y) -> double {
+        const int i = (y * width + x) * 2;
+        return qint16((d[i] << 8) | d[i + 1]) + bzero;           // big-endian signed + BZERO
+    };
+    const int w = width / 2, h = height / 2;
+    std::vector<float> v(size_t(w) * h);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            v[size_t(y) * w + x] = float(px(2*x, 2*y) + px(2*x+1, 2*y) + px(2*x, 2*y+1) + px(2*x+1, 2*y+1));
+    std::vector<float> s(v.begin(), v.end());
+    std::sort(s.begin(), s.end());
+    const float lo = s[s.size() / 200], hi = std::max(s[size_t(s.size() * 0.9995)], lo + 1.0f);
+    QImage img(w, h, QImage::Format_Grayscale8);
+    for (int y = 0; y < h; ++y) {
+        uchar* line = img.scanLine(y);
+        for (int x = 0; x < w; ++x) {
+            const float t = std::clamp((v[size_t(y) * w + x] - lo) / (hi - lo), 0.0f, 1.0f);
+            line[x] = uchar(255.0f * std::sqrt(t));
+        }
+    }
+    return img;
+}
+
 void TelescopeGUI::onSnapshotDownloaded(const QString& localPath) {
     qDebug() << "Snapshot downloaded to:" << localPath;
     
@@ -1246,12 +1315,12 @@ void TelescopeGUI::onSnapshotDownloaded(const QString& localPath) {
     
     // Re-enable snapshot button
     if (snapshotButton) {
-        snapshotButton->setEnabled(true);
+        snapshotButton->setEnabled(!originBackend->isContinuousSnapshots());
         snapshotButton->setText("Take Snapshot");
     }
     
     // Load and display the downloaded image
-    QPixmap pixmap(localPath);
+    QPixmap pixmap = localPath.endsWith(".fits", Qt::CaseInsensitive) ? QPixmap::fromImage(fitsPreview(localPath)) : QPixmap(localPath);
     if (!pixmap.isNull() && imagePreviewLabel) {
         // Scale to fit while preserving aspect ratio
         QPixmap scaledPixmap = pixmap.scaled(imagePreviewLabel->size(), 
