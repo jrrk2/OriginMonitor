@@ -18,6 +18,7 @@
 #include <QStringConverter>
 #include <QWebSocket>
 #include "TelescopeDataProcessor.hpp"
+#include "FocusAnalyzer.hpp"
 
 /**
  * @brief Backend adapter to connect Alpaca server to Celestron Origin telescope
@@ -122,6 +123,9 @@ public:
     void stopContinuousSnapshots();
     bool isContinuousSnapshots() const { return m_continuousSnapshots; }
     bool snapshotInProgress() const { return m_snapshotInProgress; }
+    // Focus quality of every snapshot (see FocusAnalyzer.hpp); history is capped, newest last
+    QJsonObject lastFocus() const { return m_focusHistory.isEmpty() ? QJsonObject() : m_focusHistory.last(); }
+    QJsonArray focusHistory(int count) const;
     double currentExposure() const { return m_currentExposure; }
     int currentISO() const { return m_currentISO; }
     int currentBinning() const { return m_currentBinning; }
@@ -142,6 +146,7 @@ signals:
     void snapshotRequested();
     void messageReceived(const QJsonObject& message);   // every JSON message from the telescope
     void continuousSnapshotsChanged(bool running);
+    void focusEvaluated(const QJsonObject& focus);       // after every snapshot: FocusResult::toJson() plus time, exposure, ra, dec, file
     void tiffImageDownloaded(const QString& filePath, const QByteArray& imageData,
                             double ra, double dec, double exposure);
     void liveImageDownloaded(const QByteArray& imageData, 
@@ -204,6 +209,8 @@ private:
     int m_currentBinning;
     bool m_snapshotInProgress;
     bool m_continuousSnapshots = false;
+    QList<QJsonObject> m_focusHistory;
+    void evaluateSnapshotFocus(const QString& filePath, const QByteArray& imageData, double ra, double dec, double exposure);
     // User's manual settings; the telescope reverts live-stream exposure/ISO after each sample capture
     double m_requestedExposure = 0.0;
     int m_requestedISO = 0;

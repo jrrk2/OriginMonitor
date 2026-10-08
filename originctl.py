@@ -9,6 +9,7 @@ Then, for example:
     originctl.py manual
     originctl.py set --exposure 0.002 --iso 200      # exposure in seconds (camera minimum 1 us)
     originctl.py snapshot --dir /tmp/frames
+    originctl.py focus --history 10      # HFR of the last snapshots (lower is better)
     originctl.py focuser                      # position, limits, NeedAutoFocus
     originctl.py focuser-move 18800
     originctl.py mount                        # RA/Dec/Alt/Az, tracking, goto state
@@ -121,6 +122,7 @@ def main():
     for name in ("ping", "status", "manual", "auto", "focuser", "focuser-settings", "mount", "quit"):
         sub.add_parser(name)
     c = sub.add_parser("connect"); c.add_argument("host")
+    fo = sub.add_parser("focus"); fo.add_argument("--history", type=int, default=0, help="also return the newest N scores")
     s = sub.add_parser("set")
     s.add_argument("--exposure", type=float); s.add_argument("--iso", type=int)
     s.add_argument("--binning", type=int)
@@ -142,6 +144,8 @@ def main():
         out = call(a.port, cmd="set", **{k: v for k, v in vars(a).items() if k in ("exposure", "iso", "binning") and v is not None})
     elif a.cmd == "snapshot":
         out = call(a.port, cmd="snapshot", timeout=a.timeout, **({"dir": a.dir} if a.dir else {}))
+    elif a.cmd == "focus":
+        out = call(a.port, cmd="focus_status", history=a.history)
     elif a.cmd == "focuser":
         out = call(a.port, cmd="focuser_status")
     elif a.cmd == "focuser-settings":

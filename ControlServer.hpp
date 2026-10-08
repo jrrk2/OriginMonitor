@@ -15,7 +15,7 @@ class OriginBackend;
  * Reply:    {"ok": true, ...}\n   or   {"ok": false, "error": "..."}\n
  *
  * Commands: ping, connect, status, manual, auto, set, snapshot, mount_status, goto,
- *           focuser_status, focuser_move, focuser_settings, send (only with allowRaw), quit.
+ *           focus_status, focuser_status, focuser_move, focuser_settings, send (only with allowRaw), quit.
  * Requests are handled one at a time; a command that waits for the telescope blocks later ones.
  */
 class ControlServer : public QObject

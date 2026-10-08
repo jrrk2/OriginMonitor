@@ -222,6 +222,11 @@ QJsonObject ControlServer::handle(const QJsonObject& req)
     }
 
     if (cmd == "snapshot") return doSnapshot(req);
+    if (cmd == "focus_status") {                      // last focus score, plus the newest "history" entries (default 0)
+        QJsonObject r{{"ok", true}, {"last", m_backend->lastFocus()}};
+        if (req["history"].toInt() > 0) r["history"] = m_backend->focusHistory(req["history"].toInt());
+        return r;
+    }
 
     if (cmd == "mount_status") {
         if (!m_backend->isConnected()) return fail("not connected");

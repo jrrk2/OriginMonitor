@@ -38,10 +38,12 @@ SOURCES += \
     LogReplayDialog.cpp \
     CommandInterface.cpp \
     ControlServer.cpp \
+    FocusAnalyzer.cpp \
 
 # Original header files
 HEADERS += \
     ControlServer.hpp \
+    FocusAnalyzer.hpp \
     CoordinateUtils.hpp \
     MessierCatalog.hpp \
     TelescopeData.hpp \

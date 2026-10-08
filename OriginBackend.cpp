@@ -1052,6 +1052,7 @@ void OriginBackend::requestImage(const QString &filePath, bool isSnapshot) {
                 m_snapshotInProgress = false;
                 qDebug() << "Snapshot complete - resuming live stream";
                 emit tiffImageDownloaded(filePath, imageData, ra, dec, exposure);
+                evaluateSnapshotFocus(filePath, imageData, ra, dec, exposure);
                 // The telescope resets the live-stream exposure/ISO after a sample capture
                 if (m_requestedExposure > 0.0) setCameraExposure(m_requestedExposure);
                 if (m_requestedISO > 0) setCameraISO(m_requestedISO);
@@ -1180,4 +1181,38 @@ void OriginBackend::setCameraConnected(bool connected)
     
     m_status.isCameraLogicallyConnected = connected;
     qDebug() << "  Camera logical after:" << m_status.isCameraLogicallyConnected;
+}
+
+// Focus figure of merit for every snapshot, kept in memory, logged to focus_log.csv next to the snapshots and announced by focusEvaluated()
+void OriginBackend::evaluateSnapshotFocus(const QString& filePath, const QByteArray& imageData, double ra, double dec, double exposure)
+{
+    const FocusResult r = evaluateFocus(imageData);
+    QJsonObject o = r.toJson();
+    o["time"] = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
+    o["exposure"] = exposure; o["ra_rad"] = ra; o["dec_rad"] = dec; o["file"] = filePath;
+    m_focusHistory.append(o);
+    while (m_focusHistory.size() > 500) m_focusHistory.removeFirst();
+
+    if (r.valid) qInfo().nospace() << "Focus: HFR " << r.hfrPx << " px (" << r.hfrArcsec << "\") from " << r.stars << " stars, spread " << r.hfrSpreadPx << " px, " << r.elapsedMs << " ms";
+    else qInfo() << "Focus: not scored -" << r.note;
+
+    QDir dir(QDir::homePath() + "/Pictures/CelestronOrigin");
+    if (dir.mkpath(".")) {
+        QFile log(dir.filePath("focus_log.csv"));
+        const bool fresh = !log.exists();
+        if (log.open(QIODevice::Append | QIODevice::Text)) {
+            QTextStream t(&log);
+            if (fresh) t << "time,file,exposure,valid,stars,hfr_px,hfr_arcsec,hfr_spread_px,peak_fraction,background,noise\n";
+            t << o["time"].toString() << ',' << QFileInfo(filePath).fileName() << ',' << exposure << ',' << (r.valid ? 1 : 0) << ',' << r.stars << ','
+              << r.hfrPx << ',' << r.hfrArcsec << ',' << r.hfrSpreadPx << ',' << r.peakFraction << ',' << r.background << ',' << r.noise << '\n';
+        }
+    }
+    emit focusEvaluated(o);
+}
+
+QJsonArray OriginBackend::focusHistory(int count) const
+{
+    QJsonArray a;
+    for (int i = std::max(0, int(m_focusHistory.size()) - count); i < m_focusHistory.size(); ++i) a.append(m_focusHistory[i]);
+    return a;
 }
