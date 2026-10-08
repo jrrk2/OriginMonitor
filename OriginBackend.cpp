@@ -232,14 +232,7 @@ void OriginBackend::correctionSlew(double dAltArcsec, double dAzArcsec)
 {
     if (!isConnected()) return;
 
-    // Convert arcsecond offsets to a timed relative slew.
-    // The Slew command takes AltRate and AzmRate (degrees/second).
-    // We use a low rate and compute the duration needed.
-    static constexpr double SLEW_RATE_DEG_PER_SEC = 0.5;  // conservative rate
-    static constexpr double MIN_CORRECTION_ARCSEC = 1.0;   // ignore tiny corrections
-
-    double dAltDeg = dAltArcsec / 3600.0;
-    double dAzDeg = dAzArcsec / 3600.0;
+    static constexpr double MIN_CORRECTION_ARCSEC = 1.0;
 
     double totalOffsetArcsec = std::sqrt(dAltArcsec * dAltArcsec + dAzArcsec * dAzArcsec);
     if (totalOffsetArcsec < MIN_CORRECTION_ARCSEC) {
@@ -247,36 +240,18 @@ void OriginBackend::correctionSlew(double dAltArcsec, double dAzArcsec)
         return;
     }
 
-    // Compute how long to slew at the chosen rate
-    double maxOffsetDeg = std::max(std::abs(dAltDeg), std::abs(dAzDeg));
-    double durationSec = maxOffsetDeg / SLEW_RATE_DEG_PER_SEC;
+    // Read current position and compute absolute target
+    const TelescopeData& data = m_dataProcessor->getData();
+    double curAltDeg = radiansToDegrees(data.mount.altitude);
+    double curAzDeg = radiansToDegrees(data.mount.azimuth);
 
-    // Scale rates so both axes finish at the same time
-    double altRate = dAltDeg / durationSec;
-    double azRate = dAzDeg / durationSec;
+    double targetAltDeg = curAltDeg + dAltArcsec / 3600.0;
+    double targetAzDeg = curAzDeg + dAzArcsec / 3600.0;
 
     qDebug() << "Correction slew: dAlt=" << dAltArcsec << "\" dAz=" << dAzArcsec
-             << "\" rate=" << altRate << "/" << azRate << " dur=" << durationSec << "s";
+             << "\" target Alt=" << targetAltDeg << " Az=" << targetAzDeg;
 
-    // Start the slew
-    QJsonObject slewCommand;
-    slewCommand["AltRate"] = altRate;
-    slewCommand["AzmRate"] = azRate;
-    sendCommand("Slew", "Mount", slewCommand);
-
-    // Set up a timer to stop the slew after the calculated duration
-    if (!m_correctionTimer) {
-        m_correctionTimer = new QTimer(this);
-        m_correctionTimer->setSingleShot(true);
-        connect(m_correctionTimer, &QTimer::timeout, this, [this]() {
-            QJsonObject stopCmd;
-            stopCmd["AltRate"] = 0;
-            stopCmd["AzmRate"] = 0;
-            sendCommand("Slew", "Mount", stopCmd);
-            qDebug() << "Correction slew complete";
-        });
-    }
-    m_correctionTimer->start(static_cast<int>(durationSec * 1000));
+    gotoAltAzm(degreesToRadians(targetAltDeg), degreesToRadians(targetAzDeg));
 }
 
 bool OriginBackend::syncPosition(double ra, double dec)
@@ -401,92 +376,64 @@ bool OriginBackend::abortMotion()
 }
 
 // ============================================================================
-// PARK AND UNPARK IMPLEMENTATION using Slew command
+// PARK AND UNPARK IMPLEMENTATION using GotoAltAzm (absolute position slew)
 // ============================================================================
 
-void  OriginBackend::speed(
-		  int altRate)  // Negative to move down, using same rate as GUI
+void  OriginBackend::speed(int altRate)
 {
-    QJsonObject slewCommand;
-    slewCommand["AltRate"] = altRate;
-    slewCommand["AzmRate"] = 0;  // No azimuth motion
-    
-    sendCommand("Slew", "Mount", slewCommand);
+    // DEPRECATED: was rate-based Slew, now computes absolute target
+    Q_UNUSED(altRate);
+    qWarning() << "speed() is deprecated - use gotoAltAzm() instead";
 }
 
 void OriginBackend::monitorParkProgress()
 {
     const TelescopeData& data = m_dataProcessor->getData();
     double currentAlt = data.orientation.altitude;
-    
-    qDebug() << "Park monitoring - Target:" << m_targetAltitude 
-             << "Current:" << currentAlt;
-    
+
+    qDebug() << "Park monitoring - Target:" << m_targetAltitude
+             << "Current:" << currentAlt
+             << "GotoOver:" << data.mount.isGotoOver;
+
     if (m_parkingInProgress) {
-        // Check if we've reached park altitude (-10°)
-        if (currentAlt < m_targetAltitude) {
+        // GotoAltAzm handles the slew; we just wait for it to finish
+        if (data.mount.isGotoOver || currentAlt <= m_targetAltitude + 1.0) {
             qDebug() << "Park position reached!";
-            
-            // Stop any motion
-            stopParkMotion();
-            
-            // Mark as parked
+
             m_status.isParked = true;
             m_parkingInProgress = false;
             m_status.currentOperation = "Parked";
             m_parkMonitorTimer->stop();
-            
+
             emit parkCompleted();
         }
-	else
-	  {
-	    //	    speed(fmax(-9.0, m_targetAltitude - currentAlt));
-	  }
     }
     else if (m_unparkingInProgress) {
-        // Check if we've reached unpark altitude (+60°)
-        // Allow 2° tolerance
-        if (currentAlt > m_targetAltitude) {
+        if (data.mount.isGotoOver || currentAlt >= m_targetAltitude - 1.0) {
             qDebug() << "Unpark position reached!";
-            
-            // Stop any motion
-            stopParkMotion();
-            
-            // Now initialize the telescope
+
             m_status.currentOperation = "Initializing";
             qDebug() << "Starting telescope initialization...";
-            
-            // Initialize
+
             initializeTelescope();
-            
-            // Wait a moment for initialization to start
+
             QTimer::singleShot(2000, this, [this]() {
                 m_status.isParked = false;
                 m_unparkingInProgress = false;
                 m_status.currentOperation = "Idle";
                 m_parkMonitorTimer->stop();
-                
+
                 qDebug() << "Unpark completed";
                 emit unparkCompleted();
             });
         }
-	else
-	  {
-	    //	    speed(fmin(9.0, m_targetAltitude - currentAlt));
-	  }
     }
 }
 
 void OriginBackend::stopParkMotion()
 {
-    qDebug() << "Stopping altitude motion";
-    
-    // Send Slew command with zero rates to stop
-    QJsonObject slewCommand;
-    slewCommand["AltRate"] = 0;
-    slewCommand["AzmRate"] = 0;
-    
-    sendCommand("Slew", "Mount", slewCommand);
+    qDebug() << "Stopping motion via StopAll";
+    stopAll();
 }
 
 bool OriginBackend::parkMount()
@@ -503,46 +450,39 @@ bool OriginBackend::parkMount()
 
     const TelescopeData& data = m_dataProcessor->getData();
     double currentAlt = data.orientation.altitude;
-    
-    qDebug() << "Parking telescope";
+    double currentAz = data.mount.azimuth;  // keep current azimuth (radians)
+
+    qDebug() << "Parking telescope via GotoAltAzm";
     qDebug() << "Current altitude:" << currentAlt;
     qDebug() << "Target altitude: -10°";
-    
+
     // Stop tracking first
     setTracking(false);
-    
-    // Set target altitude
+
     m_targetAltitude = -10.0;
     m_parkingInProgress = true;
     m_status.isParked = false;
     m_status.currentOperation = "Parking";
-    
+
     emit parkStarted();
-    
-    // Start slewing down (negative altitude rate)
-    // Rate is in degrees per second or similar unit
-    int altRate = -9;  // Negative to move down, using same rate as GUI
-    
-    QJsonObject slewCommand;
-    slewCommand["AltRate"] = altRate;
-    slewCommand["AzmRate"] = 0;  // No azimuth motion
-    
-    sendCommand("Slew", "Mount", slewCommand);
-    
-    // Start monitoring altitude
+
+    // Use absolute slew to park position: alt=-10°, keep current azimuth
+    gotoAltAzm(degreesToRadians(m_targetAltitude), currentAz);
+
+    // Monitor for completion
     m_parkMonitorTimer->start();
-    
-    // Safety timeout - stop after 60 seconds regardless
+
+    // Safety timeout
     QTimer::singleShot(60000, this, [this]() {
         if (m_parkingInProgress) {
             qWarning() << "Park timeout - stopping motion";
-            stopParkMotion();
+            stopAll();
             m_parkingInProgress = false;
             m_parkMonitorTimer->stop();
             emit trackingError("Park operation timed out");
         }
     });
-    
+
     return true;
 }
 
@@ -559,42 +499,36 @@ bool OriginBackend::unparkMount()
 
     const TelescopeData& data = m_dataProcessor->getData();
     double currentAlt = data.orientation.altitude;
-    
-    qDebug() << "Unparking telescope";
+    double currentAz = data.mount.azimuth;  // keep current azimuth (radians)
+
+    qDebug() << "Unparking telescope via GotoAltAzm";
     qDebug() << "Current altitude:" << currentAlt;
     qDebug() << "Target altitude: +60°";
-    
-    // Set target altitude
+
     m_targetAltitude = 60.0;
     m_unparkingInProgress = true;
     m_status.isParked = false;
     m_status.currentOperation = "Unparking";
-    
+
     emit unparkStarted();
-    
-    // Start slewing up (positive altitude rate)
-    int altRate = 9;  // Positive to move up, using same rate as GUI
-    
-    QJsonObject slewCommand;
-    slewCommand["AltRate"] = altRate;
-    slewCommand["AzmRate"] = 0;  // No azimuth motion
-    
-    sendCommand("Slew", "Mount", slewCommand);
-    
-    // Start monitoring altitude
+
+    // Use absolute slew to unpark position: alt=+60°, keep current azimuth
+    gotoAltAzm(degreesToRadians(m_targetAltitude), currentAz);
+
+    // Monitor for completion
     m_parkMonitorTimer->start();
-    
-    // Safety timeout - stop after 90 seconds regardless
+
+    // Safety timeout
     QTimer::singleShot(90000, this, [this]() {
         if (m_unparkingInProgress) {
             qWarning() << "Unpark timeout - stopping motion";
-            stopParkMotion();
+            stopAll();
             m_unparkingInProgress = false;
             m_parkMonitorTimer->stop();
             emit trackingError("Unpark operation timed out");
         }
     });
-    
+
     return true;
 }
 
@@ -628,23 +562,27 @@ bool OriginBackend::moveDirection(int direction, int speed)
         return false;
     }
 
-    // Use Slew with AltRate/AzmRate (MoveAxis is not available on Origin)
-    // Convert direction + speed to signed rate
-    double rate = speed / 10.0;  // scale 0-100 to 0-10 deg/s
-    double altRate = 0, azmRate = 0;
+    // Use GotoAltAzm with a large offset in the desired direction.
+    // The mount slews toward the target; call stopAll() to halt.
+    // Speed maps to offset magnitude (larger = mount ramps up faster
+    // before being stopped, giving the feel of a faster jog).
+    const TelescopeData& data = m_dataProcessor->getData();
+    double curAltDeg = radiansToDegrees(data.mount.altitude);
+    double curAzDeg = radiansToDegrees(data.mount.azimuth);
+
+    double offsetDeg = speed;  // 0-100 degree offset in the target direction
+    double targetAltDeg = curAltDeg;
+    double targetAzDeg = curAzDeg;
 
     switch(direction) {
-        case 0: altRate =  rate; break;  // North = positive alt
-        case 1: altRate = -rate; break;  // South = negative alt
-        case 2: azmRate =  rate; break;  // East = positive az
-        case 3: azmRate = -rate; break;  // West = negative az
+        case 0: targetAltDeg += offsetDeg; break;  // North = positive alt
+        case 1: targetAltDeg -= offsetDeg; break;  // South = negative alt
+        case 2: targetAzDeg  += offsetDeg; break;  // East = positive az
+        case 3: targetAzDeg  -= offsetDeg; break;  // West = negative az
     }
 
-    QJsonObject slewCmd;
-    slewCmd["AltRate"] = altRate;
-    slewCmd["AzmRate"] = azmRate;
-    sendCommand("Slew", "Mount", slewCmd);
-    
+    gotoAltAzm(degreesToRadians(targetAltDeg), degreesToRadians(targetAzDeg));
+
     return true;
 }
 
@@ -938,6 +876,581 @@ void OriginBackend::onTextMessageReceived(const QString &message)
     }
 }
 
+// ============================================================================
+// NEW COMMANDS - discovered from Origin.app v1.1.4 binary
+// ============================================================================
+
+bool OriginBackend::gotoAltAzm(double altRadians, double azmRadians)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["Alt"] = altRadians;
+    params["Azm"] = azmRadians;
+    sendCommand("GotoAltAzm", "Mount", params);
+    m_status.isSlewing = true;
+    m_status.currentOperation = "Slewing";
+    return true;
+}
+
+bool OriginBackend::gotoEncoder(double enc0, double enc1)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["Enc0"] = enc0;
+    params["Enc1"] = enc1;
+    sendCommand("GotoEnc", "Mount", params);
+    m_status.isSlewing = true;
+    m_status.currentOperation = "Slewing";
+    return true;
+}
+
+bool OriginBackend::stopAll()
+{
+    if (!isConnected()) return false;
+    sendCommand("StopAll", "Mount");
+    m_status.isSlewing = false;
+    m_status.currentOperation = "Idle";
+    return true;
+}
+
+bool OriginBackend::reboot()
+{
+    if (!isConnected()) return false;
+    sendCommand("Reboot", "System");
+    return true;
+}
+
+bool OriginBackend::powerDown()
+{
+    if (!isConnected()) return false;
+    sendCommand("PowerDownOrigin", "System");
+    return true;
+}
+
+
+bool OriginBackend::setFans(bool cpuFan, bool otaFan)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["CpuFanOn"] = cpuFan;
+    params["OtaFanOn"] = otaFan;
+    sendCommand("SetFans", "Environment", params);
+    return true;
+}
+
+bool OriginBackend::getFans()
+{
+    if (!isConnected()) return false;
+    sendCommand("GetFans", "Environment");
+    return true;
+}
+
+bool OriginBackend::getEnvironmentSensors()
+{
+    if (!isConnected()) return false;
+    sendCommand("GetSensors", "Environment");
+    return true;
+}
+
+bool OriginBackend::setFilter(const QString& filter)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["Filter"] = filter;
+    sendCommand("SetFilter", "Camera", params);
+    return true;
+}
+
+bool OriginBackend::getFilter()
+{
+    if (!isConnected()) return false;
+    sendCommand("GetFilter", "Camera");
+    return true;
+}
+
+bool OriginBackend::setDewHeaterAuto(int aggression)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["Aggression"] = aggression;
+    sendCommand("EnableAuto", "DewHeater", params);
+    return true;
+}
+
+bool OriginBackend::setDewHeaterManual(double powerLevel)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["PowerLevel"] = powerLevel;
+    sendCommand("EnableManual", "DewHeater", params);
+    return true;
+}
+
+bool OriginBackend::getFocuserPosition()
+{
+    if (!isConnected()) return false;
+    sendCommand("GetPosition", "Focuser");
+    return true;
+}
+
+bool OriginBackend::moveFocuserTo(int position)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["Value"] = position;
+    sendCommand("MoveTo", "Focuser", params);
+    return true;
+}
+
+bool OriginBackend::getFocuserAdvancedSettings()
+{
+    if (!isConnected()) return false;
+    sendCommand("GetFocuserAdvancedSettings", "Focuser");
+    return true;
+}
+
+bool OriginBackend::setAutoFocusAfterGoto(bool enabled)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["Value"] = enabled;
+    sendCommand("AutoFocusAfterGoto", "Focuser", params);
+    return true;
+}
+
+bool OriginBackend::setAutoFocusOnTemperatureChange(bool enabled, double thresholdC)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["EnableTemperatureShiftAutoFocus"] = enabled;
+    params["TemperatureThresholdC"] = thresholdC;
+    sendCommand("AutoFocusOnTemperatureChange", "Focuser", params);
+    return true;
+}
+
+bool OriginBackend::setMountConfig(bool isEquatorial, bool onWedge, double altBacklash, double azBacklash,
+                                    int customRate9Speed, bool enableCustomRate9, bool enablePecEnabled)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["IsEquatorial"] = isEquatorial;
+    params["OnWedge"] = onWedge;
+    params["AltBacklash"] = altBacklash;
+    params["AzmBacklash"] = azBacklash; // OLV sends this misspelled as "AzmBacklashh"; using the corrected name here
+    params["CustomRate9Speed"] = customRate9Speed;
+    params["EnableCustomRate9"] = enableCustomRate9;
+    params["EnablePec"] = enablePecEnabled;
+    sendCommand("SetMountConfig", "Mount", params);
+    return true;
+}
+
+bool OriginBackend::connectElPanel()
+{
+    if (!isConnected()) return false;
+    sendCommand("Connect", "ElPanel");
+    return true;
+}
+
+bool OriginBackend::disconnectElPanel()
+{
+    if (!isConnected()) return false;
+    sendCommand("Disconnect", "ElPanel");
+    return true;
+}
+
+bool OriginBackend::runAddReference()
+{
+    if (!isConnected()) return false;
+    sendCommand("RunAddReference", "TaskController");
+    return true;
+}
+
+bool OriginBackend::runCenterTarget(double raRadians, double decRadians)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["Ra"] = raRadians;
+    params["Dec"] = decRadians;
+    sendCommand("RunCenterTarget", "TaskController", params);
+    m_status.currentOperation = "Centering";
+    return true;
+}
+
+bool OriginBackend::runObservingList(const QString& listUuid, bool powerDownOnCompletion)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["ListUuid"] = listUuid;
+    params["PowerDownOnCompletion"] = powerDownOnCompletion;
+    sendCommand("RunObservingList", "TaskController", params);
+    m_status.currentOperation = "Observing List";
+    return true;
+}
+
+bool OriginBackend::runAutoFocus()
+{
+    if (!isConnected()) return false;
+    sendCommand("RunAutoFocus", "Focuser");
+    m_status.currentOperation = "Auto Focusing";
+    return true;
+}
+
+bool OriginBackend::runInfinityAutoFocus()
+{
+    if (!isConnected()) return false;
+    sendCommand("RunInfinityAutoFocus", "TaskController");
+    m_status.currentOperation = "Infinity Auto Focus";
+    return true;
+}
+
+bool OriginBackend::runManualFocus(int range, int startPosition, int stepSize)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["Range"] = range;
+    params["StartingPosition"] = startPosition;
+    params["StepSize"] = stepSize;
+    sendCommand("RunManualFocus", "TaskController", params);
+    m_status.currentOperation = "Manual Focus";
+    return true;
+}
+
+bool OriginBackend::runPolarAlign()
+{
+    if (!isConnected()) return false;
+    sendCommand("PolarAlign", "TaskController");
+    m_status.currentOperation = "Polar Aligning";
+    return true;
+}
+
+bool OriginBackend::cancelAutoFocus()
+{
+    if (!isConnected()) return false;
+    sendCommand("CancelAutoFocus", "TaskController");
+    return true;
+}
+
+bool OriginBackend::runGenerateNewDarks(int maxDarks, int numDarks)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["MaxDarks"] = maxDarks;
+    params["NumDarks"] = numDarks;
+    sendCommand("RunGenerateNewDarks", "TaskController", params);
+    m_status.currentOperation = "Generating Darks";
+    return true;
+}
+
+bool OriginBackend::runGenerateNewFlat()
+{
+    if (!isConnected()) return false;
+    sendCommand("RunGenerateNewFlat", "TaskController");
+    m_status.currentOperation = "Generating Flat";
+    return true;
+}
+
+bool OriginBackend::runGenerateNewDarksWithParams(int bitDepth, double exposureTime, int iso)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["BitDepth"] = bitDepth;
+    params["ExposureTime"] = exposureTime;
+    params["ISO"] = iso;
+    sendCommand("RunGenerateNewDarks", "TaskController", params);
+    m_status.currentOperation = "Generating Darks";
+    return true;
+}
+
+bool OriginBackend::runSampleCapture(double exposureTime, int iso, int bitDepth, int binning,
+                                      bool calibrate, bool debayer)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["ExposureTime"] = exposureTime;
+    params["ISO"] = iso;
+    params["BitDepth"] = bitDepth;
+    params["Binning"] = binning;
+    params["Calibrate"] = calibrate;
+    params["Debayer"] = debayer;
+    sendCommand("RunSampleCapture", "TaskController", params);
+    m_status.currentOperation = "Sample Capture";
+    return true;
+}
+
+bool OriginBackend::scheduleImaging(double raRadians, double decRadians, const QString& name,
+                                     double exposureTime, int iso, int totalDurationSeconds,
+                                     double objectMagnitude, double objectSize, bool saveRawImage,
+                                     bool autoFocusAfterSlew, bool powerDownOnCompletion,
+                                     bool continueImagingIfStackingFails)
+{
+    if (!isConnected()) return false;
+
+    QJsonObject location;
+    location["Ra"] = raRadians;
+    location["Dec"] = decRadians;
+    location["Name"] = name;
+    location["ExposureTime"] = exposureTime;
+    location["ISO"] = iso;
+    location["TotalDuration"] = totalDurationSeconds;
+    location["ObjectMagnitude"] = objectMagnitude;
+    location["ObjectSize"] = objectSize;
+    location["SaveRawImage"] = saveRawImage;
+    location["ContinueImagingIfStackingFails"] = continueImagingIfStackingFails;
+    location["Uuid"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+
+    QJsonArray locationArray;
+    locationArray.append(location);
+
+    QJsonObject params;
+    params["AutoFocusAfterSlew"] = autoFocusAfterSlew;
+    params["Location"] = locationArray;
+    params["PowerDownOnCompletion"] = powerDownOnCompletion;
+    params["Uuid"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+
+    sendCommand("RunObservingList", "TaskController", params);
+    m_status.currentOperation = "Scheduled Imaging";
+    return true;
+}
+
+bool OriginBackend::imageNextTarget()
+{
+    if (!isConnected()) return false;
+    sendCommand("ImageNextTarget", "TaskController");
+    return true;
+}
+
+bool OriginBackend::getObservingListInfo(const QString& listUuid)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["ListUuid"] = listUuid;
+    sendCommand("GetObservingListInfo", "TaskController", params);
+    return true;
+}
+
+bool OriginBackend::getLogs()
+{
+    if (!isConnected()) return false;
+    sendCommand("GetLogs", "System");
+    return true;
+}
+
+bool OriginBackend::getAutomaticUpdates()
+{
+    if (!isConnected()) return false;
+    sendCommand("GetAutomaticUpdates", "System");
+    return true;
+}
+
+bool OriginBackend::setAutomaticUpdates(bool enabled)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["Enabled"] = enabled;
+    sendCommand("SetAutomaticUpdates", "System", params);
+    return true;
+}
+
+bool OriginBackend::getVisibleWiFi()
+{
+    if (!isConnected()) return false;
+    sendCommand("GetVisibleWiFi", "Network");
+    return true;
+}
+
+bool OriginBackend::getWiFiNetworks()
+{
+    if (!isConnected()) return false;
+    sendCommand("GetWiFiNetworks", "Network");
+    return true;
+}
+
+bool OriginBackend::addWiFiNetwork(const QString& ssid, const QString& password)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["Ssid"] = ssid;
+    params["Password"] = password;
+    sendCommand("AddWiFiNetwork", "Network", params);
+    return true;
+}
+
+bool OriginBackend::deleteWiFiNetwork(const QString& ssid)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["Ssid"] = ssid;
+    sendCommand("DeleteWiFiNetwork", "Network", params);
+    return true;
+}
+
+bool OriginBackend::connectToSpecificNetwork(const QString& ssid, const QString& password)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["Ssid"] = ssid;
+    params["Password"] = password;
+    sendCommand("ConnectToSpecificNetwork", "Network", params);
+    return true;
+}
+
+bool OriginBackend::setLedBrightness(int level)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["BrightnessLevel"] = level;
+    sendCommand("SetBrightnessLevel", "LedRing", params);
+    return true;
+}
+
+bool OriginBackend::getLedBrightness()
+{
+    if (!isConnected()) return false;
+    sendCommand("GetBrightnessLevel", "LedRing");
+    return true;
+}
+
+bool OriginBackend::turnOnLight()
+{
+    if (!isConnected()) return false;
+    sendCommand("TurnOnLight", "ElPanel");
+    return true;
+}
+
+bool OriginBackend::turnOffLight()
+{
+    if (!isConnected()) return false;
+    sendCommand("TurnOffLight", "ElPanel");
+    return true;
+}
+
+bool OriginBackend::setLightLevel(int level)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["LightLevel"] = level;
+    sendCommand("SetLightLevel", "ElPanel", params);
+    return true;
+}
+
+bool OriginBackend::getAccelerometer()
+{
+    if (!isConnected()) return false;
+    sendCommand("GetAccelerometer", "OrientationSensor");
+    return true;
+}
+
+bool OriginBackend::zeroCalibrate()
+{
+    if (!isConnected()) return false;
+    sendCommand("ZeroCalibrate", "OrientationSensor");
+    return true;
+}
+
+bool OriginBackend::deleteAllAlignRefs()
+{
+    if (!isConnected()) return false;
+    sendCommand("DeleteAllAlignRefs", "Mount");
+    return true;
+}
+
+bool OriginBackend::enablePec(bool enabled)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["Enabled"] = enabled;
+    sendCommand("EnablePec", "Mount", params);
+    return true;
+}
+
+bool OriginBackend::runCaptureMosaic(double mosaicWidth, double mosaicHeight, double mosaicOrientation,
+                                     double raRadians, double decRadians, const QString& name,
+                                     double exposureTime, int iso, int totalDurationSeconds,
+                                     double objectMagnitude, double objectSize, bool saveRawImage,
+                                     const QString& minimumStartTime, bool autoFocusAfterSlew,
+                                     bool powerDownOnCompletion, int ditherDistance, int ditherInterval)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["AutoFocusAfterSlew"] = autoFocusAfterSlew;
+    params["DitherDistance"] = ditherDistance;
+    params["DitherInterval"] = ditherInterval;
+    params["ExposureTime"] = exposureTime;
+    params["ISO"] = iso;
+    params["MinimumStartTime"] = minimumStartTime;
+    params["MosaicHeight"] = mosaicHeight;
+    params["MosaicOrientation"] = mosaicOrientation;
+    params["MosaicWidth"] = mosaicWidth;
+    params["ObjectDec"] = decRadians;
+    params["ObjectMagnitude"] = objectMagnitude;
+    params["ObjectName"] = name;
+    params["ObjectRa"] = raRadians;
+    params["ObjectSize"] = objectSize;
+    params["PowerDownOnCompletion"] = powerDownOnCompletion;
+    params["SaveRawImage"] = saveRawImage;
+    params["TotalDuration"] = totalDurationSeconds;
+    params["Uuid"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    sendCommand("RunCaptureMosaic", "TaskController", params);
+    m_status.currentOperation = "Capturing Mosaic";
+    return true;
+}
+
+bool OriginBackend::runComposeMosaic()
+{
+    if (!isConnected()) return false;
+    sendCommand("RunComposeMosaic", "TaskController");
+    m_status.currentOperation = "Composing Mosaic";
+    return true;
+}
+
+bool OriginBackend::getAvailableMosaics()
+{
+    if (!isConnected()) return false;
+    sendCommand("GetAvailableMosaics", "Mosaic");
+    return true;
+}
+
+bool OriginBackend::getMosaicTiles(const QString& mosaicUuid)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["MosaicUuid"] = mosaicUuid;
+    sendCommand("GetMosaicTiles", "Mosaic", params);
+    return true;
+}
+
+bool OriginBackend::getMaximumTiles()
+{
+    if (!isConnected()) return false;
+    sendCommand("GetMaximumTiles", "Mosaic");
+    return true;
+}
+
+bool OriginBackend::getAvailableImagingLists()
+{
+    if (!isConnected()) return false;
+    sendCommand("GetAvailableImagingLists", "ImageServer");
+    return true;
+}
+
+bool OriginBackend::getListOfAvailableDirectories()
+{
+    if (!isConnected()) return false;
+    sendCommand("GetListOfAvailableDirectories", "ImageServer");
+    return true;
+}
+
+bool OriginBackend::copyDirectoryToFlashDrive(const QString& dirName, const QString& sourcePath, const QString& targetPath)
+{
+    if (!isConnected()) return false;
+    QJsonObject params;
+    params["DirectoryName"] = dirName;
+    params["SourcePath"] = sourcePath;
+    params["TargetPath"] = targetPath;
+    sendCommand("CopyDirectoryToFlashDrive", "TaskController", params);
+    return true;
+}
+
 void OriginBackend::updateStatus()
 {
     if (!isConnected()) {
@@ -1131,7 +1644,6 @@ void OriginBackend::initializeLogging() {
     m_logFile = new QFile(logFileName, this);
     if (m_logFile->open(QIODevice::WriteOnly | QIODevice::Append)) {
         m_logStream = new QTextStream(m_logFile);
-        m_logStream->setCodec("UTF-8");
         
         qDebug() << "WebSocket logging initialized:" << logFileName;
         logWebSocketMessage("SYSTEM", "=== WebSocket Logging Started ===");

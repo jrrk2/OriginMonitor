@@ -259,10 +259,7 @@ void AlignmentController::abort()
     m_plateSolver.abort();
 
     // Stop any slew in progress
-    QJsonObject stopCmd;
-    stopCmd["AltRate"] = 0;
-    stopCmd["AzmRate"] = 0;
-    m_backend->sendCommand("Slew", "Mount", stopCmd);
+    m_backend->stopAll();
 
     if (m_state != Idle) {
         log("Alignment aborted");
@@ -443,50 +440,25 @@ void AlignmentController::navigateToStar()
 
     setState(SlewingToStar);
 
-    // Choose slew rate based on distance
-    // For large slews (>5 deg): use a fast rate
-    // For small corrections (<1 deg): use a slow rate
-    double slewRate;
-    if (totalSep > 10.0)
-        slewRate = 5.0;    // deg/sec - fast
-    else if (totalSep > 2.0)
-        slewRate = 2.0;    // deg/sec - medium
-    else if (totalSep > 0.5)
-        slewRate = 0.5;    // deg/sec - slow
-    else
-        slewRate = 0.1;    // deg/sec - fine correction
+    log(QString("GotoAltAzm: target Alt=%1 Az=%2 deg")
+        .arg(tgtAlt, 0, 'f', 3).arg(tgtAz, 0, 'f', 3));
 
-    // Compute duration: time = distance / rate
-    double maxOffset = std::max(std::abs(dAlt), std::abs(dAz));
-    double durationSec = maxOffset / slewRate;
+    // Use absolute slew to the target position
+    m_backend->gotoAltAzm(tgtAlt * M_PI / 180.0, tgtAz * M_PI / 180.0);
 
-    // Scale rates so both axes finish simultaneously
-    double altRate = dAlt / durationSec;
-    double azRate = dAz / durationSec;
-
-    log(QString("Slew rates: alt=%1 az=%2 deg/s for %3 sec")
-        .arg(altRate, 0, 'f', 3).arg(azRate, 0, 'f', 3).arg(durationSec, 0, 'f', 1));
-
-    // Send the slew command
-    QJsonObject slewCmd;
-    slewCmd["AltRate"] = altRate;
-    slewCmd["AzmRate"] = azRate;
-    m_backend->sendCommand("Slew", "Mount", slewCmd);
-
-    // Set timer to stop the slew
+    // Wait for the goto to complete, then settle.
+    // Estimate a generous timeout based on separation.
+    int timeoutMs = static_cast<int>(std::max(totalSep / 2.0, 5.0) * 1000);
     setState(WaitingForCorrection);
-    m_correctionTimer.start(static_cast<int>(durationSec * 1000));
+    m_correctionTimer.start(timeoutMs);
 }
 
 void AlignmentController::onCorrectionComplete()
 {
-    // Stop the slew
-    QJsonObject stopCmd;
-    stopCmd["AltRate"] = 0;
-    stopCmd["AzmRate"] = 0;
-    m_backend->sendCommand("Slew", "Mount", stopCmd);
+    // GotoAltAzm stops automatically, but ensure a clean stop
+    m_backend->stopAll();
 
-    log("Slew complete, settling...");
+    log("Goto complete, settling...");
     setState(SettlingAfterSlew);
     m_settleTimer.start(2000);  // 2 seconds settle time
 }
@@ -590,7 +562,7 @@ void AlignmentController::onPlateSolveCompleted(const PlateSolveResult &result)
             setState(Error);
             return;
         }
-        m_numStarsRequested = std::min(m_numStarsRequested, m_visibleStars.size());
+        m_numStarsRequested = std::min(m_numStarsRequested, static_cast<int>(m_visibleStars.size()));
 
         setState(SelectingStar);
         selectNextStar();

@@ -172,7 +172,6 @@ bool LogReplayDialog::loadLogFile(const QString& filename)
     m_currentIndex = -1;
     
     QTextStream in(&file);
-    in.setCodec("UTF-8");
     
     // Parse log file
     // Format: [YYYY-MM-DD HH:MM:SS.zzz] DIRECTION: JSON

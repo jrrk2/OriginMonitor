@@ -106,13 +106,9 @@ TelescopeGUI::TelescopeGUI(QWidget *parent)
 		// Update image preview label
 		if (imagePreviewLabel) {
 		    QPixmap pixmap = QPixmap::fromImage(image);
-		    QPixmap scaledPixmap = pixmap.scaled(imagePreviewLabel->size(), 
-							Qt::KeepAspectRatio, 
-							Qt::SmoothTransformation);
-		    imagePreviewLabel->setPixmap(scaledPixmap);
+		    updateImagePreviewLabels(pixmap);
 		}
 
-		// Update metadata labels
 		if (imageRaLabel) {
 		    imageRaLabel->setText(QString("%1 hrs").arg(
 			originBackend->radiansToHours(ra), 0, 'f', 6));
@@ -390,6 +386,11 @@ void TelescopeGUI::updateFocuserDisplay() {
     
     // Update calibration progress bar
     focuserCalibrationProgressBar->setValue(data.focuser.percentageCalibrationComplete);
+
+    // Keep the "Move To" default in sync with the current position, unless the user is editing it
+    if (!focuserMoveToSpinBox->hasFocus()) {
+        focuserMoveToSpinBox->setValue(data.focuser.position);
+    }
 }
 
 void TelescopeGUI::updateEnvironmentDisplay() {
@@ -416,6 +417,15 @@ void TelescopeGUI::updateImageDisplay() {
     // Request image from the telescope if connected
     if (originBackend->isConnected() && !data.lastImage.fileLocation.isEmpty()) {
         requestImage(data.lastImage.fileLocation);
+    }
+}
+
+void TelescopeGUI::updateImagePreviewLabels(const QPixmap &pixmap) {
+    if (imagePreviewLabel) {
+        imagePreviewLabel->setPixmapKeepingAspect(pixmap);
+    }
+    if (focuserImagePreviewLabel) {
+        focuserImagePreviewLabel->setPixmapKeepingAspect(pixmap);
     }
 }
 
@@ -526,6 +536,7 @@ void TelescopeGUI::setupUI() {
     tabWidget->addTab(createCommandTab(), "Commands");
     tabWidget->addTab(new AutopilotTab(m_autopilotController, this), "Autopilot");
     tabWidget->addTab(new AlignmentTab(m_alignmentController, this), "Alignment");
+    tabWidget->addTab(new MosaicTab(originBackend, this), "Mosaic");
     tabWidget->addTab(new JsonMonitorTab(originBackend, this), "JSON Monitor");
 
     mainLayout->addWidget(tabWidget);
@@ -950,7 +961,56 @@ QWidget* TelescopeGUI::createFocuserTab() {
     layout->addWidget(new QLabel("Last Update:"), row, 0);
     focuserLastUpdateLabel = new QLabel("-", tab);
     layout->addWidget(focuserLastUpdateLabel, row++, 1);
-    
+
+    // Manual focus control - real Origin focus adjustment is just repeated absolute MoveTo calls
+    // (confirmed via live capture), so both absolute and relative controls funnel through moveFocuserTo().
+    QGroupBox *focusControlGroup = new QGroupBox("Manual Focus Control", tab);
+    QVBoxLayout *focusControlLayout = new QVBoxLayout(focusControlGroup);
+
+    QHBoxLayout *absoluteLayout = new QHBoxLayout();
+    absoluteLayout->addWidget(new QLabel("Move To:"));
+    focuserMoveToSpinBox = new QSpinBox(focusControlGroup);
+    focuserMoveToSpinBox->setRange(0, 200000);
+    absoluteLayout->addWidget(focuserMoveToSpinBox);
+    QPushButton *moveToButton = new QPushButton("Move", focusControlGroup);
+    connect(moveToButton, &QPushButton::clicked, this, [this]() {
+        if (!originBackend->isConnected()) {
+            QMessageBox::warning(this, "Not Connected", "Please connect to the telescope first");
+            return;
+        }
+        originBackend->moveFocuserTo(focuserMoveToSpinBox->value());
+    });
+    absoluteLayout->addWidget(moveToButton);
+    focusControlLayout->addLayout(absoluteLayout);
+
+    QHBoxLayout *jogLayout = new QHBoxLayout();
+    const int jogSteps[] = {-1000, -100, -10, -1, 1, 10, 100, 1000};
+    for (int step : jogSteps) {
+        QPushButton *jogButton = new QPushButton(QString("%1%2").arg(step > 0 ? "+" : "").arg(step), focusControlGroup);
+        connect(jogButton, &QPushButton::clicked, this, [this, step]() {
+            if (!originBackend->isConnected()) {
+                QMessageBox::warning(this, "Not Connected", "Please connect to the telescope first");
+                return;
+            }
+            int newPosition = dataProcessor->getData().focuser.position + step;
+            originBackend->moveFocuserTo(newPosition);
+        });
+        jogLayout->addWidget(jogButton);
+    }
+    focusControlLayout->addLayout(jogLayout);
+
+    layout->addWidget(focusControlGroup, row++, 0, 1, 2);
+
+    // Live image preview so focus adjustments can be judged visually, mirroring the Show Image tab
+    QGroupBox *previewGroup = new QGroupBox("Live Image", tab);
+    QVBoxLayout *previewLayout = new QVBoxLayout(previewGroup);
+    focuserImagePreviewLabel = new AspectRatioLabel(800, previewGroup);
+    focuserImagePreviewLabel->setAlignment(Qt::AlignCenter);
+    focuserImagePreviewLabel->setText("No image available");
+    focuserImagePreviewLabel->setStyleSheet("QLabel { background-color: #2b2b2b; border: 2px solid #555; }");
+    previewLayout->addWidget(focuserImagePreviewLabel);
+    layout->addWidget(previewGroup, row++, 0, 1, 2);
+
     layout->setRowStretch(row, 1);
     return tab;
 }
@@ -1008,9 +1068,13 @@ QWidget* TelescopeGUI::createEnvironmentTab() {
 QWidget* TelescopeGUI::createImageTab() {
     QWidget *tab = new QWidget();
     QVBoxLayout *mainLayout = new QVBoxLayout(tab);
-    
+
+    // Three vertical panels: Camera Control | Image Info & Hand Control | Image Preview
+    QSplitter *splitter = new QSplitter(Qt::Vertical, tab);
+    mainLayout->addWidget(splitter, 1);
+
     // Camera Control Panel
-    QGroupBox *cameraControlGroup = new QGroupBox("Camera Control", tab);
+    QGroupBox *cameraControlGroup = new QGroupBox("Camera Control", splitter);
     QGridLayout *cameraControlLayout = new QGridLayout(cameraControlGroup);
     
     int ctrlRow = 0;
@@ -1083,15 +1147,11 @@ QWidget* TelescopeGUI::createImageTab() {
     snapshotProgressBar->setVisible(false);
     cameraControlLayout->addWidget(snapshotProgressBar, ctrlRow++, 1, 1, 2);
     
-    mainLayout->addWidget(cameraControlGroup);
-    
     // ========================================================================
-    // MIDDLE SECTION: Original Two-Panel Layout
+    // MIDDLE + RIGHT PANELS
     // ========================================================================
-    QSplitter *splitter = new QSplitter(Qt::Horizontal, tab);
-    mainLayout->addWidget(splitter, 1);  // Give it stretch priority
     
-    // Left panel - Image info
+    // Middle panel - Image info
     QWidget *infoPanel = new QWidget(splitter);
     QGridLayout *infoLayout = new QGridLayout(infoPanel);
     
@@ -1148,8 +1208,7 @@ QWidget* TelescopeGUI::createImageTab() {
     QWidget *imagePanel = new QWidget(splitter);
     QVBoxLayout *imageLayout = new QVBoxLayout(imagePanel);
     
-    imagePreviewLabel = new QLabel(imagePanel);
-    imagePreviewLabel->setMinimumSize(400, 300);
+    imagePreviewLabel = new AspectRatioLabel(640, imagePanel);
     imagePreviewLabel->setAlignment(Qt::AlignCenter);
     imagePreviewLabel->setScaledContents(false);
     imagePreviewLabel->setText("No image available");
@@ -1157,9 +1216,10 @@ QWidget* TelescopeGUI::createImageTab() {
     
     imageLayout->addWidget(imagePreviewLabel);
     
-    // Set stretch factors for the splitter
-    splitter->setStretchFactor(0, 1);  // Info panel
-    splitter->setStretchFactor(1, 3);  // Image panel
+    // Set stretch factors for the three panels
+    splitter->setStretchFactor(0, 1);  // Camera control panel
+    splitter->setStretchFactor(1, 1);  // Info panel
+    splitter->setStretchFactor(2, 2);  // Image panel
     // Add these connections at the end of createImageTab(), before returning tab:
 
     // Connect backend camera signals to update UI
@@ -1274,11 +1334,7 @@ void TelescopeGUI::onSnapshotDownloaded(const QString& localPath) {
     // Load and display the downloaded image
     QPixmap pixmap(localPath);
     if (!pixmap.isNull() && imagePreviewLabel) {
-        // Scale to fit while preserving aspect ratio
-        QPixmap scaledPixmap = pixmap.scaled(imagePreviewLabel->size(), 
-                                            Qt::KeepAspectRatio, 
-                                            Qt::SmoothTransformation);
-        imagePreviewLabel->setPixmap(scaledPixmap);
+        updateImagePreviewLabels(pixmap);
         
         qDebug() << "Image displayed successfully";
     } else {
@@ -1421,11 +1477,8 @@ void TelescopeGUI::requestImage(const QString &filePath) {
             // Create a QPixmap from the data
             QPixmap pixmap;
             if (pixmap.loadFromData(imageData)) {
-                // Scale to fit the label while preserving aspect ratio
-                pixmap = pixmap.scaled(imagePreviewLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
-                
                 // Display the image
-                imagePreviewLabel->setPixmap(pixmap);
+                updateImagePreviewLabels(pixmap);
                 
                 // Analyze image for focus quality (optional)
                 analyzeImageForFocus(imageData);
@@ -1877,15 +1930,32 @@ void TelescopeGUI::checkMountStatus() {
     startSlewButton->setEnabled(!isSlewingAndImaging);
 }
 
-static const int SLEW_RATE = 9;
+static const double SLEW_OFFSET_DEG = 30.0;  // GotoAltAzm offset for jog buttons
 
 void TelescopeGUI::slew(int alt, int az)
 {
-QJsonObject slewCommand;
-    slewCommand["AltRate"] = alt;  // Positive for up
-    slewCommand["AzmRate"] = az;
-    originBackend->sendCommand("Slew", "Mount", slewCommand);
-    qDebug() << "Slew: " << alt << az;
+    // Use GotoAltAzm: compute absolute target from current position + offset.
+    // The mount slews toward the target; StopAll halts it on button release.
+    const TelescopeData& data = originBackend->getDataProcessor()->getData();
+    double curAltDeg = alt != 0 || az != 0
+        ? data.mount.altitude * 180.0 / M_PI
+        : 0;
+    double curAzDeg  = alt != 0 || az != 0
+        ? data.mount.azimuth  * 180.0 / M_PI
+        : 0;
+
+    if (alt == 0 && az == 0) {
+        // Zero rates = stop
+        originBackend->stopAll();
+        qDebug() << "Slew stopped via StopAll";
+        return;
+    }
+
+    double targetAltDeg = curAltDeg + (alt > 0 ? SLEW_OFFSET_DEG : (alt < 0 ? -SLEW_OFFSET_DEG : 0));
+    double targetAzDeg  = curAzDeg  + (az  > 0 ? SLEW_OFFSET_DEG : (az  < 0 ? -SLEW_OFFSET_DEG : 0));
+
+    originBackend->gotoAltAzm(targetAltDeg * M_PI / 180.0, targetAzDeg * M_PI / 180.0);
+    qDebug() << "Slew via GotoAltAzm: target Alt=" << targetAltDeg << " Az=" << targetAzDeg;
 }
 
 void TelescopeGUI::cancelSlew()
@@ -1896,38 +1966,34 @@ void TelescopeGUI::cancelSlew()
 
 void TelescopeGUI::onSlewCancel()
 {
-  slew(0, 0);
+  originBackend->stopAll();
 }
 
 void TelescopeGUI::startUpButton()
 {
     qDebug() << "Up Button - Starting upward slew";
-    slew(SLEW_RATE, 0);
+    slew(1, 0);
     cancelSlew();
 }
 
 void TelescopeGUI::startDownButton()
 {
     qDebug() << "Down Button - Starting downward slew";
-    
-    slew(-SLEW_RATE, 0);  // Negative for down
+    slew(-1, 0);
     cancelSlew();
 }
 
 void TelescopeGUI::startLeftButton()
 {
     qDebug() << "Left Button - Starting leftward slew";
-    
-    slew(0, -SLEW_RATE);  // Negative for left (counterclockwise)
+    slew(0, -1);
     cancelSlew();
-
 }
 
 void TelescopeGUI::startRightButton()
 {
     qDebug() << "Right Button - Starting rightward slew";
-    
-    slew(0, SLEW_RATE);  // Positive for right (clockwise)
+    slew(0, 1);
     cancelSlew();
 }
 

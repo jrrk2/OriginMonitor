@@ -49,6 +49,7 @@ SOURCES += \
     MountModel.cpp \
     AlignmentController.cpp \
     AlignmentTab.cpp \
+    MosaicTab.cpp \
 
 # Original header files
 HEADERS += \
@@ -68,6 +69,8 @@ HEADERS += \
     MountModel.hpp \
     AlignmentController.hpp \
     AlignmentTab.hpp \
+    MosaicTab.hpp \
+    AspectRatioLabel.hpp \
     
 # Default rules
 qnx: target.path = /tmp/$${TARGET}/bin

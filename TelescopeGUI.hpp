@@ -40,6 +40,8 @@ class AlignmentController;
 #include "TelescopeDataProcessor.hpp"
 #include "CommandInterface.hpp"
 #include "LogReplayDialog.hpp"
+#include "MosaicTab.hpp"
+#include "AspectRatioLabel.hpp"
 
 /**
  * @brief Main application window for the telescope monitor
@@ -197,6 +199,11 @@ private:
      * @param incoming Whether the message is incoming or outgoing
      */
     void logJsonPacket(const QString &message, bool incoming);
+
+    /**
+     * @brief Push a newly received live/downloaded image to every preview label that shows it
+     */
+    void updateImagePreviewLabels(const QPixmap &pixmap);
     
     /**
      * @brief Request an image from the telescope
@@ -279,6 +286,8 @@ private:
     QLabel *focuserIsCalibrationCompleteLabel;
     QProgressBar *focuserCalibrationProgressBar;
     QLabel *focuserLastUpdateLabel;
+    QSpinBox *focuserMoveToSpinBox;
+    AspectRatioLabel *focuserImagePreviewLabel;
     
     // Environment tab widgets
     QLabel *envAmbientTempLabel;
@@ -299,7 +308,7 @@ private:
     QLabel *imageFovXLabel;
     QLabel *imageFovYLabel;
     QLabel *imageLastUpdateLabel;
-    QLabel *imagePreviewLabel;
+    AspectRatioLabel *imagePreviewLabel;
     QString m_snapshotSavePath;
     
     // Camera control UI widgets
