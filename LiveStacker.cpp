@@ -84,16 +84,18 @@ double flattenPlane(std::vector<float>& img, int w, int h)
 // as narrow ones. Two rounds, rows then columns.
 void removeBanding(std::vector<float>& img, int w, int h, double sigma)
 {
-    const double lim = 2.0 * sigma;
+    // Truncated mean over [-2, +0.5] sigma: the cut is asymmetric so that a faint halo or galaxy arm (a few tenths of a sigma per pixel) cannot
+    // lift a line's estimate and carve a dark cross through the object; the constant bias of the truncation is the same for every line.
+    const double lo = -2.0 * sigma, hi = 0.5 * sigma;
     for (int it = 0; it < 2; ++it) {
         for (int y = 0; y < h; ++y) {
             double s = 0; int n = 0; float* r = &img[size_t(y) * w];
-            for (int pass = 0; pass < 2; ++pass) { s = 0; n = 0; const double c = pass ? s / std::max(1, n) : 0; (void)c; for (int x = 0; x < w; ++x) if (std::fabs(r[x]) < lim) { s += r[x]; ++n; } break; }
+            for (int x = 0; x < w; ++x) if (r[x] > lo && r[x] < hi) { s += r[x]; ++n; }
             if (n > w / 4) { const float m = float(s / n); for (int x = 0; x < w; ++x) r[x] -= m; }
         }
         for (int x = 0; x < w; ++x) {
             double s = 0; int n = 0;
-            for (int y = 0; y < h; ++y) { const float v = img[size_t(y) * w + x]; if (std::fabs(v) < lim) { s += v; ++n; } }
+            for (int y = 0; y < h; ++y) { const float v = img[size_t(y) * w + x]; if (v > lo && v < hi) { s += v; ++n; } }
             if (n > h / 4) { const float m = float(s / n); for (int y = 0; y < h; ++y) img[size_t(y) * w + x] -= m; }
         }
     }
@@ -109,6 +111,118 @@ inline float sampleBilinear(const std::vector<float>& img, int w, int h, double 
 }
 
 }   // namespace
+
+// ---- display stretch, ported from jrrk2/mkmosaic (VeraLux): background extraction, neutralisation, colour-preserving hyperbolic stretch ----
+namespace {
+
+float percentileOf(std::vector<float> v, double p)
+{
+    if (v.empty()) return 0;
+    const size_t k = std::min(v.size() - 1, size_t(p / 100.0 * (v.size() - 1)));
+    std::nth_element(v.begin(), v.begin() + k, v.end());
+    return v[k];
+}
+
+inline float lumaOf(const float* p) { return 0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2]; }
+inline float hyperbolicF(float v, float D, float b) { const float den = std::asinh(D + b) - std::asinh(b); return den < 1e-9f ? v : (std::asinh(D * v + b) - std::asinh(b)) / den; }
+inline float mtfF(float v, float m) { if (v <= 0) return 0; if (v >= 1) return 1; const float den = (2 * m - 1) * v - m; return std::fabs(den) < 1e-9f ? v : std::clamp((m - 1) * v / den, 0.f, 1.f); }
+inline float softClipF(float v) { const float thr = 0.98f; if (v <= thr) return v; const float t = std::clamp((v - thr) / (1 - thr), 0.f, 1.f); return thr + (1 - thr) * (1 - (1 - t) * (1 - t)); }
+
+// Smooth sky model: cell medians, cells lifted by stars or the galaxy rejected iteratively, gaps filled by normalised Gaussian convolution
+void extractBackground(std::vector<float>& plane, int w, int h, int cell, double sigmaCells)
+{
+    const int gx = w / cell, gy = h / cell; if (gx < 4 || gy < 4) return;
+    std::vector<float> g(size_t(gx) * gy), wt(g.size(), 1.f), G(g.size()), v;
+    for (int y = 0; y < gy; ++y) for (int x = 0; x < gx; ++x) {
+        v.clear(); for (int yy = 0; yy < cell; yy += 2) for (int xx = 0; xx < cell; xx += 2) v.push_back(plane[size_t(y * cell + yy) * w + x * cell + xx]);
+        std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end()); g[size_t(y) * gx + x] = v[v.size() / 2];
+    }
+    const int R = int(std::ceil(3 * sigmaCells));
+    auto blur = [&](const std::vector<float>& s, std::vector<float>& d) {
+        for (int y = 0; y < gy; ++y) for (int x = 0; x < gx; ++x) { double a = 0, n = 0;
+            for (int dy = -R; dy <= R; ++dy) for (int dx = -R; dx <= R; ++dx) { const int Y = y + dy, X = x + dx; if (Y < 0 || X < 0 || Y >= gy || X >= gx) continue; const double k = std::exp(-(dx * dx + dy * dy) / (2 * sigmaCells * sigmaCells)); a += k * s[size_t(Y) * gx + X]; n += k; }
+            d[size_t(y) * gx + x] = float(a / n); }
+    };
+    std::vector<float> gw(g.size()), num(g.size()), den(g.size());
+    for (int it = 0; it < 4; ++it) {
+        for (size_t i = 0; i < g.size(); ++i) gw[i] = g[i] * wt[i];
+        blur(gw, num); blur(wt, den);
+        for (size_t i = 0; i < g.size(); ++i) G[i] = num[i] / std::max(den[i], 1e-3f);
+        std::vector<float> r; for (size_t i = 0; i < g.size(); ++i) if (wt[i] > 0) r.push_back(g[i] - G[i]);
+        const float md = percentileOf(r, 50); for (auto& t : r) t = std::fabs(t - md); const float sd = 1.4826f * percentileOf(r, 50) + 1e-9f;
+        for (size_t i = 0; i < g.size(); ++i) wt[i] = (g[i] - G[i] - md) > 1.2f * sd ? 0.f : 1.f;
+    }
+    const float keep = percentileOf(G, 50);
+    for (int y = 0; y < h; ++y) {
+        const double fy = std::clamp((y + 0.5) / cell - 0.5, 0.0, gy - 1.0001); const int y0 = int(fy); const double ty = fy - y0;
+        for (int x = 0; x < w; ++x) {
+            const double fx = std::clamp((x + 0.5) / cell - 0.5, 0.0, gx - 1.0001); const int x0 = int(fx); const double tx = fx - x0; const size_t i = size_t(y0) * gx + x0;
+            const float m = float((G[i] * (1 - tx) + G[i + 1] * tx) * (1 - ty) + (G[i + gx] * (1 - tx) + G[i + gx + 1] * tx) * ty);
+            plane[size_t(y) * w + x] = std::max(0.f, plane[size_t(y) * w + x] - m + keep);
+        }
+    }
+}
+
+}   // namespace
+
+static QImage vlStretchToImage(std::vector<float> col[3], int w, int h)
+{
+    const size_t n = size_t(w) * h;
+    // non-negative linear data: lift the noise floor, remove the sky model, normalise to the brightest pixels
+    {
+        std::vector<float> s; for (size_t i = 0; i < n; i += 7) s.push_back(col[1][i]);
+        const float med = percentileOf(s, 50); for (auto& t : s) t = std::fabs(t - med); const float sg = 1.4826f * percentileOf(s, 50) + 1e-6f;
+        for (int c = 0; c < 3; ++c) for (size_t i = 0; i < n; ++i) col[c][i] = std::max(0.f, col[c][i] + 4 * sg);
+        for (int c = 0; c < 3; ++c) extractBackground(col[c], w, h, 48, 3.0);
+    }
+    std::vector<float> rgb(n * 3), lum(n);
+    for (size_t i = 0; i < n; ++i) for (int c = 0; c < 3; ++c) rgb[i * 3 + c] = col[c][i];
+    { std::vector<float> s; for (size_t i = 0; i < n; i += 5) s.push_back(lumaOf(&rgb[i * 3])); const float top = std::max(percentileOf(s, 99.995), 1e-6f); for (auto& v : rgb) v = std::clamp(v / top, 0.f, 1.f); }
+    // neutralise: R and B medians of the darkest 5% matched to G
+    {
+        std::vector<float> l; for (size_t i = 0; i < n; i += 4) l.push_back((rgb[i * 3] + rgb[i * 3 + 1] + rgb[i * 3 + 2]) / 3);
+        const float thr = percentileOf(l, 5); std::vector<float> bg[3];
+        for (size_t i = 0; i < n; i += 4) if ((rgb[i * 3] + rgb[i * 3 + 1] + rgb[i * 3 + 2]) / 3 <= thr) for (int c = 0; c < 3; ++c) bg[c].push_back(rgb[i * 3 + c]);
+        if (bg[1].size() > 100) { const float mr = percentileOf(bg[0], 50), mg = percentileOf(bg[1], 50), mb = percentileOf(bg[2], 50); for (size_t i = 0; i < n; ++i) { rgb[i * 3] = std::clamp(rgb[i * 3] + mg - mr, 0.f, 1.f); rgb[i * 3 + 2] = std::clamp(rgb[i * 3 + 2] + mg - mb, 0.f, 1.f); } }
+    }
+    // hyperbolic stretch, strength solved so the median luminance lands on the target background
+    const float targetBg = 0.10f, protectB = 5.f, conv = 3.5f;
+    { std::vector<float> s; for (size_t i = 0; i < n; i += 5) s.push_back(lumaOf(&rgb[i * 3])); lum.assign(s.begin(), s.end()); }
+    const float anchor = std::max(0.f, percentileOf(lum, 0.5) - 0.00025f);
+    std::vector<float> ls; for (float v : lum) ls.push_back(std::max(0.f, v - anchor));
+    const float med = percentileOf(ls, 50);
+    double lo = 0, hi = 7, logD = 2;
+    for (int it = 0; it < 40 && med > 1e-9f; ++it) { const double mid = 0.5 * (lo + hi); logD = mid; const float t = hyperbolicF(med, float(std::pow(10.0, mid)), protectB); if (std::fabs(t - targetBg) < 1e-4f) break; if (t < targetBg) lo = mid; else hi = mid; }
+    const float D = float(std::pow(10.0, logD));
+    for (size_t i = 0; i < n; ++i) {
+        float* p = &rgb[i * 3];
+        const float r = std::max(0.f, p[0] - anchor), g = std::max(0.f, p[1] - anchor), b = std::max(0.f, p[2] - anchor);
+        const float L = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+        const float Ls = std::clamp(hyperbolicF(L, D, protectB), 0.f, 1.f), k = std::pow(Ls, conv);
+        const float in[3] = {r, g, b};
+        for (int c = 0; c < 3; ++c) p[c] = std::clamp((Ls * ((in[c] / (L + 1e-9f)) * (1 - k) + k)) * 0.995f + 0.005f, 0.f, 1.f);
+    }
+    // adaptive floor/ceiling scaling and midtone transfer back to the target
+    {
+        std::vector<float> l; for (size_t i = 0; i < n; i += 5) l.push_back(lumaOf(&rgb[i * 3]));
+        double mean = 0; for (float v : l) mean += v; mean /= l.size(); double var = 0; for (float v : l) var += (v - mean) * (v - mean); const float sd = float(std::sqrt(var / l.size()));
+        const float mn = *std::min_element(l.begin(), l.end()), md = percentileOf(l, 50);
+        const float floor_ = std::max(mn, md - 2.7f * sd); float soft = percentileOf(l, 99.0), hard = percentileOf(l, 99.99);
+        if (soft <= floor_) soft = floor_ + 1e-6f; if (hard <= soft) hard = soft + 1e-6f;
+        const float ped = 0.001f, scale = std::min((0.98f - ped) / (soft - floor_ + 1e-9f), (1.f - ped) / (hard - floor_ + 1e-9f));
+        for (auto& v : rgb) v = std::clamp((v - floor_) * scale + ped, 0.f, 1.f);
+        std::vector<float> l2; for (size_t i = 0; i < n; i += 5) l2.push_back(lumaOf(&rgb[i * 3]));
+        const float cur = percentileOf(l2, 50);
+        if (cur > 0 && cur < 1 && std::fabs(cur - targetBg) > 1e-3f) { const float m = cur * (targetBg - 1) / (cur * (2 * targetBg - 1) - targetBg); for (auto& v : rgb) v = mtfF(v, m); }
+        for (auto& v : rgb) v = softClipF(v);
+    }
+    QImage img(w, h, QImage::Format_RGBX64);                           // 16 bits per channel
+    for (int y = 0; y < h; ++y) {
+        quint16* line = reinterpret_cast<quint16*>(img.scanLine(h - 1 - y));    // FITS rows run bottom-up
+        for (int x = 0; x < w; ++x) { for (int c = 0; c < 3; ++c) line[4 * x + c] = quint16(rgb[(size_t(y) * w + x) * 3 + c] * 65535.f + 0.5f); line[4 * x + 3] = 65535; }
+    }
+    return img;
+}
 
 void LiveStacker::reset()
 {
@@ -253,27 +367,9 @@ QImage LiveStacker::preview() const
         for (int c = 0; c < 3; ++c) col[c][o] = m_sw[c][i] > 0 ? float(m_sx[c][i] / m_sw[c][i]) : 0.f;
         lum[o] = (col[0][o] + col[1][o] + col[2][o]) / 3.f;
     }
-    std::vector<float> sub; for (int y = 0; y < h; y += 3) for (int x = 0; x < w; x += 3) sub.push_back(lum[size_t(y) * w + x]);
-    std::vector<float> s2 = sub; std::nth_element(s2.begin(), s2.begin() + s2.size() / 2, s2.end()); const double sky = s2[s2.size() / 2];
-    for (auto& v : s2) v = std::fabs(v - float(sky)); std::nth_element(s2.begin(), s2.begin() + s2.size() / 2, s2.end()); const double sg = 1.4826 * s2[s2.size() / 2] + 1e-6;
-    std::nth_element(sub.begin(), sub.begin() + size_t(sub.size() * 0.9985), sub.end());
-    const double lo = sky + 1.0 * sg, hi = std::max<double>(sub[size_t(sub.size() * 0.9985)], lo + 10 * sg);
-    const double soft = 12.0, den = std::asinh(soft), sat = 1.35;
-    QImage img(w, h, QImage::Format_RGBX64);                          // 16 bits per channel: faint structure survives further stretching
-    for (int y = 0; y < h; ++y) {
-        quint16* line = reinterpret_cast<quint16*>(img.scanLine(h - 1 - y));                         // FITS rows run bottom-up
-        for (int x = 0; x < w; ++x) {
-            const size_t o = size_t(y) * w + x;
-            const double L = lum[o] - lo;
-            double q[3] = {0, 0, 0};
-            if (L > 0) { const double t = std::asinh(soft * L / (hi - lo)) / den; const double k = t / L; for (int c = 0; c < 3; ++c) q[c] = (col[c][o] - lo) * k; }
-            const double m = (q[0] + q[1] + q[2]) / 3;
-            for (int c = 0; c < 3; ++c) line[4 * x + c] = quint16(std::clamp(m + sat * (q[c] - m), 0.0, 1.0) * 65535.0 + 0.5);
-            line[4 * x + 3] = 65535;
-        }
-    }
-    return img;
+    return vlStretchToImage(col, w, h);
 }
+
 
 QJsonObject LiveStacker::summary() const
 {
