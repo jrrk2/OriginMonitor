@@ -43,7 +43,7 @@ public:
     const std::vector<SkyStar>& referenceStars() const { return m_refStars; }
     int referenceFrameWidth() const { return m_w; }
     int referenceFrameHeight() const { return m_h; }
-    QImage preview() const;                                // stretched, cropped to the well-covered area
+    QImage preview() const;                                // stretched (16 bits per channel, Format_RGBX64), cropped to the well-covered area
     QJsonObject summary() const;
 
     bool save(const QString& dir) const;                   // state.bin + preview.png

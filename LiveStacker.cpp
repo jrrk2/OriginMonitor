@@ -259,16 +259,17 @@ QImage LiveStacker::preview() const
     std::nth_element(sub.begin(), sub.begin() + size_t(sub.size() * 0.9985), sub.end());
     const double lo = sky + 1.0 * sg, hi = std::max<double>(sub[size_t(sub.size() * 0.9985)], lo + 10 * sg);
     const double soft = 12.0, den = std::asinh(soft), sat = 1.35;
-    QImage img(w, h, QImage::Format_RGB888);
+    QImage img(w, h, QImage::Format_RGBX64);                          // 16 bits per channel: faint structure survives further stretching
     for (int y = 0; y < h; ++y) {
-        uchar* line = img.scanLine(h - 1 - y);                         // FITS rows run bottom-up
+        quint16* line = reinterpret_cast<quint16*>(img.scanLine(h - 1 - y));                         // FITS rows run bottom-up
         for (int x = 0; x < w; ++x) {
             const size_t o = size_t(y) * w + x;
             const double L = lum[o] - lo;
             double q[3] = {0, 0, 0};
             if (L > 0) { const double t = std::asinh(soft * L / (hi - lo)) / den; const double k = t / L; for (int c = 0; c < 3; ++c) q[c] = (col[c][o] - lo) * k; }
             const double m = (q[0] + q[1] + q[2]) / 3;
-            for (int c = 0; c < 3; ++c) line[3 * x + c] = uchar(std::clamp(m + sat * (q[c] - m), 0.0, 1.0) * 255.0 + 0.5);
+            for (int c = 0; c < 3; ++c) line[4 * x + c] = quint16(std::clamp(m + sat * (q[c] - m), 0.0, 1.0) * 65535.0 + 0.5);
+            line[4 * x + 3] = 65535;
         }
     }
     return img;
