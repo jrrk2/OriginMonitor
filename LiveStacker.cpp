@@ -32,61 +32,70 @@ bool solve(std::vector<double>& A, std::vector<double>& b, int n)
     return true;
 }
 
-// Remove a quadratic sky surface fitted to the unclipped pixels (stars and galaxies are iteratively excluded; the surface is too smooth
-// to absorb faint extended light such as a tidal bridge). Returns the residual noise.
+// Background model: 30th-percentile block values on a coarse grid, blocks lifted by the galaxy or a bright star rejected iteratively and
+// the gaps filled from the surrounding sky (normalised convolution), then interpolated to full size and subtracted. The smoothing scale
+// (about 100 px) is small enough to follow sensor vignetting and fixed patterns, and the rejection stops it eating a galaxy's halo.
+// Returns the residual pixel noise.
 double flattenPlane(std::vector<float>& img, int w, int h)
 {
-    struct Pt { float u, v, val; };
-    std::vector<Pt> pts;
-    for (int y = 3; y < h; y += 6) for (int x = 3; x < w; x += 6) pts.push_back({2.f * x / w - 1.f, 2.f * y / h - 1.f, img[size_t(y) * w + x]});
-    std::vector<char> use(pts.size(), 1);
-    double c[6] = {0, 0, 0, 0, 0, 0}, sigma = 1;
-    auto basis = [](double u, double v, double* t) { t[0] = 1; t[1] = u; t[2] = v; t[3] = u * u; t[4] = u * v; t[5] = v * v; };
-    for (int it = 0; it < 5; ++it) {
-        std::vector<double> A(36, 0.0), b(6, 0.0);
-        for (size_t i = 0; i < pts.size(); ++i) if (use[i]) {
-            double t[6]; basis(pts[i].u, pts[i].v, t);
-            for (int r = 0; r < 6; ++r) { b[r] += t[r] * pts[i].val; for (int k = 0; k < 6; ++k) A[r * 6 + k] += t[r] * t[k]; }
-        }
-        if (!solve(A, b, 6)) break;
-        for (int k = 0; k < 6; ++k) c[k] = b[k];
-        std::vector<double> res;
-        for (size_t i = 0; i < pts.size(); ++i) { double t[6]; basis(pts[i].u, pts[i].v, t); double m = 0; for (int k = 0; k < 6; ++k) m += c[k] * t[k]; res.push_back(pts[i].val - m); }
-        std::vector<double> ar = res; for (auto& x : ar) x = std::fabs(x);
-        sigma = 1.4826 * medianOf(ar) + 1e-6;
-        for (size_t i = 0; i < pts.size(); ++i) use[i] = res[i] < 2.0 * sigma && res[i] > -3.0 * sigma;
+    const int B = 48, bx = std::max(3, w / B), by = std::max(3, h / B);
+    std::vector<float> g(size_t(bx) * by), wt(size_t(bx) * by, 1.f), G(size_t(bx) * by);
+    std::vector<float> v;
+    for (int y = 0; y < by; ++y) for (int x = 0; x < bx; ++x) {
+        v.clear();
+        for (int yy = 0; yy < B; yy += 2) for (int xx = 0; xx < B; xx += 2) { const int Y = y * B + yy, X = x * B + xx; if (Y < h && X < w) v.push_back(img[size_t(Y) * w + X]); }
+        std::nth_element(v.begin(), v.begin() + v.size() * 3 / 10, v.end()); g[size_t(y) * bx + x] = v[v.size() * 3 / 10];
     }
+    const double sgm = 2.0; const int R = 5;
+    auto blur = [&](const std::vector<float>& src, std::vector<float>& dst) {
+        for (int y = 0; y < by; ++y) for (int x = 0; x < bx; ++x) {
+            double s = 0, n = 0;
+            for (int dy = -R; dy <= R; ++dy) for (int dx = -R; dx <= R; ++dx) { const int Y = y + dy, X = x + dx; if (Y < 0 || X < 0 || Y >= by || X >= bx) continue; const double k = std::exp(-(dx * dx + dy * dy) / (2 * sgm * sgm)); s += k * src[size_t(Y) * bx + X]; n += k; }
+            dst[size_t(y) * bx + x] = float(s / n);
+        }
+    };
+    std::vector<float> gw(g.size()), num(g.size()), den(g.size());
+    for (int it = 0; it < 4; ++it) {
+        for (size_t i = 0; i < g.size(); ++i) gw[i] = g[i] * wt[i];
+        blur(gw, num); blur(wt, den);
+        for (size_t i = 0; i < g.size(); ++i) G[i] = num[i] / std::max(den[i], 1e-3f);
+        std::vector<float> r; for (size_t i = 0; i < g.size(); ++i) if (wt[i] > 0) r.push_back(g[i] - G[i]);
+        std::nth_element(r.begin(), r.begin() + r.size() / 2, r.end()); const float md = r[r.size() / 2];
+        for (auto& t : r) t = std::fabs(t - md); std::nth_element(r.begin(), r.begin() + r.size() / 2, r.end()); const float sd = 1.4826f * r[r.size() / 2] + 1e-6f;
+        for (size_t i = 0; i < g.size(); ++i) wt[i] = (g[i] - G[i] - md) > 1.5f * sd ? 0.f : 1.f;
+    }
+    // bilinear interpolation of the block model (block centres at (x + 0.5) * B)
     for (int y = 0; y < h; ++y) {
-        const double v = 2.0 * y / h - 1.0;
+        const double fy = std::clamp((y + 0.5) / B - 0.5, 0.0, by - 1.0001); const int y0 = int(fy); const double ty = fy - y0;
         for (int x = 0; x < w; ++x) {
-            const double u = 2.0 * x / w - 1.0;
-            img[size_t(y) * w + x] -= float(c[0] + c[1] * u + c[2] * v + c[3] * u * u + c[4] * u * v + c[5] * v * v);
+            const double fx = std::clamp((x + 0.5) / B - 0.5, 0.0, bx - 1.0001); const int x0 = int(fx); const double tx = fx - x0;
+            const size_t i = size_t(y0) * bx + x0;
+            img[size_t(y) * w + x] -= float((G[i] * (1 - tx) + G[i + 1] * tx) * (1 - ty) + (G[i + bx] * (1 - tx) + G[i + bx + 1] * tx) * ty);
         }
     }
-    return sigma;
+    std::vector<float> s; for (int y = 0; y < h; y += 4) for (int x = 0; x < w; x += 4) s.push_back(img[size_t(y) * w + x]);
+    std::nth_element(s.begin(), s.begin() + s.size() / 2, s.end()); const float md = s[s.size() / 2];
+    for (auto& t : s) t = std::fabs(t - md); std::nth_element(s.begin(), s.begin() + s.size() / 2, s.end());
+    return 1.4826 * s[s.size() / 2] + 1e-6;
 }
 
-// Row/column offsets from the high-passed plane (a halo is smooth and cannot leak into the estimate)
-void removeBanding(std::vector<float>& img, int w, int h)
+// Row and column offsets, measured after flattening from sky pixels only: values within 2 sigma of zero, so stars and the galaxy's bright
+// parts are excluded (a faint halo still contributes a little, but only a fraction of a line's pixels). Wide stripes are removed as well
+// as narrow ones. Two rounds, rows then columns.
+void removeBanding(std::vector<float>& img, int w, int h, double sigma)
 {
-    const int B = 24;
-    auto boxBlur = [&](const std::vector<float>& src) {
-        std::vector<double> integ(size_t(w + 1) * (h + 1), 0.0);
-        for (int y = 0; y < h; ++y) { double row = 0; for (int x = 0; x < w; ++x) { row += src[size_t(y) * w + x]; integ[size_t(y + 1) * (w + 1) + x + 1] = integ[size_t(y) * (w + 1) + x + 1] + row; } }
-        std::vector<float> out(src.size());
-        for (int y = 0; y < h; ++y) { const int y0 = std::max(0, y - B), y1 = std::min(h, y + B + 1);
-            for (int x = 0; x < w; ++x) { const int x0 = std::max(0, x - B), x1 = std::min(w, x + B + 1);
-                const double s = integ[size_t(y1) * (w + 1) + x1] - integ[size_t(y0) * (w + 1) + x1] - integ[size_t(y1) * (w + 1) + x0] + integ[size_t(y0) * (w + 1) + x0];
-                out[size_t(y) * w + x] = float(s / (double(y1 - y0) * (x1 - x0))); } }
-        return out;
-    };
+    const double lim = 2.0 * sigma;
     for (int it = 0; it < 2; ++it) {
-        std::vector<float> low = boxBlur(img);
-        std::vector<float> row(w);
-        for (int y = 0; y < h; ++y) { for (int x = 0; x < w; ++x) row[x] = img[size_t(y) * w + x] - low[size_t(y) * w + x]; std::nth_element(row.begin(), row.begin() + w * 2 / 5, row.end()); const float m = row[w * 2 / 5]; for (int x = 0; x < w; ++x) img[size_t(y) * w + x] -= m; }
-        low = boxBlur(img);
-        std::vector<float> col(h);
-        for (int x = 0; x < w; ++x) { for (int y = 0; y < h; ++y) col[y] = img[size_t(y) * w + x] - low[size_t(y) * w + x]; std::nth_element(col.begin(), col.begin() + h * 2 / 5, col.end()); const float m = col[h * 2 / 5]; for (int y = 0; y < h; ++y) img[size_t(y) * w + x] -= m; }
+        for (int y = 0; y < h; ++y) {
+            double s = 0; int n = 0; float* r = &img[size_t(y) * w];
+            for (int pass = 0; pass < 2; ++pass) { s = 0; n = 0; const double c = pass ? s / std::max(1, n) : 0; (void)c; for (int x = 0; x < w; ++x) if (std::fabs(r[x]) < lim) { s += r[x]; ++n; } break; }
+            if (n > w / 4) { const float m = float(s / n); for (int x = 0; x < w; ++x) r[x] -= m; }
+        }
+        for (int x = 0; x < w; ++x) {
+            double s = 0; int n = 0;
+            for (int y = 0; y < h; ++y) { const float v = img[size_t(y) * w + x]; if (std::fabs(v) < lim) { s += v; ++n; } }
+            if (n > h / 4) { const float m = float(s / n); for (int y = 0; y < h; ++y) img[size_t(y) * w + x] -= m; }
+        }
     }
 }
 
@@ -197,7 +206,7 @@ LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double
     for (int ch = 0; ch < 3; ++ch) {
         std::vector<float> img = *src[ch];
         const double noise = flattenPlane(img, w, h);
-        removeBanding(img, w, h);
+        removeBanding(img, w, h, noise);
         const double gain = (ch == 0 ? m_wbR : ch == 2 ? m_wbB : 1.0) * scaleFactor;
         const double wt = 1.0 / std::max(noise * gain * noise * gain, 1e-9);
         for (int y = 0; y < m_h; ++y)

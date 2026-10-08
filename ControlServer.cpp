@@ -282,7 +282,7 @@ QJsonObject ControlServer::handle(const QJsonObject& req)
         return r.isEmpty() ? fail("no response") : QJsonObject{{"ok", true}, {"response", r}};
     }
 
-    if (cmd == "quit") { QTimer::singleShot(100, qApp, &QCoreApplication::quit); return QJsonObject{{"ok", true}}; }
+    if (cmd == "quit") { m_backend->sky().saveStack(); QTimer::singleShot(100, qApp, &QCoreApplication::quit); return QJsonObject{{"ok", true}}; }
 
     return fail("unknown command: " + cmd);
 }
