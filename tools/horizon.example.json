@@ -1,0 +1,2 @@
+{"_comment": "copy to tools/horizon.json and replace with your own: [azimuth deg (N=0, E=90), minimum usable altitude deg]. Example values are invented.",
+ "points": [[0, 15], [45, 25], [90, 20], [135, 30], [180, 15], [225, 35], [270, 40], [315, 20]]}

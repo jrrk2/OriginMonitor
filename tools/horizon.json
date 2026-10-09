@@ -1,0 +1,2 @@
+{"_comment": "az deg (N=0,E=90) -> minimum usable altitude deg. N foliage ~40, E/W fences ~30 (user, 2026-10-09); S buildings height ASSUMED 35, not yet measured.",
+ "points": [[0, 40], [45, 40], [70, 30], [110, 30], [135, 35], [225, 35], [250, 30], [290, 30], [315, 40]]}
