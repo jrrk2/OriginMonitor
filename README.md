@@ -55,7 +55,9 @@ dark-sky level, transparency) in `references_20261009.md`, all in the data direc
 ## What you need
 
 * A Celestron Origin on your network (it listens on port 80; ours was 192.168.1.195). The app talks to it over a WebSocket and downloads FITS over HTTP.
-  The telescope's own disk is small (58 GB), and it only keeps frames until they are downloaded.
+  The telescope's own disk is small (58 GB, about 33 GB free when we looked). Sample captures (`RunSampleCapture`, what this app uses) are written to a temporary
+  slot on the telescope that is reused for each frame. The telescope's own imaging session (`RunImaging`) is different: it stores frames locally and does **not**
+  delete them after they are downloaded, so the disk fills up (see the audit trail).
 * A Linux or macOS host. The host should be on **one** network interface, preferably wired: a second interface with a default route confuses things.
   Frames are 12.5 MB each, so a 100 Mb/s link costs about 1 s per frame.
 * Qt 6 with Core, Gui, Widgets, Network and WebSockets, and `qmake6`. Plain `qmake` on many systems is Qt 5 and will fail.
@@ -256,7 +258,7 @@ or open.
 | **Cycle time**: the sample capture waits for the live-stream frame in progress, then exposes, so the cycle is sample plus live exposure | 15 s frames took 31 s (48% duty); I first thought there was a fixed 7 s overhead | Set the live exposure to 0.5 s: 20 s frames now take 23 s (87%) (fixed, found at 23:00 after about 45 minutes of wrong experiments, below) |
 | ISO behaves oddly: the 10 s ISO test scaled with ISO (sky 69, 103, 269, 607 ADU/s at 100, 200, 400, 800), but sequences requested at ISO 800 and ISO 200 gave the same sky level, and the camera reported ISO 2173 for a requested 3200 | The ISO used by sequences probably follows the live `set iso`, not the capture request | Unresolved. Higher ISO gave no signal-to-noise gain anyway (sky-limited: sky/noise 4.2-4.4 at every ISO, saturated pixels rising 310 to 32,000), so ISO 200 was used |
 | Network: the telescope did not answer at 17:40 (not out yet); the host had Wi-Fi as the only default route and ethernet marked never-default | The user wanted ethernet only | I could not change it (no privilege); the user ran the nmcli commands |
-| `RunImaging` (the telescope's own imaging session) was considered to avoid per-frame overhead | Not tried: no known stop command or way to retrieve the raw subs, and no per-frame feedback | Open |
+| `RunImaging` (the telescope's own imaging session) was considered to avoid the per-frame overhead | Not used. Correction from the owner (2026-10-10): in that mode the telescope stores the subs locally and does not delete them after download, so its small disk gets clogged, and there is no immediate quality check: a bad sub can only be left out of stacking afterwards, or the whole session abandoned. That is a poor fit for a night with broken cloud, where per-frame verdicts let the sequencer stop and probe. (Earlier in the session I wrongly described it as an open question; I also still do not know its stop command.) | Rejected by design; sample capture kept |
 
 ### Software failures
 
@@ -292,6 +294,6 @@ or open.
 * The server crash when a client half-closes its connection straight after sending.
 * A star-shape check (ellipticity) in the analyser, so soft or trailed frames are not stacked.
 * Plate solving, so centring corrections after a goto are automatic and exact.
-* Whether the sample ISO follows the capture request or the live `set iso` (and whether `RunImaging` could remove the per-frame overhead entirely).
+* Whether the sample ISO follows the capture request or the live `set iso`. (`RunImaging` is not an option for the per-frame overhead: it never deletes downloaded subs, so the telescope's disk clogs, and it offers no per-frame quality check.)
 * Measure the real horizon (the south buildings were assumed 35 degrees).
 * A proper automated test of the sequencer against the simulator (`OriginSimulator` serves TIFF/JPEG, not raw FITS, so it cannot exercise the analyser yet).
