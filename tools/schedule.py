@@ -11,7 +11,7 @@ a greedy one-target-at-a-time plan is built: at each step, take the highest-prio
 
 Horizon: JSON {"points": [[az_deg, min_alt_deg], ...]} interpolated circularly in azimuth (north = 0, east = 90). Without a file the
 horizon is flat at --min-alt (a placeholder: measure your real one!). --sky-map additionally raises the horizon in every 10 deg x 5 deg bin
-that the app's SkyMonitor has learned is obstructed (~/Pictures/CelestronOrigin/sky_map.json, "likely_obstructed" rule of obstructionMap()).
+that the app's SkyMonitor has learned is obstructed (/mnt/fits-backup/claude/sky_map.json, "likely_obstructed" rule of obstructionMap()).
 Messier RA/Dec come from MessierCatalog.hpp; the curated non-Messier extras are below.
 """
 import argparse, json, os, re, sys, warnings
@@ -88,7 +88,7 @@ def main():
     ap.add_argument('--min-alt', type=float, default=20, help='flat horizon / floor when no horizon file (deg)')
     ap.add_argument('--sun-alt', type=float, default=-18); ap.add_argument('--moon-sep', type=float, default=30)
     ap.add_argument('--min-block', type=float, default=45, help='shortest useful block, minutes'); ap.add_argument('--step', type=float, default=5, help='minutes')
-    ap.add_argument('--sky-map', nargs='?', const=os.path.expanduser('~/Pictures/CelestronOrigin/sky_map.json'), help='also use learned obstruction bins')
+    ap.add_argument('--sky-map', nargs='?', const=os.path.join(os.environ.get('ORIGIN_DATA_DIR', '/mnt/fits-backup/claude'), 'sky_map.json'), help='also use learned obstruction bins')
     ap.add_argument('--max-block', type=float, default=150, help='longest time on one target, minutes'); ap.add_argument('--json', action='store_true', help='machine-readable output for tools/nightrun.py'); ap.add_argument('--top', type=int, default=25); a = ap.parse_args()
 
     real = sys.stdout

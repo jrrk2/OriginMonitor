@@ -1,6 +1,7 @@
 #include "TelescopeGUI.hpp"
 #include "CommandInterface.hpp"
 #include "OriginBackend.hpp"
+#include "DataDir.hpp"
 #include "MessierCatalog.hpp"
 #include <cmath>
 #include <algorithm>
@@ -133,8 +134,7 @@ TelescopeGUI::TelescopeGUI(QWidget *parent)
 		qDebug() << "Exposure:" << exposure << "sec";
 
 		// Create save directory
-		QString baseDir = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation) 
-				+ "/CelestronOrigin";
+		QString baseDir = originDataDir();
 		QDir().mkpath(baseDir);
 
 		// Generate filename with timestamp

@@ -27,8 +27,8 @@ import socket
 import sys
 
 
-def call(port, **req):
-    with socket.create_connection(("127.0.0.1", port), timeout=120) as s:
+def call(port, _timeout=120, **req):
+    with socket.create_connection(("127.0.0.1", port), timeout=_timeout) as s:
         s.sendall((json.dumps(req) + "\n").encode())
         buf = b""
         while not buf.endswith(b"\n"):
@@ -126,6 +126,9 @@ def main():
     ev = sub.add_parser("events"); ev.add_argument("--since", type=float, default=0)
     tg = sub.add_parser("target"); tg.add_argument("name", nargs="?"); tg.add_argument("--ra-hours", type=float); tg.add_argument("--dec-deg", type=float); tg.add_argument("--reset", action="store_true")
     sub.add_parser("stack"); sub.add_parser("sky-map")
+    ini = sub.add_parser("initialize", help="RunInitialize (the mount homes and aligns), wait, and say how it went")
+    ini.add_argument("--lat", type=float, default=52.2054); ini.add_argument("--lon", type=float, default=0.1218); ini.add_argument("--tz", default="Europe/London")
+    ini.add_argument("--fake", action="store_true"); ini.add_argument("--no-wait", action="store_true"); ini.add_argument("--timeout", type=int, default=300)
     mo = sub.add_parser("monitor"); mo.add_argument("--lat", type=float); mo.add_argument("--lon", type=float); mo.add_argument("--black-level", type=float)
     mo.add_argument("--auto-stack", choices=["on", "off"]); mo.add_argument("--min-transparency", type=float)
     fo = sub.add_parser("focus"); fo.add_argument("--history", type=int, default=0, help="also return the newest N scores")
@@ -157,6 +160,10 @@ def main():
     elif a.cmd == "target":
         out = call(a.port, cmd="target", **({"name": a.name} if a.name else {}), **({"ra_hours": a.ra_hours} if a.ra_hours is not None else {}),
                    **({"dec_deg": a.dec_deg} if a.dec_deg is not None else {}), reset=a.reset)
+    elif a.cmd == "initialize":
+        out = call(a.port, _timeout=a.timeout + 30, cmd="initialize", lat_deg=a.lat, lon_deg=a.lon, timezone=a.tz, fake=a.fake, wait=not a.no_wait, timeout=a.timeout)
+        steps = " -> ".join(out.get("steps", []))
+        print(f"{out.get('outcome', 'error').upper()}: {out.get('summary') or out.get('error')}" + (f"  [steps: {steps}]" if steps else ""), file=sys.stderr)
     elif a.cmd == "stack":
         out = call(a.port, cmd="stack")
     elif a.cmd == "sky-map":

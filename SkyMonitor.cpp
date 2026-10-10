@@ -1,5 +1,6 @@
 #include "SkyMonitor.hpp"
 #include "FocusAnalyzer.hpp"
+#include "DataDir.hpp"
 
 #include <QDir>
 #include <QFile>
@@ -10,7 +11,7 @@
 
 namespace {
 constexpr double kPi = 3.14159265358979323846;
-QString baseDir() { return QDir::homePath() + "/Pictures/CelestronOrigin"; }
+QString baseDir() { return originDataDir(); }
 QString safeName(const QString& s) { QString o = s; for (QChar& c : o) if (!c.isLetterOrNumber() && c != '-' && c != '_') c = '_'; return o.isEmpty() ? "target" : o; }
 }
 
@@ -152,11 +153,17 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
             if (weak >= 2 && verdict != "cloudy") { verdict = "patchy"; reasons << QString("%1 of 12 tiles have under 30% of their stars (cloud edge or obstruction)").arg(weak); }
         }
     } else if (!haveStack && pointingOk) {
-        // First frame of a target: becomes the reference if it has enough stars
-        rep = m_autoStack ? m_stack.add(F, exposureS, m_minTransparency) : LiveStacker::Report();
-        o["registration"] = QJsonObject{{"reference_frame", rep.accepted}, {"stacked", rep.accepted}, {"frames_in_stack", rep.frames}};
-        if (!rep.accepted && m_autoStack) { verdict = F.stars.size() < 12 ? "cloudy" : "unknown"; reasons << rep.reason; }
-        if (F.stars.size() < 25) { verdict = "cloudy"; reasons << QString("only %1 stars detected").arg(F.stars.size()); }
+        // First frame of a target: becomes the reference if it has enough stars and the sky is not lit by cloud. A reference seeded
+        // in cloud makes every later clear frame fail to register and read as cloudy (seen 2026-10-09).
+        if (excess > 2.0) {
+            o["registration"] = QJsonObject{{"reference_frame", false}, {"stacked", false}, {"frames_in_stack", 0}};
+            verdict = "cloudy"; reasons << QString("sky %1% above the dark baseline: not used as the stack reference").arg(int(excess * 100));
+        } else {
+            rep = m_autoStack ? m_stack.add(F, exposureS, m_minTransparency) : LiveStacker::Report();
+            o["registration"] = QJsonObject{{"reference_frame", rep.accepted}, {"stacked", rep.accepted}, {"frames_in_stack", rep.frames}};
+            if (!rep.accepted && m_autoStack) { verdict = F.stars.size() < 12 ? "cloudy" : "unknown"; reasons << rep.reason; }
+            if (F.stars.size() < 25) { verdict = "cloudy"; reasons << QString("only %1 stars detected").arg(F.stars.size()); }
+        }
     }
 
     // Stack the frame only if it is a usable one: clouds, patchy obstruction and wrong pointing would dilute the stack

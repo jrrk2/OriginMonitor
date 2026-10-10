@@ -1,8 +1,11 @@
 #include "ControlServer.hpp"
 #include "OriginBackend.hpp"
+#include "DataDir.hpp"
+#include "Sequencer.hpp"
 
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QTimeZone>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
@@ -11,10 +14,11 @@
 #include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QPointer>
 #include <QTimer>
 
 ControlServer::ControlServer(OriginBackend* backend, bool allowRaw, QObject* parent)
-    : QObject(parent), m_backend(backend), m_allowRaw(allowRaw)
+    : QObject(parent), m_backend(backend), m_seq(new Sequencer(backend, this)), m_allowRaw(allowRaw)
 {
     connect(&m_server, &QTcpServer::newConnection, this, &ControlServer::onNewConnection);
     connect(m_backend, &OriginBackend::messageReceived, this, [this](const QJsonObject& m) {
@@ -37,25 +41,31 @@ void ControlServer::onNewConnection()
 {
     while (QTcpSocket* s = m_server.nextPendingConnection()) {
         connect(s, &QTcpSocket::readyRead, this, &ControlServer::onReadyRead);
-        connect(s, &QTcpSocket::disconnected, this, [this, s]() { m_buffers.remove(s); s->deleteLater(); });
+        connect(s, &QTcpSocket::disconnected, this, [this, s]() { m_buffers.remove(s); m_busy.remove(s); s->deleteLater(); });
     }
 }
 
 void ControlServer::onReadyRead()
 {
-    QTcpSocket* s = qobject_cast<QTcpSocket*>(sender());
+    // handle() can run nested event loops (snapshot, goto, initialize) during which the client may hang up and the socket be deleted,
+    // or send another line; so hold a QPointer, and let the call already in progress for this socket consume any lines that arrive meanwhile.
+    QPointer<QTcpSocket> s = qobject_cast<QTcpSocket*>(sender());
     if (!s) return;
-    m_buffers[s] += s->readAll();
+    m_buffers[s.data()] += s->readAll();
+    if (m_busy.contains(s.data())) return;
+    m_busy.insert(s.data());
+    QTcpSocket* const key = s.data();
     int nl;
-    while ((nl = m_buffers[s].indexOf('\n')) >= 0) {
-        QByteArray line = m_buffers[s].left(nl);
-        m_buffers[s].remove(0, nl + 1);
+    while (s && (nl = m_buffers.value(key).indexOf('\n')) >= 0) {
+        QByteArray line = m_buffers[key].left(nl);
+        m_buffers[key].remove(0, nl + 1);
         QJsonParseError err;
         QJsonDocument doc = QJsonDocument::fromJson(line, &err);
         QJsonObject reply = doc.isObject() ? handle(doc.object()) : fail("invalid JSON: " + err.errorString());
+        if (!s) break;                                  // client went away while the command ran
         s->write(QJsonDocument(reply).toJson(QJsonDocument::Compact) + "\n");
-        s->flush();
     }
+    m_busy.remove(key);
 }
 
 QJsonObject ControlServer::fail(const QString& message)
@@ -114,10 +124,78 @@ QJsonObject ControlServer::doGoto(const QJsonObject& req)
     return QJsonObject{{"ok", false}, {"error", "goto did not complete"}, {"mount", cur}};
 }
 
+// TaskController status arrives as notifications (a GetStatus request is not answered), so return the newest one received
+QJsonObject ControlServer::queryTaskController(int)
+{
+    return m_last.value("TaskController/GetStatus");
+}
+
+// RunInitialize on the TaskController with an explicit site and zone ({"lat_deg","lon_deg","timezone","fake","wait","timeout"}).
+// The mount moves (it homes and aligns), so this is a deliberate action. Returns "outcome" (initialized, rejected, failed, timeout, started)
+// and "summary" in words; "steps" lists the distinct InitializationInfo.CurrentStep values seen, in order.
+QJsonObject ControlServer::doInitialize(const QJsonObject& req)
+{
+    if (!m_backend->isConnected()) return fail("not connected");
+    const double lat = req["lat_deg"].toDouble(52.2054), lon = req["lon_deg"].toDouble(0.1218);
+    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return fail("site out of range");
+    const QString zoneId = req["timezone"].toString("Europe/London");
+    const QTimeZone zone(zoneId.toUtf8());
+    if (!zone.isValid()) return fail("unknown timezone: " + zoneId);
+    const QDateTime now = QDateTime::currentDateTimeUtc().toTimeZone(zone);     // wall-clock time in the stated zone, as the GUI sends it
+
+    QJsonObject params{{"Date", now.toString("dd MM yyyy")}, {"Time", now.toString("HH:mm:ss")}, {"TimeZone", zoneId},
+                       {"Latitude", lat * 3.14159265358979323846 / 180.0}, {"Longitude", lon * 3.14159265358979323846 / 180.0},
+                       {"FakeInitialize", req["fake"].toBool(false)}};
+    const QJsonObject before = queryTaskController();
+    m_backend->sendCommand("RunInitialize", "TaskController", params);
+    const QJsonObject ack = waitResponse(m_backend->lastSequenceId(), 8000);
+    QJsonObject r{{"ok", false}, {"sent", params}, {"state_before", before["State"].toString()}};
+    if (ack.isEmpty()) { r["outcome"] = "rejected"; r["summary"] = "no acknowledgement from RunInitialize"; r["error"] = r["summary"]; return r; }
+    r["ack"] = ack;
+    if (ack["ErrorCode"].toInt() != 0) {
+        r["outcome"] = "rejected"; r["error"] = ack["ErrorMessage"].toString();
+        r["summary"] = QString("telescope refused RunInitialize (code %1): %2").arg(ack["ErrorCode"].toInt()).arg(ack["ErrorMessage"].toString());
+        return r;
+    }
+    if (!req["wait"].toBool(true)) { r["ok"] = true; r["outcome"] = "started"; r["summary"] = "RunInitialize accepted; not waiting"; return r; }
+
+    QElapsedTimer t; t.start();
+    const int timeoutMs = req["timeout"].toInt(300) * 1000;
+    QJsonArray steps; QString lastStep, state, stage, errorText; int pct = 0; bool sawInit = false;
+    QJsonObject cur;
+    while (t.elapsed() < timeoutMs) {
+        QEventLoop loop; QTimer::singleShot(2000, &loop, &QEventLoop::quit); loop.exec();
+        cur = queryTaskController();
+        if (cur.isEmpty()) continue;
+        state = cur["State"].toString(); stage = cur["Stage"].toString();
+        const QJsonObject info = cur["InitializationInfo"].toObject();
+        const QString step = info["CurrentStep"].toString();
+        if (!step.isEmpty() && step != lastStep) { steps.append(step); lastStep = step; }
+        if (info.contains("PercentageComplete")) pct = info["PercentageComplete"].toInt();
+        if (state == "INITIALIZING") sawInit = true;
+        if (cur.contains("ErrorMessage") && !cur["ErrorMessage"].toString().isEmpty()) { errorText = cur["ErrorMessage"].toString(); break; }
+        // finished: left INITIALIZING (after having been in it, or 15 s in with the state already settled) and the task controller is idle and ready
+        if (state != "INITIALIZING" && (sawInit || t.elapsed() > 15000)) break;
+    }
+    r["state"] = state; r["stage"] = stage; r["is_ready"] = cur["IsReady"].toBool(); r["percent"] = pct; r["steps"] = steps; r["elapsed_s"] = int(t.elapsed() / 1000);
+    if (!errorText.isEmpty()) {
+        r["outcome"] = "failed"; r["error"] = errorText;
+        r["summary"] = QString("initialisation failed during %1: %2").arg(lastStep.isEmpty() ? "an unknown step" : lastStep, errorText);
+    } else if (state == "INITIALIZING" || cur.isEmpty()) {
+        r["outcome"] = "timeout"; r["summary"] = QString("still %1 after %2 s (step %3, %4%)").arg(cur.isEmpty() ? "silent" : "INITIALIZING").arg(timeoutMs / 1000).arg(lastStep.isEmpty() ? "?" : lastStep).arg(pct);
+    } else if (cur["IsReady"].toBool() || state == "IDLE") {
+        r["ok"] = true; r["outcome"] = "initialized";
+        r["summary"] = QString("initialised in %1 s; state %2%3, ready %4").arg(int(t.elapsed() / 1000)).arg(state, stage.isEmpty() ? "" : "/" + stage, cur["IsReady"].toBool() ? "yes" : "no");
+    } else {
+        r["outcome"] = "failed"; r["summary"] = QString("initialisation ended in unexpected state %1/%2 (not ready)").arg(state, stage);
+    }
+    return r;
+}
+
 QJsonObject ControlServer::doSnapshot(const QJsonObject& req)
 {
     if (!m_backend->isConnected()) return fail("not connected");
-    QString dir = req["dir"].toString(QDir::homePath() + "/Pictures/CelestronOrigin");
+    QString dir = req["dir"].toString(originDataDir());
     QDir().mkpath(dir);
     int timeoutMs = req["timeout"].toInt(30) * 1000;
 
@@ -259,7 +337,17 @@ QJsonObject ControlServer::handle(const QJsonObject& req)
         QJsonObject r = queryMount();
         return r.isEmpty() ? fail("no response") : QJsonObject{{"ok", true}, {"mount", r}};
     }
+    // the sequencer owns the camera and the mount while it runs
+    if (m_seq->active() && (cmd == "snapshot" || cmd == "goto" || cmd == "focuser_move" || cmd == "initialize" || cmd == "set"))
+        return fail("a sequence is running; stop it first ({\"cmd\":\"sequence\",\"action\":\"stop\"})");
+    if (cmd == "sequence") {                          // action start|stop|status; see Sequencer.hpp
+        const QString action = req["action"].toString("status");
+        if (action == "start") return m_seq->start(req);
+        if (action == "stop") return m_seq->stop(req["reason"].toString("stopped by supervisor"));
+        return QJsonObject{{"ok", true}, {"status", m_seq->status()}};
+    }
     if (cmd == "goto") return doGoto(req);
+    if (cmd == "initialize") return doInitialize(req);
 
     if (cmd == "focuser_status") {
         if (!m_backend->isConnected()) return fail("not connected");
@@ -282,7 +370,7 @@ QJsonObject ControlServer::handle(const QJsonObject& req)
         return r.isEmpty() ? fail("no response") : QJsonObject{{"ok", true}, {"response", r}};
     }
 
-    if (cmd == "quit") { m_backend->sky().saveStack(); QTimer::singleShot(100, qApp, &QCoreApplication::quit); return QJsonObject{{"ok", true}}; }
+    if (cmd == "quit") { m_seq->stop("app quitting"); m_backend->sky().saveStack(); QTimer::singleShot(100, qApp, &QCoreApplication::quit); return QJsonObject{{"ok", true}}; }
 
     return fail("unknown command: " + cmd);
 }

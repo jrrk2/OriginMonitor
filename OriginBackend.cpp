@@ -1,4 +1,5 @@
 #include "OriginBackend.hpp"
+#include "DataDir.hpp"
 #include <QDebug>
 #include <QDateTime>
 #include <QUrl>
@@ -1068,9 +1069,11 @@ void OriginBackend::requestImage(const QString &filePath, bool isSnapshot) {
                 emit tiffImageDownloaded(filePath, imageData, ra, dec, exposure);
                 evaluateSnapshotFocus(filePath, imageData, ra, dec, exposure);
                 // The telescope resets the live-stream exposure/ISO after a sample capture
-                if (m_requestedExposure > 0.0) setCameraExposure(m_requestedExposure);
-                if (m_requestedISO > 0) setCameraISO(m_requestedISO);
-                if (m_requestedBitDepth > 0) setCameraBitDepth(m_requestedBitDepth);
+                if (m_resendCaptureParams) {
+                    if (m_requestedExposure > 0.0) setCameraExposure(m_requestedExposure);
+                    if (m_requestedISO > 0) setCameraISO(m_requestedISO);
+                    if (m_requestedBitDepth > 0) setCameraBitDepth(m_requestedBitDepth);
+                }
                 if (m_continuousSnapshots && !takeSingleSnapshot()) {
                     stopContinuousSnapshots();
                 }
@@ -1212,7 +1215,7 @@ void OriginBackend::evaluateSnapshotFocus(const QString& filePath, const QByteAr
     else qInfo() << "Sky: not scored -" << o["note"].toString() << o["verdict"].toString();
     if (o["verdict"].toString() == "unreadable") recordEvent("image_unreadable", "snapshot could not be analysed: " + o["note"].toString());
 
-    QDir dir(QDir::homePath() + "/Pictures/CelestronOrigin");
+    QDir dir(originDataDir());
     if (dir.mkpath(".")) {
         QFile log(dir.filePath("focus_log.csv"));
         const bool fresh = !log.exists();

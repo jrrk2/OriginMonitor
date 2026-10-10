@@ -124,6 +124,9 @@ public:
     void stopContinuousSnapshots();
     bool isContinuousSnapshots() const { return m_continuousSnapshots; }
     bool snapshotInProgress() const { return m_snapshotInProgress; }
+    // After a sample capture the backend re-sends exposure/ISO/bit depth (the telescope resets the live stream). A running Sequencer turns that off:
+    // every RunSampleCapture carries its own settings and the re-sends arrive mid-exposure.
+    void setResendCaptureParams(bool on) { m_resendCaptureParams = on; }
     // Focus quality of every snapshot (see FocusAnalyzer.hpp); history is capped, newest last
     QJsonObject lastFocus() const { return m_focusHistory.isEmpty() ? QJsonObject() : m_focusHistory.last(); }
     QJsonArray focusHistory(int count) const;
@@ -215,6 +218,7 @@ private:
     int m_currentBinning;
     bool m_snapshotInProgress;
     bool m_continuousSnapshots = false;
+    bool m_resendCaptureParams = true;
     QList<QJsonObject> m_focusHistory;
     SkyMonitor m_sky;
     QList<QJsonObject> m_events;

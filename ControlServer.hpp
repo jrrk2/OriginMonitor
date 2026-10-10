@@ -7,6 +7,7 @@
 #include <QHash>
 
 class OriginBackend;
+class Sequencer;
 
 /**
  * Local scripting interface: newline-delimited JSON over TCP, bound to 127.0.0.1 only.
@@ -37,12 +38,16 @@ private:
     QJsonObject doFocuserMove(const QJsonObject& req);
     QJsonObject queryMount(int timeoutMs = 5000);              // GetStatus on Mount
     QJsonObject doGoto(const QJsonObject& req);
+    QJsonObject doInitialize(const QJsonObject& req);
+    QJsonObject queryTaskController(int timeoutMs = 3000);
     static QJsonObject fail(const QString& message);
 
     OriginBackend* m_backend;
+    Sequencer* m_seq;
     bool m_allowRaw;
     QTcpServer m_server;
     QHash<QTcpSocket*, QByteArray> m_buffers;
+    QSet<QTcpSocket*> m_busy;                       // sockets with a command in progress (handle() runs nested event loops)
     QHash<QString, QJsonObject> m_last;         // "Source/Command" -> last message seen
     QHash<int, QJsonObject> m_responses;        // SequenceID -> response
     int m_focuserLower = 1975;                  // travel limits, updated from telescope status

@@ -38,6 +38,7 @@ SOURCES += \
     LogReplayDialog.cpp \
     CommandInterface.cpp \
     ControlServer.cpp \
+    Sequencer.cpp \
     FocusAnalyzer.cpp \
     SkyFrame.cpp \
     Registration.cpp \
@@ -48,6 +49,7 @@ SOURCES += \
 # Original header files
 HEADERS += \
     ControlServer.hpp \
+    Sequencer.hpp \
     FocusAnalyzer.hpp \
     SkyFrame.hpp \
     Registration.hpp \
@@ -56,6 +58,7 @@ HEADERS += \
     Astro.hpp \
     CoordinateUtils.hpp \
     MessierCatalog.hpp \
+    DataDir.hpp \
     TelescopeData.hpp \
     TelescopeDataProcessor.hpp \
     TelescopeGUI.hpp \

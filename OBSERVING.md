@@ -54,3 +54,26 @@ or buildings) next to bins that are only sometimes bad (cloud).
 
 Slewing is a decision with consequences for the user's night: only do it when they have started an unattended session ("you have control"),
 and state in the log what the telescope was pointing at and where it is going.
+
+## Unattended exposure loop: `sequence` (Sequencer.cpp)
+
+`{"cmd":"sequence","action":"start","exposure":20,"iso":200,"pipeline":false,"until_local":"05:10","bad_limit":3,"probe_s":30}` (also `stop`, `status`) runs the
+exposure loop inside the app. It shoots back to back; after `bad_limit` consecutive frames that are not clear/hazy it probes once every `probe_s`
+seconds and resumes on the first clear probe. One JSON line per frame (verdict, stars, HFR, sky rate, transparency, timings) goes to
+`<data dir>/sequence_YYYYMMDD.jsonl` (a new file each date). While it runs, `snapshot`, `goto`, `set`, `focuser_move` and `initialize` are refused.
+`tools/tcp.sh '{"cmd":...}'` talks to the control port from bash (a client that half-closes straight after sending, as `nc -q0` or `socat` do, can crash the server).
+
+Findings from the 2026-10-09 night:
+
+* The telescope's cycle is the sample exposure plus the live-stream frame in progress. `set exposure X` sets the LIVE exposure, which the app re-asserts
+  after every frame, so set it to 0.5 s before a sequence and never to a long value. Then a 20 s frame costs about 23 s (87% duty).
+* Use `pipeline:false`. Requesting the next exposure at the image-ready notification, or sending an extra bit-depth command before each capture, broke
+  captures (alternate frames returned as PNG, or came back after 2 s with wrong levels). `resend_params` must stay true (the camera reverts to 24-bit after
+  each capture and the app's re-send restores 16-bit).
+* The stack reference seeded from a cloud-lit, soft or settling frame makes later clear frames fail to register and read cloudy: `target NAME ... reset:true`.
+  The app now refuses to seed it when the sky is over 3x the stored dark baseline. A corrupted frame can also lower the stored dark baseline
+  (`sky_map.json` `dark_rate`); repair it while the app is stopped.
+* Field rotation (alt-az mount) limits the exposure: `tools/fieldrot.py RA_HOURS DEC_DEG` gives the longest exposure for a corner trail under 2 px at each hour.
+  Targets in the east or west rotate slowly; near the meridian at high altitude the limit can be a few seconds.
+* Higher ISO gave no signal-to-noise gain (sky-limited, `tools/isoanalysis.py`); the first frames after a slew are elongated while the mount settles
+  (`tools/starshape.py` measures star ellipticity); the firmware centring leaves 5-12 arcmin random offsets, so check the first raw frame.
