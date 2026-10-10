@@ -112,7 +112,10 @@ const QList<Cmd>& commands()
         pass("sequence", "action", "Unattended exposure loop inside the server: start, stop or status.", "sequence",
              {P("action", 's', "start | stop | status (default status)", false), O("exposure", 'd', "seconds"), O("iso", 'i', "ISO"), O("binning", 'i', "binning"), O("bad-limit", 'i', "bad frames before probing"),
               O("probe-s", 'd', "seconds between probes"), O("pipeline", 'o', "on|off overlap download with the next exposure"), O("early", 'o', "on|off request the next exposure early"),
-              O("max-frames", 'i', "stop after N frames"), O("for-minutes", 'd', "stop after N minutes"), O("until-local", 's', "stop at local HH:MM"), O("reason", 's', "stop reason")}, true);
+              O("max-frames", 'i', "stop after N frames"), O("for-minutes", 'd', "stop after N minutes"), O("until-local", 's', "stop at local HH:MM"), O("reason", 's', "stop reason"),
+              O("focus-pause", 'o', "on|off stop the sequence when the focus drifts, so that focus-sweep can be run (default off: only an event is recorded)"),
+              O("focus-drift", 'd', "HFR ratio over the baseline that counts as drift", "1.15"), O("focus-baseline", 'd', "baseline HFR, full-resolution px (default: the first 8 good frames)"),
+              O("focus-window", 'i', "frames in the rolling median", "8")}, true);
         pass("send", "action", "Raw telescope command (server must run with --control-raw).", "send",
              {P("command", 's', "command name"), P("destination", 's', "destination, e.g. Camera"), O("params", 'j', "JSON object of parameters", "{}"), O("timeout", 'i', "seconds", "10")}, true);
         // --- orchestrated

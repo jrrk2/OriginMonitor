@@ -1,4 +1,5 @@
 #include "Sequencer.hpp"
+#include <algorithm>
 #include "DataDir.hpp"
 #include "OriginBackend.hpp"
 
@@ -40,6 +41,8 @@ QJsonObject Sequencer::start(const QJsonObject& req)
     m_cImg = connect(m_b, &OriginBackend::tiffImageDownloaded, this, &Sequencer::onImage);
     m_cFoc = connect(m_b, &OriginBackend::focusEvaluated, this, &Sequencer::onFocus);
     m_cMsg = connect(m_b, &OriginBackend::messageReceived, this, &Sequencer::onMessage);
+    m_hfrWin.clear(); m_hfrBase = req["focus_baseline"].toDouble(0); m_hfrMedian = 0; m_driftRun = m_drifts = 0;
+    m_driftRatio = req["focus_drift"].toDouble(1.15); m_focusWin = qBound(3, req["focus_window"].toInt(8), 50); m_focusPause = req["focus_pause"].toBool(false);
     m_active = true;
     if (!req["resend_params"].toBool(true)) m_b->setResendCaptureParams(false);     // the FITS format is only kept when the parameters are resent every cycle
     m_b->recordEvent("sequence_started", QString("exposure %1 s ISO %2, pipeline %3").arg(m_exposure).arg(m_iso).arg(m_pipeline ? "on" : "off"));
@@ -138,10 +141,27 @@ void Sequencer::onFocus(const QJsonObject& o)
                     {"file", m_curPath}, {"verdict", verdict}, {"stars", o["stars"].toInt()}, {"hfr_px", o["hfr_px"].toDouble()}, {"sky_rate", o["sky_rate"].toDouble()},
                     {"transparency", reg["transparency"].toDouble()}, {"stacked", reg["stacked"].toBool()}, {"frames_in_stack", reg["frames_in_stack"].toInt()},
                     {"capture_ms", m_curCaptureMs}, {"download_ms", m_curDownloadMs}, {"analysis_ms", analysisMs}, {"cycle_ms", m_curCycleMs}, {"exposure", m_exposure}};
+    bool drift = false;
+    const double hfr = o["hfr_px"].toDouble();
+    if (good && o["stars"].toInt() >= 30 && hfr > 0) {
+        m_hfrWin.append(hfr); while (m_hfrWin.size() > m_focusWin) m_hfrWin.removeFirst();
+        if (m_hfrWin.size() == m_focusWin) {
+            QList<double> v = m_hfrWin; std::sort(v.begin(), v.end()); m_hfrMedian = v[v.size() / 2];
+            if (m_hfrBase <= 0) m_hfrBase = m_hfrMedian;
+            else if (m_hfrMedian > m_hfrBase * m_driftRatio) drift = ++m_driftRun >= 5;
+            else m_driftRun = 0;
+        }
+    }
+    if (m_hfrBase > 0) { rec["focus_median_px"] = m_hfrMedian; rec["focus_ratio"] = m_hfrMedian / m_hfrBase; }
     m_last = rec;
     QFile log(m_logPath);
     if (log.open(QIODevice::Append)) log.write(QJsonDocument(rec).toJson(QJsonDocument::Compact) + "\n");
 
+    if (drift) {
+        ++m_drifts; m_driftRun = 0; m_hfrWin.clear();
+        m_b->recordEvent("sequence_focus_drift", QString("median HFR %1 px is %2 x the baseline %3 px: refocus").arg(m_hfrMedian, 0, 'f', 2).arg(m_hfrMedian / m_hfrBase, 0, 'f', 2).arg(m_hfrBase, 0, 'f', 2));
+        if (m_focusPause) { finish("focus drift"); return; }
+    }
     if (m_state == State::Shooting && m_badRun >= m_badLimit) {
         m_state = State::Probing;
         m_b->recordEvent("sequence_cloud", QString("%1 bad frames in a row (last verdict %2): probing every %3 s").arg(m_badRun).arg(verdict).arg(m_probeMs / 1000));
@@ -160,7 +180,8 @@ QJsonObject Sequencer::status() const
     const int n = m_frames;
     QJsonObject s{{"active", m_active}, {"state", m_state == State::Shooting ? "shooting" : "probing"}, {"frames", n}, {"good", m_good}, {"bad", m_bad},
                   {"bad_run", m_badRun}, {"probes", m_probes}, {"exposure", m_exposure}, {"iso", m_iso}, {"pipeline", m_pipeline}, {"early", m_early}, {"outstanding", m_outstanding}, {"last_verdict", m_lastVerdict},
-                  {"log", m_logPath}, {"stop_reason", m_stopReason}, {"last", m_last}};
+                  {"log", m_logPath}, {"stop_reason", m_stopReason}, {"last", m_last},
+                  {"focus", QJsonObject{{"baseline_px", m_hfrBase}, {"median_px", m_hfrMedian}, {"window", m_hfrWin.size()}, {"drifts", m_drifts}, {"drift_ratio", m_driftRatio}, {"pause", m_focusPause}}}};
     if (n > 0) { s["avg_capture_ms"] = m_sumCaptureMs / n; s["avg_analysis_ms"] = m_sumAnalysisMs / n; s["avg_download_ms"] = m_sumDownloadMs / n; }
     if (m_cycles > 0) { s["avg_cycle_ms"] = m_sumCycleMs / m_cycles; s["duty_cycle"] = m_exposure * 1000.0 / (m_sumCycleMs / m_cycles); }
     return s;
