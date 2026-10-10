@@ -25,7 +25,7 @@ bool TelescopeDataProcessor::processJsonPacket(const QByteArray &jsonData) {
     QString command = obj["Command"].toString();
     QString type = obj["Type"].toString();
     
-    // Only process notifications
+    // Only process notifications and responses
     if (type != "Notification" && type != "Response") {
         qDebug() << "Ignoring non-notification packet";
         return false;
@@ -64,6 +64,10 @@ bool TelescopeDataProcessor::processJsonPacket(const QByteArray &jsonData) {
         updateOrientationStatus(obj);
         emit orientationStatusUpdated();
     }
+    else if (source == "TaskController") {  // ADD THIS BLOCK
+        updateTaskControllerStatus(obj);
+        emit taskControllerStatusUpdated();
+    }
     
     return true;
 }
@@ -73,6 +77,7 @@ const TelescopeData& TelescopeDataProcessor::getData() const {
 }
 
 void TelescopeDataProcessor::updateMountStatus(const QJsonObject &obj) {
+    telescopeData.mount.batteryCurrent = obj["BatteryCurrent"].toDouble();
     telescopeData.mount.batteryLevel = obj["BatteryLevel"].toString();
     telescopeData.mount.batteryVoltage = obj["BatteryVoltage"].toDouble();
     telescopeData.mount.chargerStatus = obj["ChargerStatus"].toString();
@@ -85,6 +90,11 @@ void TelescopeDataProcessor::updateMountStatus(const QJsonObject &obj) {
     telescopeData.mount.isGotoOver = obj["IsGotoOver"].toBool();
     telescopeData.mount.isTracking = obj["IsTracking"].toBool();
     telescopeData.mount.numAlignRefs = obj["NumAlignRefs"].toInt();
+    telescopeData.mount.altitude = obj["Alt"].toDouble();
+    telescopeData.mount.altitudeError = obj["AltitudeError"].toDouble();
+    telescopeData.mount.azimuth = obj["Azm"].toDouble();
+    telescopeData.mount.azimuthError = obj["AzimuthError"].toDouble();
+    
     telescopeData.mount.enc0 = obj["Enc0"].toDouble();
     telescopeData.mount.enc1 = obj["Enc1"].toDouble();
     
@@ -163,7 +173,45 @@ void TelescopeDataProcessor::updateDewHeaterStatus(const QJsonObject &obj) {
 }
 
 void TelescopeDataProcessor::updateOrientationStatus(const QJsonObject &obj) {
-    telescopeData.orientation.altitude = obj["Altitude"].toInt();
+    telescopeData.orientation.altitude = obj["Altitude"].toDouble();
     
     telescopeData.orientationLastUpdate = QDateTime::currentDateTime();
+    qDebug() << "orient: " << telescopeData.orientation.altitude;
 }
+
+void TelescopeDataProcessor::updateTaskControllerStatus(const QJsonObject &obj) {
+    // Basic state info
+    telescopeData.taskController.state = obj["State"].toString();
+    telescopeData.taskController.stage = obj["Stage"].toString();
+    telescopeData.taskController.isReady = obj["IsReady"].toBool();
+
+    // Check for ErrorCode
+    if (obj.contains("ErrorMessage")) {
+        telescopeData.taskController.currentStep = obj["ErrorMessage"].toString();
+	qDebug() << "Error" << telescopeData.taskController.currentStep;
+    }
+    
+    // Check for InitializationInfo
+    if (obj.contains("InitializationInfo")) {
+        QJsonObject initInfo = obj["InitializationInfo"].toObject();
+        telescopeData.taskController.currentStep = initInfo["CurrentStep"].toString();
+        telescopeData.taskController.numPoints = initInfo["NumPoints"].toInt();
+        telescopeData.taskController.percentageComplete = initInfo["PercentageComplete"].toInt();
+	qDebug() << "InitInfo" << telescopeData.taskController.percentageComplete;
+    }
+    
+    // Check for FocusInfo
+    if (obj.contains("FocusInfo")) {
+        QJsonObject focusInfo = obj["FocusInfo"].toObject();
+        telescopeData.taskController.focusPosition = focusInfo["Position"].toInt();
+        telescopeData.taskController.focusPercentageComplete = focusInfo["PercentageComplete"].toInt();
+    }
+    
+    // Check for imaging session name
+    if (obj.contains("ImagingName")) {
+        telescopeData.taskController.imagingName = obj["ImagingName"].toString();
+    }
+    
+    telescopeData.taskControllerLastUpdate = QDateTime::currentDateTime();
+}
+

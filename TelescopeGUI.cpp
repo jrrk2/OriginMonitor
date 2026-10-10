@@ -1,55 +1,187 @@
 #include "TelescopeGUI.hpp"
 #include "CommandInterface.hpp"
-#include "AlpacaServer.hpp"
 #include "OriginBackend.hpp"
-#include "MessierCatalog.h"
+#include "DataDir.hpp"
+#include "MessierCatalog.hpp"
 #include <cmath>
+#include <algorithm>
+#include <vector>
+#include <QFile>
 
-TelescopeGUI::TelescopeGUI(QWidget *parent) : QMainWindow(parent) {
+TelescopeGUI::TelescopeGUI(QWidget *parent)
+    : QMainWindow(parent)
+{
     setWindowTitle("Celestron Origin Monitor");
     resize(900, 700);
-    
-    dataProcessor = new TelescopeDataProcessor(this);
-    
-    // Connect signals from data processor
-    connect(dataProcessor, &TelescopeDataProcessor::mountStatusUpdated, this, &TelescopeGUI::updateMountDisplay);
-    connect(dataProcessor, &TelescopeDataProcessor::cameraStatusUpdated, this, &TelescopeGUI::updateCameraDisplay);
-    connect(dataProcessor, &TelescopeDataProcessor::focuserStatusUpdated, this, &TelescopeGUI::updateFocuserDisplay);
-    connect(dataProcessor, &TelescopeDataProcessor::environmentStatusUpdated, this, &TelescopeGUI::updateEnvironmentDisplay);
-    connect(dataProcessor, &TelescopeDataProcessor::newImageAvailable, this, &TelescopeGUI::updateImageDisplay);
-    connect(dataProcessor, &TelescopeDataProcessor::diskStatusUpdated, this, &TelescopeGUI::updateDiskDisplay);
-    connect(dataProcessor, &TelescopeDataProcessor::dewHeaterStatusUpdated, this, &TelescopeGUI::updateDewHeaterDisplay);
-    connect(dataProcessor, &TelescopeDataProcessor::orientationStatusUpdated, this, &TelescopeGUI::updateOrientationDisplay);
 
-    // NEW: Initialize Alpaca components
+    //
+    // IMPORTANT: Create the backend first
+    //
     originBackend = new OriginBackend(this);
-    alpacaServer = new AlpacaServer(this);
-    alpacaServer->setTelescopeBackend(originBackend);
-    
-    // Connect Alpaca server signals
-    connect(alpacaServer, &AlpacaServer::serverStarted, this, &TelescopeGUI::onAlpacaServerStarted);
-    connect(alpacaServer, &AlpacaServer::serverStopped, this, &TelescopeGUI::onAlpacaServerStopped);
-    connect(alpacaServer, &AlpacaServer::requestReceived, this, &TelescopeGUI::onAlpacaRequestReceived);
-    
-    // Connect Origin backend signals
-    connect(originBackend, &OriginBackend::connected, this, [this]() {
-        alpacaLogTextEdit->append(QString("[%1] Origin telescope connected")
-                                 .arg(QTime::currentTime().toString()));
-    });
-    
-    connect(originBackend, &OriginBackend::disconnected, this, [this]() {
-        alpacaLogTextEdit->append(QString("[%1] Origin telescope disconnected")
-                                 .arg(QTime::currentTime().toString()));
-    });
-    
+
+    //
+    // Get the SAME data processor that OriginBackend feeds
+    //
+    dataProcessor = originBackend->getDataProcessor();
+
+    //
+    // Connect GUI update slots to this processor
+    //
+    connect(dataProcessor, &TelescopeDataProcessor::mountStatusUpdated,
+            this, &TelescopeGUI::updateMountDisplay);
+
+    connect(dataProcessor, &TelescopeDataProcessor::cameraStatusUpdated,
+            this, &TelescopeGUI::updateCameraDisplay);
+
+    connect(dataProcessor, &TelescopeDataProcessor::focuserStatusUpdated,
+            this, &TelescopeGUI::updateFocuserDisplay);
+
+    connect(dataProcessor, &TelescopeDataProcessor::environmentStatusUpdated,
+            this, &TelescopeGUI::updateEnvironmentDisplay);
+
+    connect(dataProcessor, &TelescopeDataProcessor::diskStatusUpdated,
+            this, &TelescopeGUI::updateDiskDisplay);
+
+    connect(dataProcessor, &TelescopeDataProcessor::dewHeaterStatusUpdated,
+            this, &TelescopeGUI::updateDewHeaterDisplay);
+    /*
+    connect(dataProcessor, &TelescopeDataProcessor::orientationStatusUpdated,
+            this, &TelescopeGUI::updateOrientationDisplay);
+    */
+    connect(dataProcessor, &TelescopeDataProcessor::taskControllerStatusUpdated,
+            this, &TelescopeGUI::updateTaskControllerDisplay);
+
+    connect(dataProcessor, &TelescopeDataProcessor::newImageAvailable,
+            this, &TelescopeGUI::updateImageDisplay);
+
+    //
+    // Now build GUI
+    //
     setupUI();
-    setupWebSocket();
+    m_logReplayDialog = nullptr;
+
+    //
+    // Device discovery
+    //
     setupDiscovery();
     
     // Update time display every second
     QTimer *timer = new QTimer(this);
     connect(timer, &QTimer::timeout, this, &TelescopeGUI::updateTimeDisplay);
     timer->start(1000);
+
+    // cancel slews after 100ms
+    slewTimer = new QTimer(this);
+    slewTimer->setSingleShot(true);
+    slewTimer->setInterval(1000);
+    connect(slewTimer, &QTimer::timeout, this, &TelescopeGUI::onSlewCancel);
+
+    // ===== ADD TO TelescopeGUI CONSTRUCTOR =====
+
+    // Connect live JPEG stream to image preview
+    connect(originBackend, &OriginBackend::liveImageDownloaded,
+	    this, [this](const QByteArray& imageData, double ra, double dec, double exposure) {
+
+		// Load image from data
+		QImage image;
+		if (!image.loadFromData(imageData)) {
+		    qWarning() << "Failed to load live image from data";
+		    return;
+		}
+
+		// Update image preview label
+		if (imagePreviewLabel) {
+		    QPixmap pixmap = QPixmap::fromImage(image);
+		    QPixmap scaledPixmap = pixmap.scaled(imagePreviewLabel->size(), 
+							Qt::KeepAspectRatio, 
+							Qt::SmoothTransformation);
+		    imagePreviewLabel->setPixmap(scaledPixmap);
+		}
+
+		// Update metadata labels
+		if (imageRaLabel) {
+		    imageRaLabel->setText(QString("%1 hrs").arg(
+			originBackend->radiansToHours(ra), 0, 'f', 6));
+		}
+		if (imageDecLabel) {
+		    imageDecLabel->setText(QString("%1°").arg(
+			originBackend->radiansToDegrees(dec), 0, 'f', 6));
+		}
+		if (imageTypeLabel) {
+		    imageTypeLabel->setText("Live Stream (JPEG)");
+		}
+
+		// Update last update timestamp
+		if (imageLastUpdateLabel) {
+		    QString timestamp = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
+		    imageLastUpdateLabel->setText(timestamp);
+		}
+
+		// Optionally log
+		// qDebug() << "Live image displayed - RA:" << ra << "Dec:" << dec;
+	    });
+
+    // In TelescopeGUI constructor (after originBackend creation):
+    connect(originBackend, &OriginBackend::tiffImageDownloaded,
+	    this, [this](const QString& filePath, const QByteArray& imageData,
+			 double ra, double dec, double exposure) {
+
+		qDebug() << "=== TIFF Snapshot Downloaded ===";
+		qDebug() << "Remote path:" << filePath;
+		qDebug() << "Size:" << imageData.size() << "bytes";
+		qDebug() << "RA:" << originBackend->radiansToHours(ra) << "hrs";
+		qDebug() << "Dec:" << originBackend->radiansToDegrees(dec) << "deg";
+		qDebug() << "Exposure:" << exposure << "sec";
+
+		// Create save directory
+		QString baseDir = originDataDir();
+		QDir().mkpath(baseDir);
+
+		// Generate filename with timestamp
+		QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
+		QString ext = QFileInfo(filePath).suffix().toLower();
+		if (ext.isEmpty()) ext = "tiff";
+		QString localPath = QString("%1/snapshot_%2.%3").arg(baseDir, timestamp, ext);
+
+		// Save the TIFF data
+		QFile file(localPath);
+		if (file.open(QIODevice::WriteOnly)) {
+		    qint64 written = file.write(imageData);
+		    file.close();
+
+		    if (written == imageData.size()) {
+			qDebug() << "Successfully saved to:" << localPath;
+
+			// Update UI
+			onSnapshotDownloaded(localPath);
+
+			// Update metadata labels
+			if (imageRaLabel) {
+			    imageRaLabel->setText(QString("%1 hrs").arg(
+				originBackend->radiansToHours(ra), 0, 'f', 6));
+			}
+			if (imageDecLabel) {
+			    imageDecLabel->setText(QString("%1°").arg(
+				originBackend->radiansToDegrees(dec), 0, 'f', 6));
+			}
+			if (imageTypeLabel) {
+			    imageTypeLabel->setText("Snapshot (TIFF)");
+			}
+		    } else {
+			qWarning() << "Write error: wrote" << written << "of" << imageData.size();
+		    }
+		} else {
+		    qWarning() << "Failed to create file:" << localPath;
+		    qWarning() << "Error:" << file.errorString();
+		}
+	    });    
+// ============================================================================
+// Add to TelescopeGUI.cpp constructor - Connect the signal
+// ============================================================================
+
+// In TelescopeGUI constructor, after other signal connections:
+connect(dataProcessor, &TelescopeDataProcessor::taskControllerStatusUpdated, 
+        this, &TelescopeGUI::updateTaskControllerDisplay);
 }
 
 void TelescopeGUI::startDiscovery() {
@@ -108,7 +240,7 @@ void TelescopeGUI::processPendingDatagrams() {
         udpSocket->readDatagram(datagram.data(), datagram.size(), &sender, &senderPort);
         
         QString datagramStr = QString::fromUtf8(datagram);
-        qDebug() << "Received UDP broadcast from" << sender.toString() << ":" << datagramStr;
+	//        qDebug() << "Received UDP broadcast from" << sender.toString() << ":" << datagramStr;
         
         // Check if this looks like a telescope broadcast
         if (datagramStr.contains("Origin", Qt::CaseInsensitive) && 
@@ -153,21 +285,17 @@ void TelescopeGUI::processPendingDatagrams() {
     }
 }
 
-void TelescopeGUI::connectToSelectedTelescope() {
-    if (isConnected) {
-        // Disconnect if already connected
-        webSocket->close();
-        return;
-    }
-    
+void TelescopeGUI::connectToSelectedTelescope() {    
     QListWidgetItem *selectedItem = telescopeListWidget->currentItem();
+    QString text;
     if (!selectedItem) {
-        statusLabel->setText("Please select a telescope from the list");
-        return;
+        statusLabel->setText("Selected default telescope");
+        text = "192.168.1.195";
     }
-    
+    else
+          text = selectedItem->text();
+
     // Extract the IP address from the selected item
-    QString text = selectedItem->text();
     QRegularExpression ipRegex("\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b");
     QRegularExpressionMatch match = ipRegex.match(text);
     
@@ -179,10 +307,7 @@ void TelescopeGUI::connectToSelectedTelescope() {
     QString ipAddress = match.captured(0);
     statusLabel->setText(QString("Connecting to telescope at %1...").arg(ipAddress));
     
-    // Connect to the telescope via WebSocket using the correct endpoint
-    QString url = QString("ws://%1:80/SmartScope-1.0/mountControlEndpoint").arg(ipAddress);
-    webSocket->open(QUrl(url));
-    
+    originBackend->connectToTelescope(ipAddress, 80);
     // Store the currently connected IP
     connectedIpAddress = ipAddress;
 }
@@ -190,23 +315,11 @@ void TelescopeGUI::connectToSelectedTelescope() {
 void TelescopeGUI::onWebSocketConnected() {
     statusLabel->setText("Connected to telescope!");
     connectButton->setText("Disconnect");
-    isConnected = true;
-
-    // Send a status request to get basic info
-    QJsonObject command;
-    command["Command"] = "GetStatus";
-    command["Destination"] = "System";
-    command["SequenceID"] = 1;
-    command["Source"] = "QtApp";
-    command["Type"] = "Command";
-    
-    sendJsonMessage(command);
 }
 
 void TelescopeGUI::onWebSocketDisconnected() {
     statusLabel->setText("Disconnected from telescope");
     connectButton->setText("Connect");
-    isConnected = false;
     connectedIpAddress = "";
 }
 
@@ -223,6 +336,7 @@ void TelescopeGUI::updateMountDisplay() {
     mountBatteryLevelLabel->setText(data.mount.batteryLevel);
     mountBatteryVoltageLabel->setText(QString::number(data.mount.batteryVoltage, 'f', 2) + " V");
     mountChargerStatusLabel->setText(data.mount.chargerStatus);
+    mountBatteryCurrentLabel->setText(QString::number(data.mount.batteryCurrent));
     mountTimeLabel->setText(data.mount.time);
     mountDateLabel->setText(data.mount.date);
     mountTimeZoneLabel->setText(data.mount.timeZone);
@@ -234,6 +348,10 @@ void TelescopeGUI::updateMountDisplay() {
     mountIsTrackingLabel->setText(data.mount.isTracking ? "Yes" : "No");
     mountIsGotoOverLabel->setText(data.mount.isGotoOver ? "Yes" : "No");
     mountNumAlignRefsLabel->setText(QString::number(data.mount.numAlignRefs));
+    mountAzimuthLabel->setText(QString::number(data.mount.azimuth));
+    mountAzimuthErrorLabel->setText(QString::number(data.mount.azimuthError));
+    mountAltitudeLabel->setText(QString::number(data.mount.altitude));
+    mountAltitudeErrorLabel->setText(QString::number(data.orientation.altitude));
 }
 
 void TelescopeGUI::updateCameraDisplay() {
@@ -279,12 +397,11 @@ void TelescopeGUI::updateImageDisplay() {
     imageTypeLabel->setText(data.lastImage.imageType);
     imageDecLabel->setText(QString::number(data.lastImage.dec * 180.0 / M_PI, 'f', 6) + "°");
     imageRaLabel->setText(QString::number(data.lastImage.ra * 180.0 / M_PI, 'f', 6) + "°");
-    imageOrientationLabel->setText(QString::number(data.lastImage.orientation * 180.0 / M_PI, 'f', 2) + "°");
     imageFovXLabel->setText(QString::number(data.lastImage.fovX * 180.0 / M_PI, 'f', 4) + "°");
     imageFovYLabel->setText(QString::number(data.lastImage.fovY * 180.0 / M_PI, 'f', 4) + "°");
     
     // Request image from the telescope if connected
-    if (isConnected && !data.lastImage.fileLocation.isEmpty()) {
+    if (originBackend->isConnected() && !data.lastImage.fileLocation.isEmpty()) {
         requestImage(data.lastImage.fileLocation);
     }
 }
@@ -319,16 +436,11 @@ void TelescopeGUI::updateDewHeaterDisplay() {
     dewHeaterLevelBar->setValue(heaterLevel);
 }
 
-void TelescopeGUI::updateOrientationDisplay() {
-    const TelescopeData &data = dataProcessor->getData();
-    orientationAltitudeLabel->setText(QString::number(data.orientation.altitude) + "°");
-}
-
 void TelescopeGUI::updateTimeDisplay() {
     QDateTime now = QDateTime::currentDateTime();
     
     // Update connection status time
-    if (isConnected) {
+    if (originBackend->isConnected()) {
         const TelescopeData &data = dataProcessor->getData();
         
         // Calculate time since last update for each component
@@ -339,11 +451,21 @@ void TelescopeGUI::updateTimeDisplay() {
         updateLastUpdateLabel(imageLastUpdateLabel, data.imageLastUpdate);
         updateLastUpdateLabel(diskLastUpdateLabel, data.diskLastUpdate);
         updateLastUpdateLabel(dewHeaterLastUpdateLabel, data.dewHeaterLastUpdate);
-        updateLastUpdateLabel(orientationLastUpdateLabel, data.orientationLastUpdate);
     }
 }
 
 void TelescopeGUI::setupUI() {
+    QMenuBar* menuBar = new QMenuBar(this);
+    setMenuBar(menuBar);
+    
+    // Tools menu
+    QMenu* toolsMenu = menuBar->addMenu("Tools");
+    
+    QAction* replayLogsAction = new QAction("Replay WebSocket Logs...", this);
+    replayLogsAction->setShortcut(QKeySequence("Ctrl+R"));
+    connect(replayLogsAction, &QAction::triggered, this, &TelescopeGUI::showLogReplay);
+    toolsMenu->addAction(replayLogsAction);
+  
     QWidget *centralWidget = new QWidget(this);
     setCentralWidget(centralWidget);
     
@@ -383,16 +505,220 @@ void TelescopeGUI::setupUI() {
     tabWidget->addTab(createCameraTab(), "Camera");
     tabWidget->addTab(createFocuserTab(), "Focuser");
     tabWidget->addTab(createEnvironmentTab(), "Environment");
-    tabWidget->addTab(createImageTab(), "Image");
+    tabWidget->addTab(createImageTab(), "Show Image");
     tabWidget->addTab(createDiskTab(), "Disk");
     tabWidget->addTab(createDewHeaterTab(), "Dew Heater");
-    tabWidget->addTab(createOrientationTab(), "Orientation");
-    tabWidget->addTab(createCommandTab(), "Commands");
-    tabWidget->addTab(createSlewAndImageTab(), "Slew && Image");   
-    tabWidget->addTab(createDownloadTab(), "Auto Download");
-    tabWidget->addTab(createAlpacaTab(), "Alpaca Server");  // NEW TAB
+    tabWidget->addTab(createSlewAndImageTab(), "Slew & Image");   
+    tabWidget->addTab(createTaskControllerTab(), "Task Controller");   
+    tabWidget->addTab(createCommandTab(), "Commands");   
     
     mainLayout->addWidget(tabWidget);
+}
+
+QWidget* TelescopeGUI::createCommandTab() {
+    CommandInterface *commandInterface = new CommandInterface(this, this);
+    return commandInterface;
+}
+
+// ============================================================================
+// Add to TelescopeGUI.cpp - Create the tab
+// ============================================================================
+
+QWidget* TelescopeGUI::createTaskControllerTab() {
+    QWidget *tab = new QWidget();
+    QVBoxLayout *mainLayout = new QVBoxLayout(tab);
+    
+    // Initialize section
+    QGroupBox *initstatusGroup = new QGroupBox("Telescope Initialization", tab);
+    QVBoxLayout *initvboxLayout = new QVBoxLayout(initstatusGroup);
+    
+    // Status display
+    QHBoxLayout *initstatusLayout = new QHBoxLayout();
+    initstatusLayout->addWidget(new QLabel("Alignment Status:"));
+    alignmentStatusLabel = new QLabel("Unknown", initstatusGroup);
+    initstatusLayout->addWidget(alignmentStatusLabel);
+    
+    initstatusLayout->addWidget(new QLabel("Mount Status:"));
+    mountStatusLabel = new QLabel("Unknown", initstatusGroup);
+    initstatusLayout->addWidget(mountStatusLabel);
+    
+    initvboxLayout->addLayout(initstatusLayout);
+    
+    // Initialization button
+    QHBoxLayout *initButtonLayout = new QHBoxLayout();
+    initializeButton = new QPushButton("Initialize Telescope", initstatusGroup);
+    connect(initializeButton, &QPushButton::clicked, this, &TelescopeGUI::initializeTelescope);
+    initButtonLayout->addWidget(initializeButton);
+    initvboxLayout->addLayout(initButtonLayout);
+    
+    mainLayout->addWidget(initstatusGroup);
+    
+    // Overall Status Group
+    QGroupBox *statusGroup = new QGroupBox("Overall Status", tab);
+    QGridLayout *statusLayout = new QGridLayout(statusGroup);
+    
+    int row = 0;
+    
+    statusLayout->addWidget(new QLabel("State:"), row, 0);
+    taskStateLabel = new QLabel("-", statusGroup);
+    taskStateLabel->setFont(QFont("Arial", 12, QFont::Bold));
+    statusLayout->addWidget(taskStateLabel, row++, 1);
+    
+    statusLayout->addWidget(new QLabel("Stage:"), row, 0);
+    taskStageLabel = new QLabel("-", statusGroup);
+    statusLayout->addWidget(taskStageLabel, row++, 1);
+    
+    statusLayout->addWidget(new QLabel("Ready:"), row, 0);
+    taskReadyLabel = new QLabel("-", statusGroup);
+    taskReadyLabel->setFont(QFont("Arial", 10, QFont::Bold));
+    statusLayout->addWidget(taskReadyLabel, row++, 1);
+    
+    mainLayout->addWidget(statusGroup);
+    
+    // Initialization Group
+    QGroupBox *initGroup = new QGroupBox("Initialization Progress", tab);
+    QGridLayout *initLayout = new QGridLayout(initGroup);
+    
+    row = 0;
+    
+    initLayout->addWidget(new QLabel("Current Step:"), row, 0);
+    taskCurrentStepLabel = new QLabel("-", initGroup);
+    taskCurrentStepLabel->setFont(QFont("Arial", 11, QFont::Bold));
+    initLayout->addWidget(taskCurrentStepLabel, row++, 1);
+    
+    initLayout->addWidget(new QLabel("Alignment Points:"), row, 0);
+    taskNumPointsLabel = new QLabel("-", initGroup);
+    initLayout->addWidget(taskNumPointsLabel, row++, 1);
+    
+    initLayout->addWidget(new QLabel("Progress:"), row, 0);
+    taskProgressBar = new QProgressBar(initGroup);
+    taskProgressBar->setRange(0, 100);
+    taskProgressBar->setValue(0);
+    taskProgressBar->setTextVisible(true);
+    taskProgressBar->setFormat("%p% complete");
+    initLayout->addWidget(taskProgressBar, row++, 1);
+    
+    mainLayout->addWidget(initGroup);
+    
+    // Focus Group
+    QGroupBox *focusGroup = new QGroupBox("Focus Progress", tab);
+    QGridLayout *focusLayout = new QGridLayout(focusGroup);
+    
+    row = 0;
+    
+    focusLayout->addWidget(new QLabel("Focuser Position:"), row, 0);
+    taskFocusPositionLabel = new QLabel("-", focusGroup);
+    focusLayout->addWidget(taskFocusPositionLabel, row++, 1);
+    
+    focusLayout->addWidget(new QLabel("Focus Progress:"), row, 0);
+    taskFocusProgressBar = new QProgressBar(focusGroup);
+    taskFocusProgressBar->setRange(0, 100);
+    taskFocusProgressBar->setValue(0);
+    taskFocusProgressBar->setTextVisible(true);
+    focusLayout->addWidget(taskFocusProgressBar, row++, 1);
+    
+    mainLayout->addWidget(focusGroup);
+    
+    // Imaging Group
+    QGroupBox *imagingGroup = new QGroupBox("Imaging Session", tab);
+    QGridLayout *imagingLayout = new QGridLayout(imagingGroup);
+    
+    row = 0;
+    
+    imagingLayout->addWidget(new QLabel("Session Name:"), row, 0);
+    taskImagingNameLabel = new QLabel("-", imagingGroup);
+    imagingLayout->addWidget(taskImagingNameLabel, row++, 1);
+    
+    mainLayout->addWidget(imagingGroup);
+    
+    // Last update
+    taskLastUpdateLabel = new QLabel("Last Update: Never", tab);
+    mainLayout->addWidget(taskLastUpdateLabel);
+    
+    // Add stretch to push everything up
+    mainLayout->addStretch(1);
+    
+    return tab;
+}
+
+// ============================================================================
+// Add to TelescopeGUI.cpp - Update display handler
+// ============================================================================
+
+void TelescopeGUI::updateTaskControllerDisplay() {
+    const TelescopeData &data = dataProcessor->getData();
+    const TaskControllerStatus &tc = data.taskController;
+    
+    // Update state with color coding
+    taskStateLabel->setText(tc.state);
+    if (tc.state == "INITIALIZING") {
+        taskStateLabel->setStyleSheet("color: orange;");
+    } else if (tc.state == "IDLE") {
+        taskStateLabel->setStyleSheet("color: green;");
+	initializeButton->setEnabled(true);
+    } else if (tc.state == "IMAGING") {
+        taskStateLabel->setStyleSheet("color: blue;");
+    } else {
+        taskStateLabel->setStyleSheet("color: black;");
+    }
+    
+    // Update stage
+    taskStageLabel->setText(tc.stage);
+    
+    // Update ready status with color
+    taskReadyLabel->setText(tc.isReady ? "YES" : "NO");
+    taskReadyLabel->setStyleSheet(tc.isReady ? "color: green;" : "color: red;");
+    
+    // Update initialization info
+    if (!tc.currentStep.isEmpty()) {
+        taskCurrentStepLabel->setText(tc.currentStep);
+        
+        // Color code the current step
+        if (tc.currentStep == "NONE") {
+            taskCurrentStepLabel->setStyleSheet("color: gray;");
+        } else if (tc.currentStep == "MOVING_MOUNT") {
+            taskCurrentStepLabel->setStyleSheet("color: blue;");
+        } else if (tc.currentStep == "ALIGNING") {
+            taskCurrentStepLabel->setStyleSheet("color: orange;");
+        } else if (tc.currentStep == "FOCUSING") {
+            taskCurrentStepLabel->setStyleSheet("color: purple;");
+        } else {
+            taskCurrentStepLabel->setStyleSheet("color: black;");
+        }
+    } else {
+        taskCurrentStepLabel->setText("-");
+        taskCurrentStepLabel->setStyleSheet("");
+    }
+    
+    taskNumPointsLabel->setText(QString::number(tc.numPoints));
+    taskProgressBar->setValue(tc.percentageComplete);
+    
+    // Update focus info
+    if (tc.focusPosition > 0) {
+        taskFocusPositionLabel->setText(QString::number(tc.focusPosition));
+    } else {
+        taskFocusPositionLabel->setText("-");
+    }
+    taskFocusProgressBar->setValue(tc.focusPercentageComplete);
+    
+    // Update imaging info
+    if (!tc.imagingName.isEmpty()) {
+        taskImagingNameLabel->setText(tc.imagingName);
+    } else {
+        taskImagingNameLabel->setText("-");
+    }
+    
+    // Update last update time
+    updateLastUpdateLabel(taskLastUpdateLabel, data.taskControllerLastUpdate);
+    
+    // Also update the main status label at top of GUI
+    if (statusLabel) {
+        QString statusText = QString("Status: %1").arg(tc.state);
+        if (tc.state == "INITIALIZING") {
+            statusText += QString(" - %1 (%2%)").arg(tc.currentStep).arg(tc.percentageComplete);
+        }
+        statusLabel->setText(statusText);
+    }
 }
 
 QWidget* TelescopeGUI::createMountTab() {
@@ -402,6 +728,10 @@ QWidget* TelescopeGUI::createMountTab() {
     int row = 0;
     
     // Add labels for mount data
+    layout->addWidget(new QLabel("Battery Current:"), row, 0);
+    mountBatteryCurrentLabel = new QLabel("-", tab);
+    layout->addWidget(mountBatteryCurrentLabel, row++, 1);
+    
     layout->addWidget(new QLabel("Battery Level:"), row, 0);
     mountBatteryLevelLabel = new QLabel("-", tab);
     layout->addWidget(mountBatteryLevelLabel, row++, 1);
@@ -449,10 +779,73 @@ QWidget* TelescopeGUI::createMountTab() {
     layout->addWidget(new QLabel("Num Align Refs:"), row, 0);
     mountNumAlignRefsLabel = new QLabel("-", tab);
     layout->addWidget(mountNumAlignRefsLabel, row++, 1);
-    
+
+    layout->addWidget(new QLabel("Azimuth:"), row, 0);
+    mountAzimuthLabel = new QLabel("-", tab);
+    layout->addWidget(mountAzimuthLabel, row++, 1);
+
+    layout->addWidget(new QLabel("Azimuth Error:"), row, 0);
+    mountAzimuthErrorLabel = new QLabel("-", tab);
+    layout->addWidget(mountAzimuthErrorLabel, row++, 1);
+
+    layout->addWidget(new QLabel("Altitude:"), row, 0);
+    mountAltitudeLabel = new QLabel("-", tab);
+    layout->addWidget(mountAltitudeLabel, row++, 1);
+
+    layout->addWidget(new QLabel("Altitude Error:"), row, 0);
+    mountAltitudeErrorLabel = new QLabel("-", tab);
+    layout->addWidget(mountAltitudeErrorLabel, row++, 1);
+        
     layout->addWidget(new QLabel("Last Update:"), row, 0);
     mountLastUpdateLabel = new QLabel("-", tab);
     layout->addWidget(mountLastUpdateLabel, row++, 1);
+    
+    // Add separator
+    QFrame* line = new QFrame(tab);
+    line->setFrameShape(QFrame::HLine);
+    line->setFrameShadow(QFrame::Sunken);
+    layout->addWidget(line, row++, 0, 1, 2);
+    
+    // Add Park/Unpark controls
+    QGroupBox *parkGroup = new QGroupBox("Park/Unpark Controls", tab);
+    QVBoxLayout *parkLayout = new QVBoxLayout(parkGroup);
+    
+    QLabel *parkInfoLabel = new QLabel("Park: Move to Alt -10° (safe storage position)\n"
+                                       "Unpark: Move to Alt +60° and initialize", parkGroup);
+    parkInfoLabel->setWordWrap(true);
+    parkInfoLabel->setStyleSheet("QLabel { color: gray; font-size: 10px; }");
+    parkLayout->addWidget(parkInfoLabel);
+    
+    QHBoxLayout *parkButtonLayout = new QHBoxLayout();
+    
+    QPushButton *parkButton = new QPushButton("Park Telescope", parkGroup);
+    parkButton->setToolTip("Move telescope to parked position (Alt: -10°)");
+    connect(parkButton, &QPushButton::clicked, this, [this]() {
+        if (originBackend->isConnected()) {
+            qDebug() << "Park button clicked";
+            originBackend->parkMount();
+        } else {
+            QMessageBox::warning(this, "Not Connected", 
+                               "Please connect to telescope first");
+        }
+    });
+    parkButtonLayout->addWidget(parkButton);
+    
+    QPushButton *unparkButton = new QPushButton("Unpark Telescope", parkGroup);
+    unparkButton->setToolTip("Move telescope to operational position (Alt: 60°) and initialize");
+    connect(unparkButton, &QPushButton::clicked, this, [this]() {
+        if (originBackend->isConnected()) {
+            qDebug() << "Unpark button clicked";
+            originBackend->unparkMount();
+        } else {
+            QMessageBox::warning(this, "Not Connected", 
+                               "Please connect to telescope first");
+        }
+    });
+    parkButtonLayout->addWidget(unparkButton);
+    
+    parkLayout->addLayout(parkButtonLayout);
+    layout->addWidget(parkGroup, row++, 0, 1, 2);
     
     layout->setRowStretch(row, 1);
     return tab;
@@ -591,16 +984,116 @@ QWidget* TelescopeGUI::createEnvironmentTab() {
     layout->setRowStretch(row, 1);
     return tab;
 }
+// ============================================================================
+// ENHANCED SHOW IMAGE TAB - Modified createImageTab() for TelescopeGUI.cpp
+// This integrates camera snapshot/exposure/ISO controls into your existing tab
+// ============================================================================
 
 QWidget* TelescopeGUI::createImageTab() {
     QWidget *tab = new QWidget();
     QVBoxLayout *mainLayout = new QVBoxLayout(tab);
     
-    // Create two panels - left for info, right for image
-    QSplitter *splitter = new QSplitter(Qt::Horizontal, tab);
-    mainLayout->addWidget(splitter);
+    // Camera Control Panel
+    QGroupBox *cameraControlGroup = new QGroupBox("Camera Control", tab);
+    QGridLayout *cameraControlLayout = new QGridLayout(cameraControlGroup);
     
-    // Left panel - info
+    int ctrlRow = 0;
+    
+    // Mode Control
+    cameraControlLayout->addWidget(new QLabel("Mode:"), ctrlRow, 0);
+    QHBoxLayout *modeLayout = new QHBoxLayout();
+    QPushButton *manualModeBtn = new QPushButton("Manual", tab);
+    QPushButton *autoModeBtn = new QPushButton("Auto", tab);
+    
+    // Connect DIRECTLY to backend (no camera controller!)
+    connect(manualModeBtn, &QPushButton::clicked, 
+            originBackend, &OriginBackend::setCameraManualMode);
+    connect(autoModeBtn, &QPushButton::clicked,
+            originBackend, &OriginBackend::setCameraAutoMode);
+    
+    modeLayout->addWidget(manualModeBtn);
+    modeLayout->addWidget(autoModeBtn);
+    modeLayout->addStretch();
+    cameraControlLayout->addLayout(modeLayout, ctrlRow++, 1, 1, 2);
+    
+    // Exposure Control
+    cameraControlLayout->addWidget(new QLabel("Exposure (sec):"), ctrlRow, 0);
+    exposureSpinBox = new QDoubleSpinBox(tab);
+    exposureSpinBox->setRange(0.000001, 300.0);   // camera minimum is 1 us
+    exposureSpinBox->setValue(0.1);
+    exposureSpinBox->setDecimals(6);
+    
+    connect(exposureSpinBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            originBackend, &OriginBackend::setCameraExposure);
+    
+    cameraControlLayout->addWidget(exposureSpinBox, ctrlRow++, 1);
+    
+    // Binning Control
+    cameraControlLayout->addWidget(new QLabel("Binning:"), ctrlRow, 0);
+    binningSpinBox = new QSpinBox(tab);
+    binningSpinBox->setRange(1, 2);
+    binningSpinBox->setValue(1);
+    
+    connect(binningSpinBox, QOverload<int>::of(&QSpinBox::valueChanged),
+            originBackend, &OriginBackend::setCameraBinning);
+    
+    cameraControlLayout->addWidget(binningSpinBox, ctrlRow++, 1);
+    
+    // ISO Control
+    cameraControlLayout->addWidget(new QLabel("ISO:"), ctrlRow, 0);
+    isoSpinBox = new QSpinBox(tab);
+    isoSpinBox->setRange(100, 6400);
+    isoSpinBox->setValue(200);
+    
+    connect(isoSpinBox, QOverload<int>::of(&QSpinBox::valueChanged),
+            originBackend, &OriginBackend::setCameraISO);
+    
+    cameraControlLayout->addWidget(isoSpinBox, ctrlRow++, 1);
+
+    // Snapshot Button - connects to backend!
+    snapshotButton = new QPushButton("Take Snapshot", tab);
+    snapshotButton->setStyleSheet("font-weight: bold; padding: 8px; background-color: #4CAF50; color: white;");
+    
+    connect(snapshotButton, &QPushButton::clicked, this, [this]() {
+        bool success = originBackend->takeSingleSnapshot();
+        snapshotButton->setEnabled(!success);
+        snapshotButton->setText("Capturing...");
+    });
+    
+    cameraControlLayout->addWidget(snapshotButton, ctrlRow++, 1, 1, 2);
+
+    // Continuous series button - keeps taking snapshots back to back until stopped
+    continuousButton = new QPushButton("Start Continuous Snapshots", tab);
+    continuousButton->setStyleSheet("font-weight: bold; padding: 8px;");
+    connect(continuousButton, &QPushButton::clicked, this, [this]() {
+        if (originBackend->isContinuousSnapshots()) {
+            originBackend->stopContinuousSnapshots();
+        } else {
+            originBackend->startContinuousSnapshots();
+        }
+    });
+    connect(originBackend, &OriginBackend::continuousSnapshotsChanged,
+            this, [this](bool running) {
+        continuousButton->setText(running ? "Stop Continuous Snapshots"
+                                          : "Start Continuous Snapshots");
+        snapshotButton->setEnabled(!running);
+    });
+    cameraControlLayout->addWidget(continuousButton, ctrlRow++, 1, 1, 2);
+    
+    // Progress bar
+    snapshotProgressBar = new QProgressBar(tab);
+    snapshotProgressBar->setVisible(false);
+    cameraControlLayout->addWidget(snapshotProgressBar, ctrlRow++, 1, 1, 2);
+    
+    mainLayout->addWidget(cameraControlGroup);
+    
+    // ========================================================================
+    // MIDDLE SECTION: Original Two-Panel Layout
+    // ========================================================================
+    QSplitter *splitter = new QSplitter(Qt::Horizontal, tab);
+    mainLayout->addWidget(splitter, 1);  // Give it stretch priority
+    
+    // Left panel - Image info
     QWidget *infoPanel = new QWidget(splitter);
     QGridLayout *infoLayout = new QGridLayout(infoPanel);
     
@@ -608,6 +1101,7 @@ QWidget* TelescopeGUI::createImageTab() {
     
     infoLayout->addWidget(new QLabel("File Location:"), row, 0);
     imageFileLabel = new QLabel("-", infoPanel);
+    imageFileLabel->setWordWrap(true);
     infoLayout->addWidget(imageFileLabel, row++, 1);
     
     infoLayout->addWidget(new QLabel("Image Type:"), row, 0);
@@ -622,10 +1116,6 @@ QWidget* TelescopeGUI::createImageTab() {
     imageRaLabel = new QLabel("-", infoPanel);
     infoLayout->addWidget(imageRaLabel, row++, 1);
     
-    infoLayout->addWidget(new QLabel("Orientation:"), row, 0);
-    imageOrientationLabel = new QLabel("-", infoPanel);
-    infoLayout->addWidget(imageOrientationLabel, row++, 1);
-    
     infoLayout->addWidget(new QLabel("Field of View X:"), row, 0);
     imageFovXLabel = new QLabel("-", infoPanel);
     infoLayout->addWidget(imageFovXLabel, row++, 1);
@@ -634,6 +1124,21 @@ QWidget* TelescopeGUI::createImageTab() {
     imageFovYLabel = new QLabel("-", infoPanel);
     infoLayout->addWidget(imageFovYLabel, row++, 1);
     
+    // Hand control buttons
+    auto *upButton = new QPushButton("Up");
+    auto *downButton = new QPushButton("Down");
+    auto *leftButton = new QPushButton("Left");
+    auto *rightButton = new QPushButton("Right");
+    connect(upButton, &QPushButton::clicked, this, &TelescopeGUI::startUpButton);
+    connect(downButton, &QPushButton::clicked, this, &TelescopeGUI::startDownButton);
+    connect(leftButton, &QPushButton::clicked, this, &TelescopeGUI::startLeftButton);
+    connect(rightButton, &QPushButton::clicked, this, &TelescopeGUI::startRightButton);
+    
+    infoLayout->addWidget(upButton, row++, 1);
+    infoLayout->addWidget(leftButton, row, 0);
+    infoLayout->addWidget(rightButton, row++, 2);
+    infoLayout->addWidget(downButton, row++, 1);
+    
     infoLayout->addWidget(new QLabel("Last Update:"), row, 0);
     imageLastUpdateLabel = new QLabel("-", infoPanel);
     infoLayout->addWidget(imageLastUpdateLabel, row++, 1);
@@ -641,7 +1146,7 @@ QWidget* TelescopeGUI::createImageTab() {
     // Add vertical space at the bottom
     infoLayout->setRowStretch(row, 1);
     
-    // Right panel - image preview
+    // Right panel - Image preview
     QWidget *imagePanel = new QWidget(splitter);
     QVBoxLayout *imageLayout = new QVBoxLayout(imagePanel);
     
@@ -650,14 +1155,194 @@ QWidget* TelescopeGUI::createImageTab() {
     imagePreviewLabel->setAlignment(Qt::AlignCenter);
     imagePreviewLabel->setScaledContents(false);
     imagePreviewLabel->setText("No image available");
+    imagePreviewLabel->setStyleSheet("QLabel { background-color: #2b2b2b; border: 2px solid #555; }");
     
     imageLayout->addWidget(imagePreviewLabel);
     
     // Set stretch factors for the splitter
     splitter->setStretchFactor(0, 1);  // Info panel
     splitter->setStretchFactor(1, 3);  // Image panel
-    
+    // Add these connections at the end of createImageTab(), before returning tab:
+
+    // Connect backend camera signals to update UI
+    connect(originBackend, &OriginBackend::cameraModeChanged,
+	    this, &TelescopeGUI::onCameraModeChanged);
+
+    connect(originBackend, &OriginBackend::captureParametersChanged,
+	    this, [this](double exposure, int iso, int binning) {
+		// Update spinboxes without triggering signals
+		exposureSpinBox->blockSignals(true);
+		binningSpinBox->blockSignals(true);
+		isoSpinBox->blockSignals(true);
+
+		exposureSpinBox->setValue(exposure);
+		binningSpinBox->setValue(binning);
+		isoSpinBox->setValue(iso);
+
+		exposureSpinBox->blockSignals(false);
+		binningSpinBox->blockSignals(false);
+		isoSpinBox->blockSignals(false);
+
+		// qDebug() << "Capture parameters updated:" << exposure << iso;
+	    });
+
+    // Re-enable snapshot button when image is ready
+    connect(originBackend, &OriginBackend::imageReady,
+	    this, [this]() {
+		if (snapshotButton) {
+		    snapshotButton->setEnabled(!originBackend->isContinuousSnapshots());
+		    snapshotButton->setText("Take Snapshot");
+		}
+		if (snapshotProgressBar) {
+		    snapshotProgressBar->setVisible(false);
+		}
+	    });
+ 
     return tab;
+}
+
+// Signal Handlers
+void TelescopeGUI::onCameraModeChanged(bool isManual) {
+    qDebug() << "Camera mode changed:" << (isManual ? "Manual" : "Auto");
+    
+    // Update UI to reflect mode
+    if (exposureSpinBox && isoSpinBox) {
+        exposureSpinBox->setEnabled(isManual);
+        isoSpinBox->setEnabled(isManual);
+    }
+}
+
+void TelescopeGUI::onCaptureParametersChanged(double exposure, int iso) {
+    qDebug() << "Capture parameters updated: Exposure =" << exposure << "ISO =" << iso;
+    
+    // Update spin boxes without triggering their signals
+    if (exposureSpinBox) {
+        exposureSpinBox->blockSignals(true);
+        exposureSpinBox->setValue(exposure);
+        exposureSpinBox->blockSignals(false);
+    }
+    
+    if (isoSpinBox) {
+        isoSpinBox->blockSignals(true);
+        isoSpinBox->setValue(iso);
+        isoSpinBox->blockSignals(false);
+    }
+}
+
+void TelescopeGUI::onSnapshotReady(const QString& fileLocation, double ra, double dec) {
+    qDebug() << "Snapshot ready at" << fileLocation;
+    qDebug() << "Position: RA =" << ra << "Dec =" << dec;
+    
+    // Update image info labels
+    if (imageFileLabel) {
+        imageFileLabel->setText(fileLocation);
+    }
+    if (imageRaLabel) {
+        imageRaLabel->setText(QString::number(ra, 'f', 6));
+    }
+    if (imageDecLabel) {
+        imageDecLabel->setText(QString::number(dec, 'f', 6));
+    }
+    
+    // Generate save path with timestamp
+    QString filename = QFileInfo(fileLocation).fileName();
+    QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+    QString extension = QFileInfo(filename).suffix();
+    QString basename = QFileInfo(filename).baseName();
+    QString savePath = m_snapshotSavePath + "/" + basename + "_" + timestamp + "." + extension;
+    
+    // Show progress bar
+    if (snapshotProgressBar) {
+        snapshotProgressBar->setVisible(true);
+        snapshotProgressBar->setValue(0);
+        snapshotProgressBar->setFormat("Downloading snapshot... %p%");
+    }
+}
+
+// Preview-only reader for the raw 16-bit Bayer FITS the camera delivers. The saved file is never modified:
+// this bins each 2x2 Bayer cell, applies a black/white stretch and returns an 8-bit image for the preview pane.
+static QImage fitsPreview(const QString& path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return QImage();
+    const QByteArray head = f.read(2880 * 4);
+    int width = 0, height = 0, bitpix = 0; double bzero = 0; qsizetype end = -1;
+    for (qsizetype i = 0; i + 80 <= head.size(); i += 80) {
+        const QByteArray card = head.mid(i, 80);
+        const QString key = QString::fromLatin1(card.left(8)).trimmed();
+        const QString val = QString::fromLatin1(card.mid(10, 20)).split('/').first().trimmed();
+        if (key == "NAXIS1") width = val.toInt();
+        else if (key == "NAXIS2") height = val.toInt();
+        else if (key == "BITPIX") bitpix = val.toInt();
+        else if (key == "BZERO") bzero = val.toDouble();
+        else if (key == "END") { end = i; break; }
+    }
+    if (end < 0 || bitpix != 16 || width < 2 || height < 2) return QImage();
+    f.seek(((end / 80 + 36) / 36) * 2880);                      // data starts after the last header block
+    const QByteArray data = f.read(qint64(width) * height * 2);
+    if (data.size() < qint64(width) * height * 2) return QImage();
+    const uchar* d = reinterpret_cast<const uchar*>(data.constData());
+    auto px = [&](int x, int y) -> double {
+        const int i = (y * width + x) * 2;
+        return qint16((d[i] << 8) | d[i + 1]) + bzero;           // big-endian signed + BZERO
+    };
+    const int w = width / 2, h = height / 2;
+    std::vector<float> v(size_t(w) * h);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            v[size_t(y) * w + x] = float(px(2*x, 2*y) + px(2*x+1, 2*y) + px(2*x, 2*y+1) + px(2*x+1, 2*y+1));
+    std::vector<float> s(v.begin(), v.end());
+    std::sort(s.begin(), s.end());
+    const float lo = s[s.size() / 200], hi = std::max(s[size_t(s.size() * 0.9995)], lo + 1.0f);
+    QImage img(w, h, QImage::Format_Grayscale8);
+    for (int y = 0; y < h; ++y) {
+        uchar* line = img.scanLine(y);
+        for (int x = 0; x < w; ++x) {
+            const float t = std::clamp((v[size_t(y) * w + x] - lo) / (hi - lo), 0.0f, 1.0f);
+            line[x] = uchar(255.0f * std::sqrt(t));
+        }
+    }
+    return img;
+}
+
+void TelescopeGUI::onSnapshotDownloaded(const QString& localPath) {
+    qDebug() << "Snapshot downloaded to:" << localPath;
+    
+    // Hide progress bar
+    if (snapshotProgressBar) {
+        snapshotProgressBar->setVisible(false);
+    }
+    
+    // Re-enable snapshot button
+    if (snapshotButton) {
+        snapshotButton->setEnabled(!originBackend->isContinuousSnapshots());
+        snapshotButton->setText("Take Snapshot");
+    }
+    
+    // Load and display the downloaded image
+    QPixmap pixmap = localPath.endsWith(".fits", Qt::CaseInsensitive) ? QPixmap::fromImage(fitsPreview(localPath)) : QPixmap(localPath);
+    if (!pixmap.isNull() && imagePreviewLabel) {
+        // Scale to fit while preserving aspect ratio
+        QPixmap scaledPixmap = pixmap.scaled(imagePreviewLabel->size(), 
+                                            Qt::KeepAspectRatio, 
+                                            Qt::SmoothTransformation);
+        imagePreviewLabel->setPixmap(scaledPixmap);
+        
+        qDebug() << "Image displayed successfully";
+    } else {
+        qWarning() << "Failed to load downloaded image";
+    }
+    
+    // Optional: Show notification
+    // QMessageBox::information(this, "Snapshot Saved", 
+    //                         "Snapshot saved to:\n" + localPath);
+}
+
+void TelescopeGUI::onSnapshotDownloadProgress(qint64 bytesReceived, qint64 bytesTotal) {
+    if (snapshotProgressBar && bytesTotal > 0) {
+        int percent = (bytesReceived * 100) / bytesTotal;
+        snapshotProgressBar->setValue(percent);
+    }
 }
 
 QWidget* TelescopeGUI::createDiskTab() {
@@ -732,56 +1417,12 @@ QWidget* TelescopeGUI::createDewHeaterTab() {
     return tab;
 }
 
-QWidget* TelescopeGUI::createOrientationTab() {
-    QWidget *tab = new QWidget();
-    QGridLayout *layout = new QGridLayout(tab);
-    
-    int row = 0;
-    
-    layout->addWidget(new QLabel("Altitude:"), row, 0);
-    orientationAltitudeLabel = new QLabel("-", tab);
-    layout->addWidget(orientationAltitudeLabel, row++, 1);
-    
-    layout->addWidget(new QLabel("Last Update:"), row, 0);
-    orientationLastUpdateLabel = new QLabel("-", tab);
-    layout->addWidget(orientationLastUpdateLabel, row++, 1);
-    
-    layout->setRowStretch(row, 1);
-    return tab;
-}
-
-QWidget* TelescopeGUI::createCommandTab() {
-    CommandInterface *commandInterface = new CommandInterface(this, this);
-    return commandInterface;
-}
-
-void TelescopeGUI::setupWebSocket() {
-    webSocket = new QWebSocket("", QWebSocketProtocol::VersionLatest, this);
-    
-    connect(webSocket, &QWebSocket::connected, this, &TelescopeGUI::onWebSocketConnected);
-    connect(webSocket, &QWebSocket::disconnected, this, &TelescopeGUI::onWebSocketDisconnected);
-    connect(webSocket, &QWebSocket::textMessageReceived, this, &TelescopeGUI::onTextMessageReceived);
-}
-
 void TelescopeGUI::setupDiscovery() {
     // UDP socket for discovery
     udpSocket = new QUdpSocket(this);
     
     // Start discovery automatically
     QTimer::singleShot(500, this, &TelescopeGUI::startDiscovery);
-}
-
-void TelescopeGUI::sendJsonMessage(const QJsonObject &obj) {
-    QJsonDocument doc(obj);
-    QString message = doc.toJson();
-    
-    // Log the outgoing message
-    logJsonPacket(message, false);
-    
-    // Send via WebSocket
-    if (webSocket->isValid() && webSocket->state() == QAbstractSocket::ConnectedState) {
-        webSocket->sendTextMessage(message);
-    }
 }
 
 void TelescopeGUI::logJsonPacket(const QString &message, bool incoming) {
@@ -813,7 +1454,7 @@ void TelescopeGUI::requestImage(const QString &filePath) {
     request.setRawHeader("User-Agent", "CelestronOriginMonitor Qt Application");
     request.setRawHeader("Connection", "keep-alive");
     
-    qDebug() << "Requesting image from:" << fullPath;
+    if (false) qDebug() << "Requesting image from:" << fullPath;
     
     QNetworkAccessManager *manager = new QNetworkAccessManager(this);
     QNetworkReply *reply = manager->get(request);
@@ -823,7 +1464,7 @@ void TelescopeGUI::requestImage(const QString &filePath) {
             // Read the image data
             QByteArray imageData = reply->readAll();
             
-            qDebug() << "Received image data, size:" << imageData.size() << "bytes";
+            if (false) qDebug() << "Received image data, size:" << imageData.size() << "bytes";
             
             // Create a QPixmap from the data
             QPixmap pixmap;
@@ -885,7 +1526,7 @@ void TelescopeGUI::analyzeImageForFocus(const QByteArray &imageData) {
     double contrastScore = sqrt(totalVariance / totalPixels);
     
     // Store this score somewhere (member variable or display in UI)
-    qDebug() << "Focus quality score (contrast):" << contrastScore;
+    //    qDebug() << "Focus quality score (contrast):" << contrastScore;
     
     // You could update a label in the UI to show this
     // focusQualityLabel->setText(QString("Focus Quality: %1").arg(contrastScore, 0, 'f', 2));
@@ -908,264 +1549,9 @@ void TelescopeGUI::updateLastUpdateLabel(QLabel *label, const QDateTime &lastUpd
     }
 }
 
-
-// Add the implementation of createDownloadTab()
-QWidget* TelescopeGUI::createDownloadTab() {
-    QWidget *tab = new QWidget();
-    QVBoxLayout *mainLayout = new QVBoxLayout(tab);
-    
-    // Download path selection
-    QGroupBox *pathGroup = new QGroupBox("Download Path", tab);
-    QHBoxLayout *pathLayout = new QHBoxLayout(pathGroup);
-    
-    downloadPathEdit = new QLineEdit(QDir::homePath() + "/CelestronOriginDownloads", pathGroup);
-    pathLayout->addWidget(downloadPathEdit);
-    
-    browseButton = new QPushButton("Browse", pathGroup);
-    connect(browseButton, &QPushButton::clicked, this, [this]() {
-        QString dir = QFileDialog::getExistingDirectory(this, "Select Download Directory",
-                                                      downloadPathEdit->text(),
-                                                      QFileDialog::ShowDirsOnly |
-                                                      QFileDialog::DontResolveSymlinks);
-        if (!dir.isEmpty()) {
-            downloadPathEdit->setText(dir);
-        }
-    });
-    pathLayout->addWidget(browseButton);
-    
-    mainLayout->addWidget(pathGroup);
-    
-    // Control buttons
-    QHBoxLayout *controlLayout = new QHBoxLayout();
-    
-    startDownloadButton = new QPushButton("Start Automatic Download", tab);
-    connect(startDownloadButton, &QPushButton::clicked, this, &TelescopeGUI::startAutomaticDownload);
-    controlLayout->addWidget(startDownloadButton);
-    
-    stopDownloadButton = new QPushButton("Stop Download", tab);
-    stopDownloadButton->setEnabled(false);
-    connect(stopDownloadButton, &QPushButton::clicked, this, &TelescopeGUI::stopAutomaticDownload);
-    controlLayout->addWidget(stopDownloadButton);
-    
-    mainLayout->addLayout(controlLayout);
-    
-    // Progress display
-    QGroupBox *progressGroup = new QGroupBox("Download Progress", tab);
-    QVBoxLayout *progressLayout = new QVBoxLayout(progressGroup);
-    
-    QLabel *overallLabel = new QLabel("Overall Progress:", progressGroup);
-    progressLayout->addWidget(overallLabel);
-    
-    overallProgressBar = new QProgressBar(progressGroup);
-    overallProgressBar->setRange(0, 100);
-    overallProgressBar->setValue(0);
-    progressLayout->addWidget(overallProgressBar);
-    
-    currentFileLabel = new QLabel("Current File:", progressGroup);
-    progressLayout->addWidget(currentFileLabel);
-    
-    currentFileProgressBar = new QProgressBar(progressGroup);
-    currentFileProgressBar->setRange(0, 100);
-    currentFileProgressBar->setValue(0);
-    progressLayout->addWidget(currentFileProgressBar);
-    
-    mainLayout->addWidget(progressGroup);
-    
-    // Download log
-    QGroupBox *logGroup = new QGroupBox("Download Log", tab);
-    QVBoxLayout *logLayout = new QVBoxLayout(logGroup);
-    
-    downloadLogList = new QListWidget(logGroup);
-    logLayout->addWidget(downloadLogList);
-    
-    mainLayout->addWidget(logGroup);
-    
-    return tab;
-}
-
-// Add the implementation of startAutomaticDownload()
-void TelescopeGUI::startAutomaticDownload() {
-    if (!isConnected) {
-        QMessageBox::warning(this, "Not Connected", "Please connect to a telescope first");
-        return;
-    }
-    
-    if (isDownloading) {
-        return;
-    }
-    
-    QString downloadPath = downloadPathEdit->text();
-    
-    // Create directory if it doesn't exist
-    QDir dir(downloadPath);
-    if (!dir.exists()) {
-        if (!dir.mkpath(".")) {
-            QMessageBox::warning(this, "Error", "Failed to create download directory");
-            return;
-        }
-    }
-    
-    // Create auto downloader if needed
-    if (!autoDownloader) {
-        autoDownloader = new AutoDownloader(webSocket, connectedIpAddress, downloadPath, this);
-        
-        // Connect signals
-        connect(autoDownloader, &AutoDownloader::directoryDownloadStarted, 
-                this, &TelescopeGUI::onDirectoryDownloadStarted);
-        connect(autoDownloader, &AutoDownloader::fileDownloadStarted, 
-                this, &TelescopeGUI::onFileDownloadStarted);
-        connect(autoDownloader, &AutoDownloader::fileDownloaded, 
-                this, &TelescopeGUI::onFileDownloaded);
-        connect(autoDownloader, &AutoDownloader::directoryDownloaded, 
-                this, &TelescopeGUI::onDirectoryDownloaded);
-        connect(autoDownloader, &AutoDownloader::allDownloadsComplete, 
-                this, &TelescopeGUI::onAllDownloadsComplete);
-        connect(autoDownloader, &AutoDownloader::downloadProgress, 
-                this, &TelescopeGUI::updateDownloadProgress);
-    } else {
-        // Update download path
-        autoDownloader->setDownloadPath(downloadPath);
-    }
-    
-    // Start download
-    isDownloading = true;
-    startDownloadButton->setEnabled(false);
-    stopDownloadButton->setEnabled(true);
-    browseButton->setEnabled(false);
-    downloadPathEdit->setEnabled(false);
-    
-    // Reset progress indicators
-    overallProgressBar->setValue(0);
-    currentFileProgressBar->setValue(0);
-    currentFileLabel->setText("Current File: Initializing...");
-    
-    // Clear log
-    downloadLogList->clear();
-    
-    // Add start entry to log
-    QListWidgetItem *item = new QListWidgetItem(QString("Starting automatic download to %1").arg(downloadPath));
-    downloadLogList->addItem(item);
-    downloadLogList->scrollToBottom();
-    
-    // Start the download
-    autoDownloader->startDownload();
-}
-
-// Add the implementation of stopAutomaticDownload()
-void TelescopeGUI::stopAutomaticDownload() {
-    if (!isDownloading || !autoDownloader) {
-        return;
-    }
-    
-    // Stop the download
-    autoDownloader->stopDownload();
-    
-    // Update UI
-    isDownloading = false;
-    startDownloadButton->setEnabled(true);
-    stopDownloadButton->setEnabled(false);
-    browseButton->setEnabled(true);
-    downloadPathEdit->setEnabled(true);
-    
-    // Add stop entry to log
-    QListWidgetItem *item = new QListWidgetItem("Download stopped by user");
-    downloadLogList->addItem(item);
-    downloadLogList->scrollToBottom();
-}
-
-// Add the implementation of updateDownloadProgress()
-void TelescopeGUI::updateDownloadProgress(const QString &currentFile, int filesCompleted, 
-                                        int totalFiles, qint64 bytesReceived, qint64 bytesTotal) {
-    // Update current file progress
-    if (bytesTotal > 0) {
-        int percent = (int)((bytesReceived * 100) / bytesTotal);
-        currentFileProgressBar->setValue(percent);
-    }
-    
-    // Update current file label
-    currentFileLabel->setText(QString("Current File: %1").arg(currentFile));
-    
-    // Update overall progress
-    if (totalFiles > 0) {
-        int percent = (int)((filesCompleted * 100) / totalFiles);
-        overallProgressBar->setValue(percent);
-    }
-}
-
-// Add the implementation of event handlers
-void TelescopeGUI::onDirectoryDownloadStarted(const QString &directory) {
-    QListWidgetItem *item = new QListWidgetItem(QString("Starting download of directory: %1").arg(directory));
-    downloadLogList->addItem(item);
-    downloadLogList->scrollToBottom();
-}
-
-void TelescopeGUI::onFileDownloadStarted(const QString &fileName) {
-    QListWidgetItem *item = new QListWidgetItem(QString("Downloading: %1").arg(fileName));
-    downloadLogList->addItem(item);
-    downloadLogList->scrollToBottom();
-}
-
-void TelescopeGUI::onFileDownloaded(const QString &fileName, bool success) {
-    QString status = success ? "Success" : "Failed";
-    QListWidgetItem *item = new QListWidgetItem(QString("Download %1: %2").arg(status, fileName));
-    downloadLogList->addItem(item);
-    downloadLogList->scrollToBottom();
-}
-
-void TelescopeGUI::onDirectoryDownloaded(const QString &directory) {
-    QListWidgetItem *item = new QListWidgetItem(QString("Completed download of directory: %1").arg(directory));
-    downloadLogList->addItem(item);
-    downloadLogList->scrollToBottom();
-}
-
-void TelescopeGUI::onAllDownloadsComplete() {
-    QListWidgetItem *item = new QListWidgetItem("All downloads complete!");
-    downloadLogList->addItem(item);
-    downloadLogList->scrollToBottom();
-    
-    // Update UI
-    isDownloading = false;
-    startDownloadButton->setEnabled(true);
-    stopDownloadButton->setEnabled(false);
-    browseButton->setEnabled(true);
-    downloadPathEdit->setEnabled(true);
-}
-
 QWidget* TelescopeGUI::createSlewAndImageTab() {
     QWidget *tab = new QWidget();
     QVBoxLayout *mainLayout = new QVBoxLayout(tab);
-    
-    // Initialize section
-    QGroupBox *initGroup = new QGroupBox("Telescope Initialization", tab);
-    QVBoxLayout *initLayout = new QVBoxLayout(initGroup);
-    
-    // Status display
-    QHBoxLayout *statusLayout = new QHBoxLayout();
-    statusLayout->addWidget(new QLabel("Alignment Status:"));
-    alignmentStatusLabel = new QLabel("Unknown", initGroup);
-    statusLayout->addWidget(alignmentStatusLabel);
-    
-    statusLayout->addWidget(new QLabel("Mount Status:"));
-    mountStatusLabel = new QLabel("Unknown", initGroup);
-    statusLayout->addWidget(mountStatusLabel);
-    
-    initLayout->addLayout(statusLayout);
-    
-    // Initialization button
-    QHBoxLayout *initButtonLayout = new QHBoxLayout();
-    initializeButton = new QPushButton("Initialize Telescope", initGroup);
-    connect(initializeButton, &QPushButton::clicked, this, &TelescopeGUI::initializeTelescope);
-    initButtonLayout->addWidget(initializeButton);
-    
-    // Auto align button (if needed later)
-    autoAlignButton = new QPushButton("Start Alignment (if needed)", initGroup);
-    connect(autoAlignButton, &QPushButton::clicked, this, &TelescopeGUI::startTelescopeAlignment);
-    autoAlignButton->setEnabled(false); // Disabled initially
-    initButtonLayout->addWidget(autoAlignButton);
-    
-    initLayout->addLayout(initButtonLayout);
-    
-    mainLayout->addWidget(initGroup);
     
     // Target selection section (existing code)
     QGroupBox *targetGroup = new QGroupBox("Target Selection", tab);
@@ -1285,234 +1671,8 @@ QWidget* TelescopeGUI::createSlewAndImageTab() {
     return tab;
 }
 
-
-// Add this method to TelescopeGUI.cpp:
-QWidget* TelescopeGUI::createAlpacaTab()
-{
-    QWidget *tab = new QWidget();
-    QVBoxLayout *mainLayout = new QVBoxLayout(tab);
-    
-    // Server Control Section
-    QGroupBox *controlGroup = new QGroupBox("Alpaca Server Control", tab);
-    QGridLayout *controlLayout = new QGridLayout(controlGroup);
-    
-    // Port configuration
-    controlLayout->addWidget(new QLabel("Port:"), 0, 0);
-    alpacaPortSpinBox = new QSpinBox(controlGroup);
-    alpacaPortSpinBox->setRange(1024, 65535);
-    alpacaPortSpinBox->setValue(11111); // Default Alpaca port
-    controlLayout->addWidget(alpacaPortSpinBox, 0, 1);
-    
-    // Server name
-    controlLayout->addWidget(new QLabel("Server Name:"), 1, 0);
-    alpacaServerNameEdit = new QLineEdit("Celestron Origin Alpaca Server", controlGroup);
-    controlLayout->addWidget(alpacaServerNameEdit, 1, 1);
-    
-    // Auto-start option
-    alpacaAutoStartCheckBox = new QCheckBox("Auto-start server on application launch", controlGroup);
-    controlLayout->addWidget(alpacaAutoStartCheckBox, 2, 0, 1, 2);
-    
-    // Discovery broadcast option
-    alpacaDiscoveryCheckBox = new QCheckBox("Enable discovery broadcasts", controlGroup);
-    alpacaDiscoveryCheckBox->setChecked(true);
-    controlLayout->addWidget(alpacaDiscoveryCheckBox, 3, 0, 1, 2);
-    
-    // Control buttons
-    QHBoxLayout *buttonLayout = new QHBoxLayout();
-    alpacaStartButton = new QPushButton("Start Server", controlGroup);
-    alpacaStopButton = new QPushButton("Stop Server", controlGroup);
-    alpacaStopButton->setEnabled(false);
-    
-    connect(alpacaStartButton, &QPushButton::clicked, this, &TelescopeGUI::startAlpacaServer);
-    connect(alpacaStopButton, &QPushButton::clicked, this, &TelescopeGUI::stopAlpacaServer);
-    
-    buttonLayout->addWidget(alpacaStartButton);
-    buttonLayout->addWidget(alpacaStopButton);
-    buttonLayout->addStretch();
-    
-    controlLayout->addLayout(buttonLayout, 4, 0, 1, 2);
-    
-    mainLayout->addWidget(controlGroup);
-    
-    // Status Section
-    QGroupBox *statusGroup = new QGroupBox("Server Status", tab);
-    QGridLayout *statusLayout = new QGridLayout(statusGroup);
-    
-    statusLayout->addWidget(new QLabel("Status:"), 0, 0);
-    alpacaStatusLabel = new QLabel("Stopped", statusGroup);
-    alpacaStatusLabel->setStyleSheet("color: red;");
-    statusLayout->addWidget(alpacaStatusLabel, 0, 1);
-    
-    statusLayout->addWidget(new QLabel("Port:"), 1, 0);
-    alpacaPortLabel = new QLabel("N/A", statusGroup);
-    statusLayout->addWidget(alpacaPortLabel, 1, 1);
-    
-    statusLayout->addWidget(new QLabel("Requests:"), 2, 0);
-    alpacaRequestCountLabel = new QLabel("0", statusGroup);
-    statusLayout->addWidget(alpacaRequestCountLabel, 2, 1);
-    
-    mainLayout->addWidget(statusGroup);
-    
-    // Connection Info Section
-    QGroupBox *connectionGroup = new QGroupBox("Connection Information", tab);
-    QVBoxLayout *connectionLayout = new QVBoxLayout(connectionGroup);
-    
-    QLabel *infoLabel = new QLabel(connectionGroup);
-    infoLabel->setText(
-        "<b>Alpaca API Endpoints:</b><br>"
-        "• Telescope: http://localhost:11111/api/v1/telescope/0/<br>"
-        "• Camera: http://localhost:11111/api/v1/camera/0/<br>"
-        "• Management: http://localhost:11111/management/v1/<br><br>"
-        
-        "<b>Compatible Software:</b><br>"
-        "• ASCOM Alpaca clients via bridge<br>"
-        "• SkySafari mobile app<br>"
-        "• Custom scripts using HTTP API<br>"
-        "• Web-based control interfaces<br><br>"
-        
-        "<b>Discovery:</b><br>"
-        "• Broadcasts on UDP port 32227<br>"
-        "• Compatible clients can auto-discover"
-    );
-    infoLabel->setWordWrap(true);
-    connectionLayout->addWidget(infoLabel);
-    
-    mainLayout->addWidget(connectionGroup);
-    
-    // Request Log Section
-    QGroupBox *logGroup = new QGroupBox("Request Log", tab);
-    QVBoxLayout *logLayout = new QVBoxLayout(logGroup);
-    
-    alpacaLogTextEdit = new QTextEdit(logGroup);
-    alpacaLogTextEdit->setMaximumHeight(200);
-    alpacaLogTextEdit->setFont(QFont("Monaco", 10)); // Monospace font
-    logLayout->addWidget(alpacaLogTextEdit);
-    
-    // Log control buttons
-    QHBoxLayout *logButtonLayout = new QHBoxLayout();
-    QPushButton *clearLogButton = new QPushButton("Clear Log", logGroup);
-    QPushButton *saveLogButton = new QPushButton("Save Log", logGroup);
-    
-    connect(clearLogButton, &QPushButton::clicked, this, &TelescopeGUI::clearAlpacaLog);
-    connect(saveLogButton, &QPushButton::clicked, this, &TelescopeGUI::saveAlpacaLog);
-    
-    logButtonLayout->addWidget(clearLogButton);
-    logButtonLayout->addWidget(saveLogButton);
-    logButtonLayout->addStretch();
-    
-    logLayout->addLayout(logButtonLayout);
-    
-    mainLayout->addWidget(logGroup);
-    
-    // Add stretch to push everything up
-    mainLayout->addStretch();
-    
-    return tab;
-}
-
-// Add these slot implementations to TelescopeGUI.cpp:
-
-void TelescopeGUI::startAlpacaServer()
-{
-    int port = alpacaPortSpinBox->value();
-    
-    alpacaLogTextEdit->append(QString("[%1] Starting Alpaca server on port %2...")
-                             .arg(QTime::currentTime().toString())
-                             .arg(port));
-    
-    if (alpacaServer->start(port)) {
-        alpacaLogTextEdit->append(QString("[%1] Server started successfully")
-                                 .arg(QTime::currentTime().toString()));
-    } else {
-        alpacaLogTextEdit->append(QString("[%1] Failed to start server")
-                                 .arg(QTime::currentTime().toString()));
-    }
-}
-
-void TelescopeGUI::stopAlpacaServer()
-{
-    alpacaLogTextEdit->append(QString("[%1] Stopping Alpaca server...")
-                             .arg(QTime::currentTime().toString()));
-    
-    alpacaServer->stop();
-    
-    alpacaLogTextEdit->append(QString("[%1] Server stopped")
-                             .arg(QTime::currentTime().toString()));
-}
-
-void TelescopeGUI::onAlpacaServerStarted()
-{
-    alpacaStatusLabel->setText("Running");
-    alpacaStatusLabel->setStyleSheet("color: green;");
-    alpacaPortLabel->setText(QString::number(alpacaPortSpinBox->value()));
-    
-    alpacaStartButton->setEnabled(false);
-    alpacaStopButton->setEnabled(true);
-    alpacaPortSpinBox->setEnabled(false);
-    
-    alpacaLogTextEdit->append(QString("[%1] Alpaca server is now accepting connections")
-                             .arg(QTime::currentTime().toString()));
-    alpacaLogTextEdit->append(QString("[%1] Discovery broadcasts enabled on UDP port 32227")
-                             .arg(QTime::currentTime().toString()));
-}
-
-void TelescopeGUI::onAlpacaServerStopped()
-{
-    alpacaStatusLabel->setText("Stopped");
-    alpacaStatusLabel->setStyleSheet("color: red;");
-    alpacaPortLabel->setText("N/A");
-    
-    alpacaStartButton->setEnabled(true);
-    alpacaStopButton->setEnabled(false);
-    alpacaPortSpinBox->setEnabled(true);
-}
-
-void TelescopeGUI::onAlpacaRequestReceived(const QString& method, const QString& path)
-{
-    static int requestCount = 0;
-    requestCount++;
-    
-    alpacaRequestCountLabel->setText(QString::number(requestCount));
-    
-    // Add to log with timestamp
-    alpacaLogTextEdit->append(QString("[%1] %2 %3")
-                             .arg(QTime::currentTime().toString())
-                             .arg(method)
-                             .arg(path));
-    
-    // Auto-scroll to bottom
-    alpacaLogTextEdit->verticalScrollBar()->setValue(
-        alpacaLogTextEdit->verticalScrollBar()->maximum());
-}
-
-void TelescopeGUI::clearAlpacaLog()
-{
-    alpacaLogTextEdit->clear();
-    alpacaRequestCountLabel->setText("0");
-}
-
-void TelescopeGUI::saveAlpacaLog()
-{
-    QString fileName = QFileDialog::getSaveFileName(this,
-        "Save Alpaca Log", 
-        QString("alpaca_log_%1.txt").arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss")),
-        "Text Files (*.txt)");
-    
-    if (!fileName.isEmpty()) {
-        QFile file(fileName);
-        if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            QTextStream out(&file);
-            out << alpacaLogTextEdit->toPlainText();
-            
-            alpacaLogTextEdit->append(QString("[%1] Log saved to %2")
-                                     .arg(QTime::currentTime().toString())
-                                     .arg(fileName));
-        }
-    }
-}
-
 void TelescopeGUI::startSlewAndImage() {
-    if (!isConnected) {
+  if (!originBackend->isConnected()) {
         QMessageBox::warning(this, "Not Connected", "Please connect to a telescope first");
         return;
     }
@@ -1589,15 +1749,10 @@ void TelescopeGUI::startSlewAndImage() {
     
     // Send the GotoRaDec command
     QJsonObject gotoCommand;
-    gotoCommand["Command"] = "GotoRaDec";
-    gotoCommand["Destination"] = "Mount";
-    gotoCommand["SequenceID"] = 1000;
-    gotoCommand["Source"] = "QtApp";
-    gotoCommand["Type"] = "Command";
     gotoCommand["Ra"] = raRadians;
     gotoCommand["Dec"] = decRadians;
     
-    sendJsonMessage(gotoCommand);
+    originBackend->sendCommand("GotoRaDec", "Mount", gotoCommand);
 }
 
 void TelescopeGUI::updateSlewAndImageStatus() {
@@ -1624,19 +1779,14 @@ void TelescopeGUI::updateSlewAndImageStatus() {
         
         // Send the RunImaging command
         QJsonObject runImagingCommand;
-        runImagingCommand["Command"] = "RunImaging";
-        runImagingCommand["Destination"] = "TaskController";
-        runImagingCommand["SequenceID"] = 1001;
-        runImagingCommand["Source"] = "QtApp";
-        runImagingCommand["Type"] = "Command";
-        runImagingCommand["Name"] = targetComboBox->currentIndex() == 0 ? 
+        runImagingCommand["Name"] = targetComboBox->currentIndex() == 0 ?
                                   customNameEdit->text() : 
                                   targetComboBox->currentText().split(" - ").at(0);
         runImagingCommand["SaveRawImage"] = true;
         runImagingCommand["Uuid"] = currentImagingTargetUuid;
         
         // Send the command
-        sendJsonMessage(runImagingCommand);
+        originBackend->sendCommand("RunImaging", "TaskController", runImagingCommand);
         
         // Wait for a brief moment to ensure the command is processed
         QTimer::singleShot(500, this, [this]() {
@@ -1675,24 +1825,11 @@ void TelescopeGUI::cancelSlewAndImage() {
     slewAndImageTimer->stop();
     
     // Cancel any ongoing slew
-    QJsonObject cancelCommand;
-    cancelCommand["Command"] = "AbortAxisMovement";
-    cancelCommand["Destination"] = "Mount";
-    cancelCommand["SequenceID"] = 1002;
-    cancelCommand["Source"] = "QtApp";
-    cancelCommand["Type"] = "Command";
-    
-    sendJsonMessage(cancelCommand);
+    originBackend->sendCommand("AbortAxisMovement", "Mount");
     
     // Cancel any imaging
     QJsonObject cancelImagingCommand;
-    cancelImagingCommand["Command"] = "CancelImaging";
-    cancelImagingCommand["Destination"] = "TaskController";
-    cancelImagingCommand["SequenceID"] = 1003;
-    cancelImagingCommand["Source"] = "QtApp";
-    cancelImagingCommand["Type"] = "Command";
-    
-    sendJsonMessage(cancelImagingCommand);
+    originBackend->sendCommand("CancelImaging", "MountTaskController");
     
     // Reset UI
     isSlewingAndImaging = false;
@@ -1713,19 +1850,13 @@ void TelescopeGUI::cancelSlewAndImage() {
 }
 
 void TelescopeGUI::initializeTelescope() {
-    if (!isConnected) {
+  if (!originBackend->isConnected()) {
         QMessageBox::warning(this, "Not Connected", "Please connect to a telescope first");
         return;
     }
     
     // Use the exact initialization command from init.txt
     QJsonObject runInitCommand;
-    runInitCommand["Command"] = "RunInitialize";
-    runInitCommand["Destination"] = "TaskController";
-    runInitCommand["SequenceID"] = 1001;
-    runInitCommand["Source"] = "QtApp";
-    runInitCommand["Type"] = "Command";
-    
     // Get current date and time - you can also use fixed values from init.txt
     QDateTime now = QDateTime::currentDateTime();
     QString dateStr = now.toString("dd MM yyyy");
@@ -1739,34 +1870,21 @@ void TelescopeGUI::initializeTelescope() {
     runInitCommand["Time"] = timeStr; // Or use timeStr for current time
     runInitCommand["TimeZone"] = "Europe/London";
     
-    sendJsonMessage(runInitCommand);
+    originBackend->sendCommand("RunInitialize", "TaskController", runInitCommand);
     
     slewStatusLabel->setText("Initializing telescope...");
     initializeButton->setEnabled(false);
-    
-    // Enable the alignment button after initialization
-    QTimer::singleShot(5000, this, [this]() {
-        autoAlignButton->setEnabled(true);
-        initializeButton->setEnabled(true);
-        slewStatusLabel->setText("Initialization completed. Check alignment status.");
-    });
 }
 
 void TelescopeGUI::startTelescopeAlignment() {
-    if (!isConnected) {
+  if (!originBackend->isConnected()) {
         QMessageBox::warning(this, "Not Connected", "Please connect to a telescope first");
         return;
     }
     
     // Send the StartAlignment command
     QJsonObject alignCommand;
-    alignCommand["Command"] = "StartAlignment";
-    alignCommand["Destination"] = "Mount";
-    alignCommand["SequenceID"] = 1002;
-    alignCommand["Source"] = "QtApp";
-    alignCommand["Type"] = "Command";
-    
-    sendJsonMessage(alignCommand);
+    originBackend->sendCommand("StartAlignment", "Mount", alignCommand);
     
     slewStatusLabel->setText("Starting alignment procedure...");
     
@@ -1776,7 +1894,7 @@ void TelescopeGUI::startTelescopeAlignment() {
 }
 
 void TelescopeGUI::checkMountStatus() {
-    if (!isConnected) {
+  if (!originBackend->isConnected()) {
         alignmentStatusLabel->setText("Not connected");
         mountStatusLabel->setText("Not connected");
         return;
@@ -1804,6 +1922,90 @@ void TelescopeGUI::checkMountStatus() {
     
     // Enable/disable slewing based on status
     bool canSlew = data.mount.isAligned && data.mount.isGotoOver;
-    startSlewButton->setEnabled(canSlew && !isSlewingAndImaging);
+    startSlewButton->setEnabled(!isSlewingAndImaging);
 }
 
+static const int SLEW_RATE = 9;
+
+void TelescopeGUI::slew(int alt, int az)
+{
+QJsonObject slewCommand;
+    slewCommand["AltRate"] = alt;  // Positive for up
+    slewCommand["AzmRate"] = az;
+    originBackend->sendCommand("Slew", "Mount", slewCommand);
+    qDebug() << "Slew: " << alt << az;
+}
+
+void TelescopeGUI::cancelSlew()
+{
+  slewTimer->stop();
+  slewTimer->start();
+}
+
+void TelescopeGUI::onSlewCancel()
+{
+  slew(0, 0);
+}
+
+void TelescopeGUI::startUpButton()
+{
+    qDebug() << "Up Button - Starting upward slew";
+    slew(SLEW_RATE, 0);
+    cancelSlew();
+}
+
+void TelescopeGUI::startDownButton()
+{
+    qDebug() << "Down Button - Starting downward slew";
+    
+    slew(-SLEW_RATE, 0);  // Negative for down
+    cancelSlew();
+}
+
+void TelescopeGUI::startLeftButton()
+{
+    qDebug() << "Left Button - Starting leftward slew";
+    
+    slew(0, -SLEW_RATE);  // Negative for left (counterclockwise)
+    cancelSlew();
+
+}
+
+void TelescopeGUI::startRightButton()
+{
+    qDebug() << "Right Button - Starting rightward slew";
+    
+    slew(0, SLEW_RATE);  // Positive for right (clockwise)
+    cancelSlew();
+}
+
+void TelescopeGUI::onTrackingError(const QString& error)
+{
+    QMessageBox::warning(this, "Tracking Error", error);
+}
+
+void TelescopeGUI::showLogReplay()
+{
+    if (!m_logReplayDialog) {
+        m_logReplayDialog = new LogReplayDialog(dataProcessor, this);
+        
+        // Connect signals to update main GUI as replay progresses
+        connect(m_logReplayDialog, &LogReplayDialog::messageProcessed,
+                this, [this](const LogEntry& entry, bool success) {
+            if (success) {
+                // Update displays as if receiving real data
+                updateMountDisplay();
+                updateCameraDisplay();
+                updateFocuserDisplay();
+                updateEnvironmentDisplay();
+                updateImageDisplay();
+                updateDiskDisplay();
+                updateDewHeaterDisplay();
+            }
+        });
+    }
+    
+    m_logReplayDialog->show();
+    m_logReplayDialog->raise();
+    m_logReplayDialog->activateWindow();
+}

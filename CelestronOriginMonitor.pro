@@ -1,5 +1,5 @@
 ######################################################################
-# Celestron Origin Monitor .pro file for macOS/XCode with Alpaca Server
+# Celestron Origin Monitor .pro file for macOS/XCode
 ######################################################################
 
 # Project configuration
@@ -13,47 +13,59 @@ RCC_DIR = build/rcc
 UI_DIR = build/ui
 
 # macOS specific settings
-CONFIG += app_bundle
-QMAKE_MACOSX_DEPLOYMENT_TARGET = 13.0  # Updated to match your existing setting
+CONFIG += app_bundle sdk_no_version_check
 QMAKE_INFO_PLIST = Info.plist
+# QMAKE_LFLAGS += -Wl,--allow-multiple-definition
 
 # Include path
 INCLUDEPATH += .
+INCLUDEPATH += /opt/homebrew/include
 
 # Enable modern C++ features
 CONFIG += c++17
+QMAKE_CXXFLAGS += -g
 
-# Qt modules - ADDED httpserver for Alpaca support
-QT += core widgets network websockets httpserver
+# Qt modules
+QT += core widgets network websockets
 
 # Original source files
 SOURCES += \
     main.cpp \
+    CoordinateUtils.cpp \
     TelescopeDataProcessor.cpp \
-    CommandInterface.cpp \
-    TelescopeGUI.cpp
-
-# NEW: Add Alpaca server sources
-SOURCES += \
+    TelescopeGUI.cpp \
     OriginBackend.cpp \
-    AlpacaServer.cpp
+    LogReplayDialog.cpp \
+    CommandInterface.cpp \
+    ControlServer.cpp \
+    Sequencer.cpp \
+    FocusAnalyzer.cpp \
+    SkyFrame.cpp \
+    Registration.cpp \
+    LiveStacker.cpp \
+    SkyMonitor.cpp \
+    Astro.cpp \
 
 # Original header files
 HEADERS += \
+    ControlServer.hpp \
+    Sequencer.hpp \
+    FocusAnalyzer.hpp \
+    SkyFrame.hpp \
+    Registration.hpp \
+    LiveStacker.hpp \
+    SkyMonitor.hpp \
+    Astro.hpp \
+    CoordinateUtils.hpp \
+    MessierCatalog.hpp \
+    DataDir.hpp \
     TelescopeData.hpp \
     TelescopeDataProcessor.hpp \
-    CommandInterface.hpp \
-    TelescopeGUI.hpp
-
-# NEW: Add Alpaca server headers  
-HEADERS += \
+    TelescopeGUI.hpp \
     OriginBackend.hpp \
-    AlpacaServer.hpp
-
-# Optional: Add AutoDownloader if you want download functionality in Alpaca
-# SOURCES += AutoDownloader.cpp
-# HEADERS += AutoDownloader.hpp
-
+    LogReplayDialog.hpp \
+    CommandInterface.hpp \
+    
 # Default rules
 qnx: target.path = /tmp/$${TARGET}/bin
 else: unix:!android: target.path = /opt/$${TARGET}/bin
@@ -68,15 +80,14 @@ macx {
     QMAKE_LFLAGS += -Wl,-rpath,@executable_path/../Frameworks
     
     # For XCode build
-    CONFIG += debug_and_release build_all relative_qt_rpath
+    CONFIG += build_all relative_qt_rpath
     
     # Bundle identifier
     QMAKE_TARGET_BUNDLE_PREFIX = com.yourdomain
     QMAKE_BUNDLE = CelestronOriginMonitor
     
     # Deployment target
-    QMAKE_MACOSX_DEPLOYMENT_TARGET = 13.0
-    QMAKE_LFLAGS += -Wl,-rpath,@executable_path/../Frameworks
+    QMAKE_MACOSX_DEPLOYMENT_TARGET = 15.0
 }
 
 # Post-build deployment
@@ -94,18 +105,3 @@ macx {
     QMAKE_EXTRA_TARGETS += deploy
     POST_TARGETDEPS += deploy
 }
-
-# NEW: Optional configuration flags for Alpaca features
-# Uncomment these if you want to enable specific features
-
-# Enable comprehensive logging
-# DEFINES += ALPACA_DEBUG_LOGGING
-
-# Enable auto-discovery broadcast
-# DEFINES += ALPACA_DISCOVERY_ENABLED
-
-# Enable image download support
-# DEFINES += ALPACA_IMAGE_SUPPORT
-
-# Set default Alpaca port (can be overridden at runtime)
-# DEFINES += ALPACA_DEFAULT_PORT=11111

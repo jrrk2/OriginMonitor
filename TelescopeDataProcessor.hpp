@@ -64,6 +64,9 @@ signals:
     /** Signal emitted when orientation status is updated */
     void orientationStatusUpdated();
     
+    /** Signal emitted when orientation status is updated */
+    void taskControllerStatusUpdated();
+    
 private:
     /** The telescope data */
     TelescopeData telescopeData;
@@ -115,4 +118,9 @@ private:
      * @param obj The JSON object containing orientation data
      */
     void updateOrientationStatus(const QJsonObject &obj);
+      /**
+     * @brief Update task controller status from JSON
+     * @param obj The JSON object containing task controller data
+     */
+    void updateTaskControllerStatus(const QJsonObject &obj);
 };

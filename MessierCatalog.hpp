@@ -5,7 +5,7 @@
 #include <QStringList>
 #include <QMap>
 
-struct SkyPosition {
+struct MessierSkyPosition {
     double ra_deg;
     double dec_deg;
     QString name;
@@ -44,7 +44,7 @@ struct MessierObject {
     QString common_name;
     MessierObjectType object_type;
     Constellation constellation;
-    SkyPosition sky_position;  // Converted from RA hours/Dec degrees
+    MessierSkyPosition sky_position;  // Converted from RA hours/Dec degrees
     float magnitude;
     float distance_kly;
     QSizeF size_arcmin;  // width, height in arcminutes
@@ -67,7 +67,7 @@ public:
 private:
     static QList<MessierObject> m_catalog;
     static void initializeCatalog();
-    static SkyPosition createSkyPosition(double ra_hours, double dec_degrees, 
+    static MessierSkyPosition createSkyPosition(double ra_hours, double dec_degrees, 
                                        const QString& name, const QString& description);
 };
 
@@ -642,9 +642,9 @@ void MessierCatalog::initializeCatalog() {
     };
 }
 
-SkyPosition MessierCatalog::createSkyPosition(double ra_hours, double dec_degrees, 
+MessierSkyPosition MessierCatalog::createSkyPosition(double ra_hours, double dec_degrees, 
                                             const QString& name, const QString& description) {
-    SkyPosition pos;
+    MessierSkyPosition pos;
     pos.ra_deg = raHoursToDegrees(ra_hours);  // Convert RA hours to degrees
     pos.dec_deg = dec_degrees;
     pos.name = name;

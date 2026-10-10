@@ -1,6 +1,5 @@
 #pragma once
 
-class AlpacaServer;
 class OriginBackend;
 
 #include <QMainWindow>
@@ -31,11 +30,14 @@ class OriginBackend;
 #include <QTextEdit>
 #include <QCheckBox>
 #include <QScrollBar>
+#include <QMenuBar>
 #include <QFileDialog>
+#include <QMessageBox>
+#include <QFrame>
 
 #include "TelescopeDataProcessor.hpp"
 #include "CommandInterface.hpp"
-#include "AutoDownloader.hpp"
+#include "LogReplayDialog.hpp"
 
 /**
  * @brief Main application window for the telescope monitor
@@ -49,14 +51,19 @@ public:
      * @param parent The parent widget
      */
     TelescopeGUI(QWidget *parent = nullptr);
-    
-    /**
-     * @brief Send a JSON message to the telescope
-     * @param obj The JSON object to send
-     */
-    void sendJsonMessage(const QJsonObject &obj);
+    OriginBackend* originBackend;
     
 private slots:
+    void showLogReplay();
+    void updateTaskControllerDisplay();
+    void startUpButton();
+    void startDownButton();
+    void startLeftButton();
+    void startRightButton();
+    void slew(int ,int);
+    void cancelSlew();
+    void onTrackingError(const QString& error);
+    void onSlewCancel(); // cancel slew after delay
     /**
      * @brief Start discovery of telescopes
      */
@@ -129,64 +136,9 @@ private slots:
     void updateDewHeaterDisplay();
     
     /**
-     * @brief Update the orientation display
-     */
-    void updateOrientationDisplay();
-    
-    /**
      * @brief Update the time display
      */
     void updateTimeDisplay();
-    /**
-     * @brief Start automatic download of observations
-     */
-    void startAutomaticDownload();
-    
-    /**
-     * @brief Stop automatic download of observations
-     */
-    void stopAutomaticDownload();
-    
-    /**
-     * @brief Update download progress
-     * @param currentFile The current file being downloaded
-     * @param filesCompleted The number of files completed
-     * @param totalFiles The total number of files to download
-     * @param bytesReceived The number of bytes received for the current file
-     * @param bytesTotal The total number of bytes for the current file
-     */
-    void updateDownloadProgress(const QString &currentFile, int filesCompleted, 
-                              int totalFiles, qint64 bytesReceived, qint64 bytesTotal);
-    
-    /**
-     * @brief Handle when a directory download starts
-     * @param directory The name of the directory
-     */
-    void onDirectoryDownloadStarted(const QString &directory);
-    
-    /**
-     * @brief Handle when a file download starts
-     * @param fileName The name of the file
-     */
-    void onFileDownloadStarted(const QString &fileName);
-    
-    /**
-     * @brief Handle when a file has been downloaded
-     * @param fileName The name of the file
-     * @param success Whether the download was successful
-     */
-    void onFileDownloaded(const QString &fileName, bool success);
-    
-    /**
-     * @brief Handle when a directory has been downloaded
-     * @param directory The name of the directory
-     */
-    void onDirectoryDownloaded(const QString &directory);
-    
-    /**
-     * @brief Handle when all downloads are complete
-     */
-    void onAllDownloadsComplete();
 
     void startSlewAndImage();
     void cancelSlewAndImage();
@@ -196,24 +148,41 @@ private slots:
     void startTelescopeAlignment();
     void checkMountStatus();
 
-    void startAlpacaServer();
-    void stopAlpacaServer();
-    void onAlpacaServerStarted();
-    void onAlpacaServerStopped();
-    void onAlpacaRequestReceived(const QString& method, const QString& path);
-    void clearAlpacaLog();
-    void saveAlpacaLog();
+    // snaphot camera slots
+    void onCameraModeChanged(bool isManual);
+    void onCaptureParametersChanged(double exposure, int iso);
+    void onSnapshotReady(const QString& fileLocation, double ra, double dec);
+    void onSnapshotDownloaded(const QString& localPath);
+    void onSnapshotDownloadProgress(qint64 bytesReceived, qint64 bytesTotal);
 
 private:
+    // Task Controller tab widgets
+    QLabel *taskStateLabel;
+    QLabel *taskStageLabel;
+    QLabel *taskReadyLabel;
+    QLabel *taskCurrentStepLabel;
+    QLabel *taskNumPointsLabel;
+    QProgressBar *taskProgressBar;
+    QLabel *taskFocusPositionLabel;
+    QProgressBar *taskFocusProgressBar;
+    QLabel *taskImagingNameLabel;
+    QLabel *taskLastUpdateLabel;
+
+    // UI elements
+    QLineEdit* cometNameEdit;
+    QPushButton* startTrackingButton;
+    QPushButton* stopTrackingButton;
+    QSpinBox* updateIntervalSpinBox;
+    QLabel* cometRaLabel;
+    QLabel* cometDecLabel;
+    QLabel* cometAltLabel;
+    QLabel* cometAzLabel;
+    QLabel* cometObservableLabel;
+  
     /**
      * @brief Set up the UI elements
      */
     void setupUI();
-    
-    /**
-     * @brief Set up the WebSocket
-     */
-    void setupWebSocket();
     
     /**
      * @brief Set up the UDP discovery
@@ -253,14 +222,12 @@ private:
     QWidget* createImageTab();
     QWidget* createDiskTab();
     QWidget* createDewHeaterTab();
-    QWidget* createOrientationTab();
     QWidget* createCommandTab();
-    QWidget* createDownloadTab();
     QWidget* createSlewAndImageTab();
-    
+    QWidget* createTaskControllerTab();
+  
     // Class members
     TelescopeDataProcessor *dataProcessor;
-    QWebSocket *webSocket;
     QUdpSocket *udpSocket;
     
     // UI elements
@@ -271,9 +238,9 @@ private:
     // State variables
     QStringList telescopeAddresses;
     QString connectedIpAddress;
-    bool isConnected = false;
     
     // Mount tab widgets
+    QLabel *mountBatteryCurrentLabel;
     QLabel *mountBatteryLevelLabel;
     QLabel *mountBatteryVoltageLabel;
     QLabel *mountChargerStatusLabel;
@@ -286,6 +253,10 @@ private:
     QLabel *mountIsTrackingLabel;
     QLabel *mountIsGotoOverLabel;
     QLabel *mountNumAlignRefsLabel;
+    QLabel *mountAltitudeLabel;
+    QLabel *mountAzimuthLabel;
+    QLabel *mountAltitudeErrorLabel;
+    QLabel *mountAzimuthErrorLabel;
     QLabel *mountLastUpdateLabel;
     
     // Camera tab widgets
@@ -323,11 +294,19 @@ private:
     QLabel *imageTypeLabel;
     QLabel *imageDecLabel;
     QLabel *imageRaLabel;
-    QLabel *imageOrientationLabel;
     QLabel *imageFovXLabel;
     QLabel *imageFovYLabel;
     QLabel *imageLastUpdateLabel;
     QLabel *imagePreviewLabel;
+    QString m_snapshotSavePath;
+    
+    // Camera control UI widgets
+    QDoubleSpinBox* exposureSpinBox;
+    QSpinBox* binningSpinBox;
+    QSpinBox* isoSpinBox;
+    QPushButton* snapshotButton;
+    QPushButton* continuousButton;
+    QProgressBar* snapshotProgressBar;
     
     // Disk tab widgets
     QLabel *diskCapacityLabel;
@@ -345,26 +324,6 @@ private:
     QProgressBar *dewHeaterLevelBar;
     QLabel *dewHeaterLastUpdateLabel;
     
-    // Orientation tab widgets
-    QLabel *orientationAltitudeLabel;
-    QLabel *orientationLastUpdateLabel;
-
-    CommandInterface *commandInterface;
-
-   // Download tab widgets
-    QLineEdit *downloadPathEdit;
-    QPushButton *browseButton;
-    QPushButton *startDownloadButton;
-    QPushButton *stopDownloadButton;
-    QProgressBar *overallProgressBar;
-    QProgressBar *currentFileProgressBar;
-    QLabel *currentFileLabel;
-    QListWidget *downloadLogList;
-    
-    // Auto downloader
-    AutoDownloader *autoDownloader;
-    bool isDownloading = false;
-
     // Add more private members for the new tab
     QComboBox *targetComboBox;
     QLineEdit *customRaEdit;
@@ -377,6 +336,7 @@ private:
     QLabel *slewStatusLabel;
     QTimer *slewAndImageTimer;
     QTimer *statusUpdateTimer;
+    QTimer *slewTimer;
     bool isSlewingAndImaging = false;
     int imagingTimeRemaining = 0;
     QString currentImagingTargetUuid;
@@ -384,27 +344,9 @@ private:
     QLabel *alignmentStatusLabel;
     QLabel *mountStatusLabel;
     QPushButton *initializeButton;
-    QPushButton *autoAlignButton;
 
-    // NEW: Alpaca server integration
-    AlpacaServer* alpacaServer;
-    OriginBackend* originBackend;
-    
-    // Alpaca tab widgets
-    QPushButton* alpacaStartButton;
-    QPushButton* alpacaStopButton;
-    QLabel* alpacaStatusLabel;
-    QLabel* alpacaPortLabel;
-    QSpinBox* alpacaPortSpinBox;
-    QLineEdit* alpacaServerNameEdit;
-    QTextEdit* alpacaLogTextEdit;
-    QLabel* alpacaRequestCountLabel;
-    QCheckBox* alpacaAutoStartCheckBox;
-    QCheckBox* alpacaDiscoveryCheckBox;
-
-    QWidget* createAlpacaTab();
-    
     bool debug = false;
+    LogReplayDialog* m_logReplayDialog;
 
   
 };
