@@ -3,7 +3,7 @@
 #include "Registration.hpp"
 #include "SkyFrame.hpp"
 
-#include <QImage>
+#include "Image16.hpp"
 #include <QJsonObject>
 #include <QString>
 #include <vector>
@@ -43,7 +43,7 @@ public:
     const std::vector<SkyStar>& referenceStars() const { return m_refStars; }
     int referenceFrameWidth() const { return m_w; }
     int referenceFrameHeight() const { return m_h; }
-    QImage preview() const;                                // stretched (16 bits per channel, Format_RGBX64), cropped to the well-covered area
+    Image16 preview() const;                               // stretched (16 bits per channel), cropped to the well-covered area
     QJsonObject summary() const;
 
     bool save(const QString& dir) const;                   // state.bin + preview.png

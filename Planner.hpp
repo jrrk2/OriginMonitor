@@ -1,0 +1,44 @@
+#pragma once
+
+#include "Astro.hpp"
+
+#include <QDate>
+#include <QDateTime>
+#include <QJsonObject>
+#include <QList>
+#include <QString>
+
+/**
+ * Offline observing planner and exposure limits (no telescope connection needed). C++ replacement for tools/schedule.py and tools/fieldrot.py.
+ * Sun, Moon and target altitudes come from Astro.cpp (low precision: ample for "is it dark, is it above the local horizon").
+ */
+namespace Planner {
+
+struct Options {
+    QDate date;                                   // local evening date; invalid = the evening whose night we are in now
+    Astro::Site site;
+    QString horizonFile;                          // JSON {"points": [[az_deg, min_alt_deg], ...]}; empty = flat at minAlt
+    QString skyMapFile;                           // sky_map.json from SkyMonitor; empty = none
+    double minAlt = 20, sunAlt = -18, moonSep = 30, minBlockMin = 45, maxBlockMin = 150, stepMin = 5;
+    int top = 25;
+    QString timeZone = "Europe/London";
+};
+
+/// Whole-night plan as JSON: {ok, night, dark_start, dark_end, moon_illumination, horizon, plan[], targets[]} with ISO-8601 UTC times.
+QJsonObject schedule(const Options& o);
+/// Human-readable table of the same thing.
+QString scheduleText(const QJsonObject& s, int top);
+/// The evening date that "now" belongs to (before noon we are still in last evening's night).
+QDate currentNightDate(const QString& timeZone);
+/// Look a target up by key ("M31") or name among those observable tonight (minBlockMin 0); returns the target object or {ok:false}.
+QJsonObject findTarget(const Options& o, const QString& name);
+/// Locate tools/horizon.json: $ORIGIN_HORIZON, ./tools, then next to the executable.
+QString defaultHorizonFile();
+
+/// Field-rotation limit for an alt-az mount. Table over `hours` from now, every 30 minutes: {ok, rows:[{utc, alt, az, rotation_deg_per_hour, t_max_s, t_max_1px_s}]}.
+QJsonObject fieldRotation(double raHours, double decDeg, const Astro::Site& site, double tolPx, double hours);
+/// Longest exposure (s) that keeps corner trail under tolPx at one instant; infinity when the target is due east/west. Returns alt/az/rotation too.
+struct RotLimit { double tMax, alt, az, rotDegPerHour; };
+RotLimit maxExposure(double raHours, double decDeg, const Astro::Site& site, const QDateTime& utc, double tolPx);
+
+}   // namespace Planner

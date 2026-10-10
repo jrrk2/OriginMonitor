@@ -11,6 +11,18 @@
 
 OriginBackend::OriginBackend(QObject *parent)
     : QObject(parent)
+    , m_nextSequenceId(2000)
+    , m_webSocket(nullptr)
+    , m_dataProcessor(nullptr)
+    , m_networkManager(nullptr)
+    , m_statusTimer(nullptr)
+    , m_pingTimer(nullptr)
+    , m_parkMonitorTimer(nullptr)
+    , m_connectedPort(80)
+    , m_isExposing(false)
+    , m_imageReady(false)
+    , m_logFile(nullptr)
+    , m_logStream(nullptr)
     , m_cameraManualMode(false)
     , m_currentExposure(0.1)
     , m_currentISO(200)
@@ -19,22 +31,10 @@ OriginBackend::OriginBackend(QObject *parent)
     , m_lastImageRa(0)
     , m_lastImageDec(0)
     , m_lastImageExposure(0)
-    , m_webSocket(nullptr)
-    , m_dataProcessor(nullptr)
-    , m_networkManager(nullptr)
-    , m_statusTimer(nullptr)
-    , m_pingTimer(nullptr)
-    , m_connectedPort(80)
-    , m_isExposing(false)
-    , m_imageReady(false)
-    , m_nextSequenceId(2000)
-    , m_logFile(nullptr)
-    , m_logStream(nullptr)
     , m_statusRotation(0)
     , m_parkingInProgress(false)
     , m_unparkingInProgress(false)
     , m_targetAltitude(0.0)
-    , m_parkMonitorTimer(nullptr)
 {
     m_webSocket = new QWebSocket("", QWebSocketProtocol::VersionLatest, this);
     m_dataProcessor = new TelescopeDataProcessor(this);
@@ -52,12 +52,12 @@ OriginBackend::OriginBackend(QObject *parent)
     connect(m_webSocket, &QWebSocket::textMessageReceived, this, &OriginBackend::onTextMessageReceived);
 
     // ADD THESE - WebSocket ping/pong handling:
-    connect(m_webSocket, &QWebSocket::pong, this, [this](quint64 elapsedTime, const QByteArray &payload) {
+    connect(m_webSocket, &QWebSocket::pong, this, [this](quint64 elapsedTime, const QByteArray &) {
         qDebug() << "Pong received, RTT:" << elapsedTime << "ms";
         logWebSocketMessage("PONG", QString("RTT: %1ms").arg(elapsedTime));
     });
     
-    connect(m_webSocket, QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error),
+    connect(m_webSocket, &QWebSocket::errorOccurred,
             this, [this](QAbstractSocket::SocketError error) {
         qWarning() << "WebSocket error:" << error << m_webSocket->errorString();
         logWebSocketMessage("ERROR", QString("Code: %1, Message: %2")
@@ -642,6 +642,7 @@ bool OriginBackend::isImageReady() const
     return m_imageReady;
 }
 
+#ifndef ORIGIN_NO_GUI
 QImage OriginBackend::getLastImage() const
 {
     return m_lastImage;
@@ -651,6 +652,8 @@ void OriginBackend::setLastImage(const QImage& image)
 {
     m_lastImage = image;
 }
+
+#endif
 
 void OriginBackend::setImageReady(bool ready)
 {
@@ -717,6 +720,7 @@ bool OriginBackend::setCameraISO(int iso)
     return true;
 }
 
+#ifndef ORIGIN_NO_GUI
 QImage OriginBackend::singleShot(int gain, int binning, int exposureTimeMicroseconds)
 {
     if (!isConnected()) {
@@ -773,6 +777,7 @@ QImage OriginBackend::singleShot(int gain, int binning, int exposureTimeMicrosec
         return QImage();
     }
 }
+#endif
 
 // Also log connection events by modifying these methods:
 void OriginBackend::onWebSocketConnected()
@@ -1029,8 +1034,9 @@ void OriginBackend::updateStatusFromProcessor()
 void OriginBackend::requestImage(const QString &filePath, bool isSnapshot) {
     if (m_connectedHost.isEmpty()) return;
     
+    const QString hostPort = m_connectedPort == 80 ? m_connectedHost : QString("%1:%2").arg(m_connectedHost).arg(m_connectedPort);
     QString fullPath = QString("http://%1/SmartScope-1.0/dev2/%2")
-                       .arg(m_connectedHost, filePath);
+                       .arg(hostPort, filePath);
     QUrl url(fullPath);
     QNetworkRequest request(url);
     
@@ -1081,9 +1087,13 @@ void OriginBackend::requestImage(const QString &filePath, bool isSnapshot) {
                 // Live stream - could emit different signal or handle directly
                 // For now, your existing code handles this
 		// Try to load as an image
+#ifndef ORIGIN_NO_GUI
 		QImage image;
 		if (image.loadFromData(imageData)) {
 		    m_lastImage = image;
+#else
+		if (!imageData.isEmpty()) {                 // headless build: no image decoder, the encoded bytes are passed on as they are
+#endif
 		    m_imageReady = true;
 
 		    if (false) qDebug() << "Image downloaded successfully, size:" << imageData.size() << "bytes";

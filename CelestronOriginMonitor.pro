@@ -43,6 +43,7 @@ SOURCES += \
     SkyFrame.cpp \
     Registration.cpp \
     LiveStacker.cpp \
+    Image16.cpp \
     SkyMonitor.cpp \
     Astro.cpp \
 
@@ -54,6 +55,7 @@ HEADERS += \
     SkyFrame.hpp \
     Registration.hpp \
     LiveStacker.hpp \
+    Image16.hpp \
     SkyMonitor.hpp \
     Astro.hpp \
     CoordinateUtils.hpp \

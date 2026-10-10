@@ -1,0 +1,17 @@
+# systemd user service: systemctl --user enable --now originheadless
+# Edit ExecStart (binary path, telescope host) and the data directory first.
+[Unit]
+Description=Celestron Origin headless control daemon
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=ORIGIN_DATA_DIR=/mnt/fits-backup/claude
+ExecStart=%h/OriginMonitor/build/headless/build/OriginHeadless serve --connect 192.168.1.195 --pidfile %t/originheadless.pid
+Restart=on-failure
+RestartSec=10
+# SIGTERM makes the server stop any sequence and save the live stack before exiting
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

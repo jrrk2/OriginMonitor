@@ -68,6 +68,13 @@ void ControlServer::onReadyRead()
     m_busy.remove(key);
 }
 
+void ControlServer::shutdown()
+{
+    if (m_seq->active()) m_seq->stop("app quitting");
+    m_backend->sky().saveStack();
+    QTimer::singleShot(100, qApp, &QCoreApplication::quit);
+}
+
 QJsonObject ControlServer::fail(const QString& message)
 {
     return QJsonObject{{"ok", false}, {"error", message}};
@@ -261,7 +268,49 @@ QJsonObject ControlServer::doFocuserMove(const QJsonObject& req)
     return QJsonObject{{"ok", false}, {"error", "move did not complete"}, {"from", current}, {"now", cur["Position"].toInt()}};
 }
 
+int ControlServer::cacheTtlMs(const QString& cmd)
+{
+    static const QHash<QString, int> ttl = {{"status", 2000}, {"mount_status", 2000}, {"focuser_status", 2000}, {"focuser_settings", 30000}, {"focus_status", 1000},
+                                            {"analysis", 1000}, {"events", 1000}, {"sky_map", 30000}, {"target", 2000}};
+    return ttl.value(cmd, 0);
+}
+
 QJsonObject ControlServer::handle(const QJsonObject& req)
+{
+    const QString cmd = req["cmd"].toString();
+    if (cmd == "cache") {
+        if (req["clear"].toBool()) m_cache.clear();
+        return QJsonObject{{"ok", true}, {"enabled", m_cacheOn}, {"entries", m_cache.size()}, {"hits", double(m_hits)}, {"misses", double(m_misses)}};
+    }
+    if (cmd == "commands" || cmd == "help")
+        return QJsonObject{{"ok", true}, {"note", "server commands; the OriginHeadless CLI has a fuller catalogue: OriginHeadless commands"},
+                           {"commands", QJsonArray{"ping", "connect", "status", "manual", "auto", "set", "snapshot", "mount_status", "goto", "focus_status", "analysis", "events", "target", "stack",
+                                                   "sky_map", "monitor", "focuser_status", "focuser_move", "focuser_settings", "initialize", "sequence", "send", "cache", "quit"}}};
+    int ttl = cacheTtlMs(cmd);
+    if (cmd == "target" && req.contains("name")) ttl = 0;                       // that form changes the target
+    if (!m_cacheOn || ttl == 0) {
+        if (cmd != "ping") m_cache.clear();                                      // anything that may change state invalidates what was cached
+        return handleUncached(req);
+    }
+    QJsonObject keyObj = req; keyObj.remove("fresh");
+    const QByteArray key = QJsonDocument(keyObj).toJson(QJsonDocument::Compact);
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (!req["fresh"].toBool()) {
+        const auto it = m_cache.constFind(key);
+        if (it != m_cache.constEnd() && now - it->atMs < ttl) {
+            ++m_hits;
+            QJsonObject r = it->reply; r["cached"] = true; r["age_ms"] = double(now - it->atMs);
+            return r;
+        }
+    }
+    ++m_misses;
+    QJsonObject r = handleUncached(req);
+    if (r["ok"].toBool()) m_cache[key] = {r, QDateTime::currentMSecsSinceEpoch()};
+    r["cached"] = false;
+    return r;
+}
+
+QJsonObject ControlServer::handleUncached(const QJsonObject& req)
 {
     const QString cmd = req["cmd"].toString();
 
@@ -370,7 +419,7 @@ QJsonObject ControlServer::handle(const QJsonObject& req)
         return r.isEmpty() ? fail("no response") : QJsonObject{{"ok", true}, {"response", r}};
     }
 
-    if (cmd == "quit") { m_seq->stop("app quitting"); m_backend->sky().saveStack(); QTimer::singleShot(100, qApp, &QCoreApplication::quit); return QJsonObject{{"ok", true}}; }
+    if (cmd == "quit") { shutdown(); return QJsonObject{{"ok", true}}; }
 
     return fail("unknown command: " + cmd);
 }

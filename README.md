@@ -297,3 +297,22 @@ or open.
 * Whether the sample ISO follows the capture request or the live `set iso`. (`RunImaging` is not an option for the per-frame overhead: it never deletes downloaded subs, so the telescope's disk clogs, and it offers no per-frame quality check.)
 * Measure the real horizon (the south buildings were assumed 35 degrees).
 * A proper automated test of the sequencer against the simulator (`OriginSimulator` serves TIFF/JPEG, not raw FITS, so it cannot exercise the analyser yet).
+
+## OriginHeadless: GUI-free server, CLI and daemon
+
+`OriginHeadless` is a separate executable (`OriginHeadless.pro`) that links only QtCore, QtNetwork and QtWebSockets, with no Qt GUI or Widgets, so it runs on a machine with no display. One binary is the server, the command-line client and the planner.
+
+```
+mkdir -p build/headless && cd build/headless && qmake6 ../../OriginHeadless.pro && make
+B=build/OriginHeadless
+$B serve --connect 192.168.1.195                       # foreground
+$B serve --connect 192.168.1.195 --daemon --pidfile /run/user/1000/oh.pid --log-file ~/originheadless.log
+$B status | $B mount | $B goto 1.78 61.23 | $B schedule --text | $B now | $B go M31 | $B park
+$B commands                                            # machine-readable catalogue (arguments, which commands move hardware)
+```
+
+* Every command prints exactly one JSON object on stdout (progress on stderr); exit 0 = `ok:true`, 1 = `ok:false`, 2 = usage error.
+* The daemon accepts many simultaneous clients on 127.0.0.1. Read-only queries (status, mount, focuser, focus, analysis, sky-map) are answered from a 1-30 s cache with `"cached":true,"age_ms":n`; any other command flushes it. Use `--fresh` (or `"fresh":true`) to bypass, `cache` for statistics, `serve --no-cache` to disable.
+* `SIGTERM`/`SIGINT` stop a running sequence, save the live stack and exit; `--pidfile` refuses a second instance. A systemd user unit is in `contrib/originheadless.service`.
+* Integrated from the Python helpers: `originctl.py` (all commands, `focus-sweep` scored in-process), `schedule.py`, `fieldrot.py`, `nightrun.py` (`now`, `go`, `park`). Not integrated (they need OpenCV/scikit-image/matplotlib/fpack, or are one-off analyses): `planets.py`, `moon.py`, `planet_triptych.py`, `saturn_*.py`, `isoanalysis.py`, `starshape.py`, `focus_vs_temperature.py`, `fits_*backup.py`. `--headless` on the GUI app still works.
+* Tested against `jrrk2/OriginSimulator` (which now serves raw FITS snapshots): `serve --connect 127.0.0.1 --telescope-port 8080` with the simulator listening on a high port.

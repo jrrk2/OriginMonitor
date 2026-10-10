@@ -274,7 +274,7 @@ double CoordinateUtils::localSiderealTime(double longitude, double jd)
 }
 
 std::tuple<double, double, double> CoordinateUtils::raDecToAltAz(
-    double ra, double dec, double latitude, double longitude, double lst)
+    double ra, double dec, double latitude, double /*longitude*/, double lst)
 {
     double alt, az, ha;
     CoordinateUtilsJSStyle::getAltazTrig(ra, dec, lst, latitude, alt, az, ha);
@@ -356,7 +356,7 @@ void CoordinateUtils::blindAltAzToEquatorial(double alt, double az, double latit
 }
 
 std::tuple<double, double, double> CoordinateUtils::altAzToRaDec(
-    double alt, double az, double latitude, double longitude, double lst)
+    double alt, double az, double latitude, double /*longitude*/, double lst)
 {
     // Apply refraction correction
     double trueAlt = alt - CoordinateUtilsJSStyle::calcRefractionFromTrue(alt * RAD_TO_DEG);
