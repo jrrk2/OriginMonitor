@@ -41,7 +41,7 @@ QJsonObject Sequencer::start(const QJsonObject& req)
     m_cFoc = connect(m_b, &OriginBackend::focusEvaluated, this, &Sequencer::onFocus);
     m_cMsg = connect(m_b, &OriginBackend::messageReceived, this, &Sequencer::onMessage);
     m_active = true;
-    if (req["resend_params"].toBool(false) == false) m_b->setResendCaptureParams(false);
+    if (!req["resend_params"].toBool(true)) m_b->setResendCaptureParams(false);     // the FITS format is only kept when the parameters are resent every cycle
     m_b->recordEvent("sequence_started", QString("exposure %1 s ISO %2, pipeline %3").arg(m_exposure).arg(m_iso).arg(m_pipeline ? "on" : "off"));
     requestFrame();
     return QJsonObject{{"ok", m_active}, {"status", status()}};

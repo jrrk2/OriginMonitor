@@ -173,7 +173,7 @@ QJsonObject ControlServer::doInitialize(const QJsonObject& req)
     while (t.elapsed() < timeoutMs) {
         QEventLoop loop; QTimer::singleShot(2000, &loop, &QEventLoop::quit); loop.exec();
         cur = queryTaskController();
-        if (cur.isEmpty()) continue;
+        if (cur.isEmpty() || cur["State"].toString().isEmpty()) continue;       // no usable reply while the mount is busy: keep waiting
         state = cur["State"].toString(); stage = cur["Stage"].toString();
         const QJsonObject info = cur["InitializationInfo"].toObject();
         const QString step = info["CurrentStep"].toString();
