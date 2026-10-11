@@ -79,7 +79,7 @@ const QList<Cmd>& commands()
         auto pass = [&](const QString& name, const QString& group, const QString& help, const QString& server, QList<Arg> args = {}, bool moves = false) { v.append({name, group, help, server, moves, false, args}); };
         // --- server lifecycle
         v.append({"serve", "server", "Run the control server (listens on 127.0.0.1 only). Foreground by default; --daemon detaches. SIGTERM/SIGINT save the live stack and exit cleanly.", "", false, true,
-                  {O("control-port", 'i', "TCP port to listen on", "8765"), O("connect", 's', "telescope host to connect to at start-up"), O("telescope-port", 'i', "telescope port (default 80; other values are for simulators)", "80"), O("control-raw", 'b', "enable the 'send' raw-command passthrough"), O("no-cache", 'b', "disable the read-only response cache (default: status/mount/focuser/focus/analysis/sky-map replies are cached for 1-30 s)"),
+                  {O("control-port", 'i', "TCP port to listen on (default 8765 or $ORIGIN_CONTROL_PORT)", "8765"), O("connect", 's', "telescope host to connect to at start-up"), O("telescope-port", 'i', "telescope port (default 80; other values are for simulators)", "80"), O("control-raw", 'b', "enable the 'send' raw-command passthrough"), O("no-cache", 'b', "disable the read-only response cache (default: status/mount/focuser/focus/analysis/sky-map replies are cached for 1-30 s)"),
                    O("daemon", 'b', "detach from the terminal (double fork; Unix)"), O("pidfile", 's', "write the PID here, refuse to start when it names a live process, remove on exit"),
                    O("log-file", 's', "append log lines here (default stderr; required in practice with --daemon)")}});
         v.append({"commands", "server", "Machine-readable catalogue of all commands, their arguments and which of them move the telescope.", "", false, true, {}});
@@ -115,6 +115,11 @@ const QList<Cmd>& commands()
         pass("initialize", "action", "RunInitialize: the mount homes and aligns. Waits and reports the outcome.", "initialize",
              {O("lat", 'd', "site latitude", "52.2054", "lat_deg"), O("lon", 'd', "site longitude", "0.1218", "lon_deg"), O("tz", 's', "IANA time zone", "Europe/London", "timezone"),
               O("fake", 'b', "FakeInitialize"), O("no-wait", 'n', "return as soon as the telescope accepts", QString(), "wait"), O("timeout", 'i', "seconds", "300")}, true);
+        pass("unpark", "action", "Raise the tube with the GUI's unpark (AltRate +9, no azimuth motion) until the telescope's tilt sensor reads --alt (default 60 deg), then stop. Does NOT initialise. Refuses to move without a fresh tilt reading; stops if the reading goes stale or after --timeout.", "unpark",
+             {O("alt", 'd', "target tilt altitude, deg", "60", "alt_deg"), O("rate", 'i', "AltRate 1..9", "9"), O("timeout", 'i', "seconds", "90"), O("max-age", 'd', "oldest acceptable tilt reading, s", "5", "max_age")}, true);
+        pass("solve", "action", "Plate solve (astrometry.net, -z2): take a snapshot (works before the mount has aligned) or use --file, and report RA/Dec, rotation, and the altitude/azimuth of the tube checked against the tilt sensor.", "solve",
+             {O("file", 's', "solve this FITS file instead of taking a snapshot"), O("lat", 'd', "site latitude", "52.2054", "lat_deg"), O("lon", 'd', "site longitude", "0.1218", "lon_deg"),
+              O("cpulimit", 'i', "seconds the solver may use", "60"), O("index-dir", 's', "astrometry.net index files (default $ORIGIN_INDEX_DIR or ~/astrometry_indices)", QString(), "index_dir"), O("downsample", 'i', "solve-field -z", "2")}, true);
         pass("focuser-move", "action", "Move the focuser to an absolute position (within travel limits and --max-step of the current one).", "focuser_move",
              {P("position", 'i', "absolute focuser position"), O("max-step", 'i', "largest allowed move", "3000"), O("timeout", 'i', "seconds", "60")}, true);
         pass("sequence", "action", "Unattended exposure loop inside the server: start, stop or status.", "sequence",
@@ -1104,7 +1109,7 @@ int serve(const Parsed& p, int& argc, char** argv)
     QFile logFile;
     if (p.v.contains("log-file")) { logFile.setFileName(str(p, "log-file")); if (logFile.open(QIODevice::WriteOnly | QIODevice::Append)) g_log = &logFile; }
     qInstallMessageHandler(logHandler);
-    const quint16 port = quint16(p.v.contains("control-port") ? str(p, "control-port").toInt() : 8765);
+    const quint16 port = quint16(p.v.contains("control-port") ? str(p, "control-port").toInt() : qEnvironmentVariableIsSet("ORIGIN_CONTROL_PORT") ? qEnvironmentVariable("ORIGIN_CONTROL_PORT").toInt() : 8765);
     OriginBackend backend;
     ControlServer server(&backend, p.v.contains("control-raw"));
     server.setCacheEnabled(!p.v.contains("no-cache"));

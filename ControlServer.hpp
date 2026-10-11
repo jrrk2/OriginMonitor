@@ -46,6 +46,9 @@ private:
     QJsonObject queryMount(int timeoutMs = 5000);              // GetStatus on Mount
     QJsonObject doGoto(const QJsonObject& req);
     QJsonObject doInitialize(const QJsonObject& req);
+    QJsonObject doUnpark(const QJsonObject& req);
+    QJsonObject doSolve(const QJsonObject& req);
+    double tiltAltitude(double* ageSec) const;                  // OrientationSensor altitude (deg, whole degrees) and the age of that reading
     QJsonObject queryTaskController(int timeoutMs = 3000);
     static QJsonObject fail(const QString& message);
 

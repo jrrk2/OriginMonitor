@@ -3,6 +3,7 @@
 #include "OriginBackend.hpp"
 #include "DataDir.hpp"
 #include "Sequencer.hpp"
+#include "Astro.hpp"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -16,6 +17,9 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QPointer>
+#include <QProcess>
+#include <QRegularExpression>
+#include <QTemporaryDir>
 #include <QTimer>
 
 ControlServer::ControlServer(OriginBackend* backend, bool allowRaw, QObject* parent)
@@ -200,6 +204,91 @@ QJsonObject ControlServer::doInitialize(const QJsonObject& req)
     return r;
 }
 
+// The telescope's own tilt sensor (OrientationSensor notifications), valid before the mount has aligned. Whole degrees.
+double ControlServer::tiltAltitude(double* ageSec) const
+{
+    const TelescopeData& d = m_backend->getDataProcessor()->getData();
+    *ageSec = d.orientationLastUpdate.isValid() ? d.orientationLastUpdate.msecsTo(QDateTime::currentDateTime()) / 1000.0 : 1e9;
+    return d.orientation.altitude;
+}
+
+// The GUI's unpark without the initialisation: raise the tube at +AltRate (no azimuth motion) until the tilt sensor reads {"alt_deg"} (default 60),
+// checking every 0.5 s. Stops on arrival, after {"timeout"} s (default 90), or when the tilt reading is older than {"max_age"} s (default 5), and refuses to
+// move at all without a fresh reading. The azimuth is unknown until the first plate solve (see solve).
+QJsonObject ControlServer::doUnpark(const QJsonObject& req)
+{
+    if (!m_backend->isConnected()) return fail("not connected");
+    const double target = req["alt_deg"].toDouble(60.0), maxAge = req["max_age"].toDouble(5.0);
+    const int rate = req["rate"].toInt(9), timeoutMs = req["timeout"].toInt(90) * 1000;
+    if (target < 10 || target > 85) return fail("alt_deg must be between 10 and 85");
+    if (rate < 1 || rate > 9) return fail("rate must be 1..9");
+    auto stop = [this] { for (int i = 0; i < 2; ++i) { m_backend->sendCommand("Slew", "Mount", QJsonObject{{"AltRate", 0}, {"AzmRate", 0}}); QEventLoop l; QTimer::singleShot(300, &l, &QEventLoop::quit); l.exec(); } };
+    double age = 0, alt = 0; QElapsedTimer w; w.start();
+    while (w.elapsed() < 8000) { alt = tiltAltitude(&age); if (age <= maxAge) break; QEventLoop l; QTimer::singleShot(250, &l, &QEventLoop::quit); l.exec(); }
+    if (age > maxAge) return fail("no recent tilt reading from the telescope (OrientationSensor); not moving");
+    const double start = alt;
+    if (alt >= target) return QJsonObject{{"ok", true}, {"outcome", "already_raised"}, {"tilt_alt_deg", alt}, {"summary", QString("tilt already reads %1 deg; nothing to do").arg(alt)}};
+    m_backend->sendCommand("Slew", "Mount", QJsonObject{{"AltRate", rate}, {"AzmRate", 0}});
+    QElapsedTimer t; t.start(); QString why;
+    while (true) {
+        QEventLoop l; QTimer::singleShot(500, &l, &QEventLoop::quit); l.exec();
+        alt = tiltAltitude(&age);
+        if (age > maxAge) { why = QString("tilt reading went stale (%1 s old)").arg(age, 0, 'f', 0); break; }
+        if (alt >= target) break;
+        if (t.elapsed() > timeoutMs) { why = "timed out before the tilt reached the target"; break; }
+    }
+    stop();
+    QJsonObject r{{"start_tilt_deg", start}, {"tilt_alt_deg", alt}, {"target_deg", target}, {"elapsed_s", int(t.elapsed() / 1000)}};
+    if (!why.isEmpty()) { r["ok"] = false; r["outcome"] = "stopped"; r["error"] = why; r["summary"] = "stopped: " + why; return r; }
+    r["ok"] = true; r["outcome"] = "raised"; r["summary"] = QString("raised from %1 to %2 deg in %3 s; azimuth unknown until a plate solve").arg(start).arg(alt).arg(int(t.elapsed() / 1000));
+    return r;
+}
+
+// Plate solve with astrometry.net (solve-field, -z2 because of the one-shot-colour filter): a fresh snapshot, or {"file"}. Returns the J2000 field centre, rotation, size and,
+// with the site and the time, the altitude and azimuth of the tube, checked against the tilt sensor. Works before the mount has aligned (the camera does).
+// Needs index files for fields of 20-120 arcmin (default dir $HOME/astrometry_indices, or ORIGIN_INDEX_DIR or {"index_dir"}).
+QJsonObject ControlServer::doSolve(const QJsonObject& req)
+{
+    QString file = req["file"].toString(); QJsonObject snap;
+    const QDateTime when = QDateTime::currentDateTimeUtc();
+    if (file.isEmpty()) {
+        if (!m_backend->isConnected()) return fail("not connected");
+        snap = doSnapshot(QJsonObject{{"timeout", req["snapshot_timeout"].toInt(30)}});
+        if (!snap["ok"].toBool()) return snap;
+        file = snap["path"].toString();
+        if (!file.endsWith(".fits", Qt::CaseInsensitive)) return QJsonObject{{"ok", false}, {"error", "the snapshot came back as " + QFileInfo(file).suffix() + ", not FITS (the first frame after a slew can); try again"}, {"snapshot", snap}};
+    }
+    if (!QFile::exists(file)) return fail("no such file: " + file);
+    QString idx = req["index_dir"].toString(); if (idx.isEmpty()) idx = qEnvironmentVariable("ORIGIN_INDEX_DIR", QDir::homePath() + "/astrometry_indices");
+    if (!QDir(idx).exists()) return fail("index directory not found: " + idx + " (astrometry.net index files for 20-120 arcmin fields)");
+    QTemporaryDir tmp; if (!tmp.isValid()) return fail("no temporary directory");
+    const int cpu = req["cpulimit"].toInt(60);
+    QFile cfg(tmp.filePath("solve.cfg")); if (!cfg.open(QIODevice::WriteOnly)) return fail("cannot write solver config");
+    cfg.write(QString("cpulimit %1\nadd_path %2\n%3autoindex\n").arg(cpu).arg(idx, QDir("/usr/share/astrometry").exists() ? "add_path /usr/share/astrometry\n" : "").toUtf8()); cfg.close();
+    QProcess p; p.setProcessChannelMode(QProcess::MergedChannels);
+    p.start("solve-field", {"--config", cfg.fileName(), "-z", QString::number(req["downsample"].toInt(2)), "--overwrite", "--no-plots", "--scale-units", "arcsecperpix",
+                            "--scale-low", QString::number(req["scale_low"].toDouble(1.3)), "--scale-high", QString::number(req["scale_high"].toDouble(3.2)), "-D", tmp.path(), file});
+    if (!p.waitForStarted(5000)) return fail("cannot run solve-field (is astrometry.net installed?)");
+    if (!p.waitForFinished((cpu + 30) * 1000)) { p.kill(); return QJsonObject{{"ok", false}, {"error", "solve-field did not finish in time"}, {"file", file}}; }
+    const QString out = QString::fromUtf8(p.readAll());
+    const QRegularExpressionMatch c = QRegularExpression(R"(Field center: \(RA,Dec\) = \(([-\d.]+), ([-\d.]+)\) deg)").match(out);
+    QJsonObject r{{"file", file}};
+    if (!snap.isEmpty()) r["snapshot"] = snap;
+    if (!c.hasMatch()) { r["ok"] = false; r["solved"] = false; r["error"] = "no solution (too few stars, cloud, or no matching index)"; return r; }
+    const double ra = c.captured(1).toDouble(), dec = c.captured(2).toDouble();
+    const QRegularExpressionMatch rot = QRegularExpression(R"(up is ([-\d.]+) degrees E of N)").match(out), sz = QRegularExpression(R"(Field size: ([\d.]+) x ([\d.]+) arcminutes)").match(out);
+    const Astro::Site site{req["lat_deg"].toDouble(52.2054), req["lon_deg"].toDouble(0.1218)};
+    const Astro::AltAz aa = Astro::altAz({ra / 15.0, dec}, site, when);
+    double age = 0; const double tilt = tiltAltitude(&age);
+    r["ok"] = true; r["solved"] = true; r["ra_deg"] = ra; r["ra_hours"] = ra / 15.0; r["dec_deg"] = dec; r["alt_deg"] = aa.alt; r["az_deg"] = aa.az;
+    if (rot.hasMatch()) r["up_deg_east_of_north"] = rot.captured(1).toDouble();
+    if (sz.hasMatch()) { r["field_arcmin"] = QJsonArray{sz.captured(1).toDouble(), sz.captured(2).toDouble()}; }
+    if (age < 600) { r["tilt_alt_deg"] = tilt; r["tilt_age_s"] = age; r["tilt_minus_solved_deg"] = tilt - aa.alt; }
+    r["summary"] = QString("solved: RA %1 h, Dec %2 deg; tube at altitude %3, azimuth %4 deg%5").arg(ra / 15.0, 0, 'f', 3).arg(dec, 0, 'f', 2).arg(aa.alt, 0, 'f', 1).arg(aa.az, 0, 'f', 1)
+                       .arg(age < 600 ? QString(" (tilt sensor says %1)").arg(tilt) : QString());
+    return r;
+}
+
 QJsonObject ControlServer::doSnapshot(const QJsonObject& req)
 {
     if (!m_backend->isConnected()) return fail("not connected");
@@ -286,7 +375,7 @@ QJsonObject ControlServer::handle(const QJsonObject& req)
     if (cmd == "commands" || cmd == "help")
         return QJsonObject{{"ok", true}, {"note", "server commands; the OriginHeadless CLI has a fuller catalogue: OriginHeadless commands"},
                            {"commands", QJsonArray{"ping", "connect", "status", "manual", "auto", "set", "snapshot", "mount_status", "goto", "focus_status", "analysis", "events", "target", "stack",
-                                                   "sky_map", "preview", "monitor", "focuser_status", "focuser_move", "focuser_settings", "initialize", "sequence", "send", "cache", "quit"}}};
+                                                   "sky_map", "preview", "monitor", "focuser_status", "focuser_move", "focuser_settings", "initialize", "unpark", "solve", "sequence", "send", "cache", "quit"}}};
     int ttl = cacheTtlMs(cmd);
     if (cmd == "target" && req.contains("name")) ttl = 0;                       // that form changes the target
     if (!m_cacheOn || ttl == 0) {
@@ -397,10 +486,13 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
     if (cmd == "mount_status") {
         if (!m_backend->isConnected()) return fail("not connected");
         QJsonObject r = queryMount();
-        return r.isEmpty() ? fail("no response") : QJsonObject{{"ok", true}, {"mount", r}};
+        double age = 0; const double tilt = tiltAltitude(&age);
+        QJsonObject out{{"ok", true}, {"mount", r}};
+        if (age < 1e8) { out["tilt_alt_deg"] = tilt; out["tilt_age_s"] = std::round(age * 10) / 10; }      // the telescope's tilt sensor; valid before alignment
+        return r.isEmpty() ? fail("no response") : out;
     }
     // the sequencer owns the camera and the mount while it runs
-    if (m_seq->active() && (cmd == "snapshot" || cmd == "goto" || cmd == "focuser_move" || cmd == "initialize" || cmd == "set"))
+    if (m_seq->active() && (cmd == "snapshot" || cmd == "goto" || cmd == "focuser_move" || cmd == "initialize" || cmd == "set" || cmd == "unpark" || cmd == "solve"))
         return fail("a sequence is running; stop it first ({\"cmd\":\"sequence\",\"action\":\"stop\"})");
     if (cmd == "sequence") {                          // action start|stop|status; see Sequencer.hpp
         const QString action = req["action"].toString("status");
@@ -410,6 +502,8 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
     }
     if (cmd == "goto") return doGoto(req);
     if (cmd == "initialize") return doInitialize(req);
+    if (cmd == "unpark") return doUnpark(req);
+    if (cmd == "solve") return doSolve(req);
 
     if (cmd == "focuser_status") {
         if (!m_backend->isConnected()) return fail("not connected");
