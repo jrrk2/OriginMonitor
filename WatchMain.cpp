@@ -173,6 +173,8 @@ private:
         m_fcTable = new QTableWidget(0, 15); m_fcTable->setEditTriggers(QAbstractItemView::NoEditTriggers); m_fcTable->setSelectionMode(QAbstractItemView::NoSelection);
         m_fcTable->setHorizontalHeaderLabels({"Local", "Quality", "Range", "Cloud %", "Low", "Mid", "High", "Rain %", "Met Office", "ECMWF", "AIFS", "ICON", "GFS", "M-France", "KNMI"});
         m_fcTable->verticalHeader()->hide(); m_fcTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+        m_fcTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents); m_fcTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);   // "Mon 00:00" and "0.00 - 0.86" must not be elided
+        m_fcTable->horizontalHeader()->setMinimumSectionSize(40); m_fcTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         v->addWidget(m_fcTable, 1);
         m_fcAcc = new QLabel; m_fcAcc->setWordWrap(true); v->addWidget(m_fcAcc);
         auto* legend = new QLabel("Quality 0..1 = how much of the hour is usable (low and mid cloud block, high cloud counts half, cut for rain, fog, dew and wind). It is the mean over 7 models; the models often disagree by 50 points, so look at the range as well. Green >= 0.5, amber 0.3-0.5, red below.");
