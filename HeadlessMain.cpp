@@ -20,6 +20,8 @@
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QDir>
+#include <QProcess>
 #include <QSocketNotifier>
 #include <QTcpSocket>
 #include <QTimeZone>
@@ -139,10 +141,15 @@ const QList<Cmd>& commands()
                                        O("iso", 'i', "ISO for the frames (falls back once to 200 if the first frames are all rejected on a clear forecast)", "800"),
                                        O("max-exposure", 'd', "longest exposure, s (further limited by field rotation for each block)", "20"),
                                        O("cloud-patience", 'd', "minutes of cloud before going to a backup target", "10"), O("give-up", 'd', "minutes of cloud on one block before moving to the next block", "60"),
-                                       O("not-before", 's', "local HH:MM; no slewing before this in the evening", "20:00"), O("connect", 's', "telescope host to reconnect to (default: the server's)")};
+                                       O("not-before", 's', "local HH:MM; no slewing before this in the evening", "20:00"), O("connect", 's', "telescope host to reconnect to (default: the server's)"),
+                                       O("mail", 'b', "e-mail a summary of the night when the run ends")};
                        QList<Arg> pa = plannerArgs();
                        for (Arg& x : pa) if (x.name == "min-quality") x.help += " (run default 0.2: the forecast is a soft prior, the sky monitor decides)";
                        return a + pa; }()});
+        v.append({"autorun", "planning", "Dusk launcher for cron (every 5 minutes): once per night, if the telescope is out and reachable, starts the daemon, connects, initializes the mount if needed and starts 'run --unattended --mail' in the background. Does nothing (quietly) when the telescope does not answer, when nothing is observable, when rain is forecast, or when ~/.config/origin/autorun.off exists. Slews the telescope: only schedule it if that is wanted.", "", true, false,
+                  [] { QList<Arg> a = {O("telescope", 's', "telescope host", "192.168.1.195"), O("start-after", 's', "local HH:MM; never act before this in the evening", "20:00"), O("stop-before-dawn", 'd', "minutes before the end of darkness after which no run is started", "60"),
+                                       O("dry-run", 'b', "say what would be done, do nothing"), O("ignore-time", 'b', "skip the evening/dawn time gates (testing)"), O("no-mail", 'b', "send no e-mails (testing)"), O("iso", 'i', "ISO for the run", "800"), O("max-exposure", 'd', "longest exposure for the run, s", "20")};
+                       return a + plannerArgs(); }()});
         v.append({"park", "planning", "Save the stack and slew to Polaris (safe park).", "", true, false, {}});
         v.append({"schedule", "planning", "Plan one night: observable windows against the local horizon, Sun and Moon, plus a greedy one-target-at-a-time plan.", "", false, true, plannerArgs()});
         v.append({"weather", "planning", "Hourly forecast for the site from Open-Meteo: cloud low/mid/high, rain chance, visibility, dew point, wind and a 0..1 imaging quality per hour (cached 1 h; --fresh bypasses).", "", false, true,
@@ -745,6 +752,24 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth)
     }
 }
 
+// the morning summary of an unattended night, from the decision log and the stacks the server reports
+void mailRunSummary(const QString& outcome, const QString& night)
+{
+    QString body = QString("Unattended night %1: %2.\n\nBlocks run: %3, target switches: %4, refocuses: %5, restarts: %6.\n\nWhat it did (local time):\n")
+                       .arg(night, outcome).arg(g_run.blocksDone).arg(g_run.switches).arg(g_run.refocuses).arg(g_run.restarts);
+    for (const QJsonValue& v : g_run.decisions) {
+        const QJsonObject d = v.toObject(); QStringList bits;
+        for (auto it = d.constBegin(); it != d.constEnd(); ++it)
+            if (it.key() != "time" && it.key() != "decision" && !it.value().isObject() && !it.value().isArray() && !it.value().isNull()) bits << it.key() + "=" + (it.value().isString() ? it.value().toString() : QString::number(it.value().toDouble(), 'g', 6));
+        body += QString("  %1  %2  %3\n").arg(parseZ(d["time"].toString().left(19) + "Z").toTimeZone(g_run.zone).toString("HH:mm"), d["decision"].toString(), bits.join("  "));
+    }
+    const QJsonObject st = call("sequence", {{"action", "status"}}, 20000)["status"].toObject();
+    if (!st.isEmpty()) body += QString("\nLast sequence: %1 frames, %2 good.\n").arg(st["frames"].toInt()).arg(st["good"].toInt());
+    body += "\nFull log: " + g_run.logPath + "\nStacks: " + originDataDir() + "/stacks\nThe telescope was parked on Polaris. Put it away when convenient.\n";
+    const QJsonObject r = Mail::send(QString("[Origin] night %1: %2").arg(night, outcome), body);
+    note({{"summary_mail", r["ok"]}, {"error", r["error"]}});
+}
+
 QJsonObject cmdRun(const Parsed& p, const Cmd& c)
 {
     if (!p.v.contains("dry-run") && !p.v.contains("unattended")) return failure("run takes over the night and slews the telescope; add --unattended to confirm (or --dry-run to see the plan)");
@@ -784,8 +809,96 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
     }
     const QJsonObject park = cmdPark();
     runLog("parked", {{"ok", park["ok"]}, {"outcome", res == RunResult::Done ? "complete" : res == RunResult::Rain ? "rain" : "failed"}});
+    if (p.v.contains("mail")) mailRunSummary(res == RunResult::Done ? "complete" : res == RunResult::Rain ? "stopped for rain" : "stopped after a failure", S["night"].toString());
     return {{"ok", res != RunResult::Failed}, {"outcome", res == RunResult::Done ? "complete" : res == RunResult::Rain ? "stopped: rain forecast" : "stopped: failure"}, {"blocks_run", g_run.blocksDone},
             {"switches", g_run.switches}, {"refocuses", g_run.refocuses}, {"log", g_run.logPath}, {"parked", park["ok"]}};
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------
+// autorun: the dusk launcher, meant for cron every 5 minutes. Each tick does the next missing step and returns; once 'run' is started for a night
+// it is left alone (it logs, reconnects and e-mails itself), and is relaunched only if its process died before parking, at most 3 times.
+// ---------------------------------------------------------------------------------------------------------------------------------------
+bool pidAlive(qint64 pid) {
+#ifdef Q_OS_UNIX
+    return pid > 0 && kill(pid_t(pid), 0) == 0;
+#else
+    Q_UNUSED(pid); return false;
+#endif
+}
+
+QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
+{
+    const QString off = QDir::homePath() + "/.config/origin/autorun.off";
+    if (QFile::exists(off)) return {{"ok", true}, {"acted", false}, {"note", "disabled: " + off + " exists"}};
+    Planner::Options o = plannerOptions(p, c); o.date = Planner::currentNightDate(o.timeZone);
+    o.minQuality = p.v.contains("min-quality") ? o.minQuality : 0.2;
+    const QJsonObject S = Planner::schedule(o);
+    if (!S["ok"].toBool()) return S;
+    const QString night = S["night"].toString();
+    const QDateTime now = QDateTime::currentDateTimeUtc(), darkStart = parseZ(S["dark_start"].toString()), darkEnd = parseZ(S["dark_end"].toString());
+    const QStringList hm = str(p, "start-after", "20:00").split(':');
+    const QDateTime loc = QDateTime::currentDateTime(), after(loc.date(), QTime(hm.value(0).toInt(), hm.value(1).toInt()));
+    auto idle = [&](const QString& why) { return QJsonObject{{"ok", true}, {"acted", false}, {"night", night}, {"note", why}}; };
+    if (!p.v.contains("ignore-time") && (now < darkStart.addSecs(-1800) || (loc < after && loc.time().hour() >= 6))) return idle("too early for tonight");
+    if (!p.v.contains("ignore-time") && now >= darkEnd.addSecs(-int(num(p, c, "stop-before-dawn")) * 60)) return idle("too late to start tonight");
+
+    const QString statePath = originDataDir() + "/autorun_state.json";
+    QJsonObject all; { QFile f(statePath); if (f.open(QIODevice::ReadOnly)) all = QJsonDocument::fromJson(f.readAll()).object(); }
+    QJsonObject st = all[night].toObject();
+    auto save = [&] { all[night] = st; QFile f(statePath); if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) f.write(QJsonDocument(all).toJson()); };
+    const QString runLogPath = originDataDir() + "/run_" + QString(night).remove('-') + ".jsonl";
+    if (st["launches"].toInt() > 0) {
+        if (pidAlive(qint64(st["pid"].toDouble()))) return idle("run is in progress");
+        QFile f(runLogPath); const bool parked = f.open(QIODevice::ReadOnly) && f.readAll().contains("\"decision\":\"parked\"");
+        if (parked) return idle("tonight's run has finished");
+        if (st["launches"].toInt() >= 3) return idle("run died 3 times tonight; giving up");
+        note({{"autorun", "run process died before parking; relaunching"}});
+    }
+    if (S["plan"].toArray().isEmpty()) return idle("nothing observable tonight");
+    if (p.v.contains("dry-run")) return {{"ok", true}, {"acted", false}, {"dry_run", true}, {"night", night}, {"would", "start the daemon if needed, connect, initialize if needed, launch run --unattended --mail"}, {"blocks", S["plan"].toArray().size()}};
+    g_run = RunState(); g_run.o = o;
+    if (rainSoon()) return idle("rain forecast within the hour");
+
+    // daemon: one instance only. The old GUI app would hold the telescope's single client slot.
+    if (!call("ping", {}, 3000)["ok"].toBool()) {
+        QProcess pg; pg.start("pgrep", {"-x", "CelestronOrigin"}); pg.waitForFinished(3000);
+        if (pg.exitCode() == 0) return idle("CelestronOrigin (the GUI app) is running; not starting a second instance");
+        const QString dir = QDir::homePath() + "/.cache"; QDir().mkpath(dir);
+        QProcess d; d.setProgram(QCoreApplication::applicationFilePath());
+        d.setArguments({"serve", "--daemon", "--control-port", QString::number(g_port), "--connect", str(p, "telescope", "192.168.1.195"), "--pidfile", dir + "/origin-daemon.pid", "--log-file", dir + "/origin-daemon.log"});
+        d.start(); d.waitForFinished(10000);
+        sleepMs(4000);
+        if (!call("ping", {}, 3000)["ok"].toBool()) return idle("could not start the daemon (see ~/.cache/origin-daemon.log)");
+        note({{"autorun", "daemon started"}});
+    }
+    if (!call("status", {}, 10000)["connected"].toBool()) {
+        call("connect", {{"host", str(p, "telescope", "192.168.1.195")}}, 20000);
+        sleepMs(3000);
+        if (!call("status", {}, 10000)["connected"].toBool()) return idle("telescope does not answer (not put out, or off)");
+    }
+    const QJsonObject mount = call("mount_status", {}, 15000)["mount"].toObject();
+    if (!mount["IsAligned"].toBool()) {
+        if (st["init_attempts"].toInt() >= 3) return idle("mount will not align (3 attempts); needs a look");
+        st["init_attempts"] = st["init_attempts"].toInt() + 1; save();
+        note({{"autorun", "initializing the mount"}});
+        const QJsonObject r = call("initialize", {{"lat_deg", o.site.latDeg}, {"lon_deg", o.site.lonDeg}, {"timezone", o.timeZone}, {"wait", true}, {"timeout", 300}}, 360000);
+        if (!r["ok"].toBool() || r["outcome"].toString().toLower() == "failed") return idle("initialize failed: " + r["error"].toString() + r["summary"].toString());
+    }
+
+    // launch the supervisor, detached, logging to its own file
+    QProcess run; run.setProgram(QCoreApplication::applicationFilePath());
+    run.setArguments({"run", "--unattended", "--iso", str(p, "iso", "800"), "--max-exposure", str(p, "max-exposure", "20"), "--not-before", str(p, "start-after", "20:00"), "--port", QString::number(g_port)});
+    if (!p.v.contains("no-mail")) run.setArguments(run.arguments() << "--mail");
+    run.setStandardOutputFile(originDataDir() + "/autorun_" + QString(night).remove('-') + ".log", QIODevice::Append);
+    run.setStandardErrorFile(originDataDir() + "/autorun_" + QString(night).remove('-') + ".log", QIODevice::Append);
+    qint64 pid = 0;
+    if (!run.startDetached(&pid)) return failure("could not launch run");
+    st["launches"] = st["launches"].toInt() + 1; st["pid"] = double(pid); st["launched"] = now.toString(Qt::ISODate); save();
+    const QJsonObject fc = g_wx;
+    if (!p.v.contains("no-mail")) Mail::send(QString("[Origin] unattended run started (%1)").arg(night),
+               QString("The telescope answered and the mount is aligned, so the unattended run has started for night %1 (launch %2, pid %3).\n\nBlocks planned: %4. Dark until %5 local.\nIt will e-mail a summary when it ends. To stop it: touch %6 and kill %3, or run: OriginHeadless park.\nLog: %7\n")
+                   .arg(night).arg(st["launches"].toInt()).arg(pid).arg(S["plan"].toArray().size()).arg(darkEnd.toTimeZone(QTimeZone(o.timeZone.toUtf8())).toString("HH:mm"), off, originDataDir() + "/autorun_" + QString(night).remove('-') + ".log"));
+    return {{"ok", true}, {"acted", true}, {"night", night}, {"launched_pid", double(pid)}, {"launches", st["launches"]}};
 }
 
 // ---------------------------------------------------------------- server
@@ -900,6 +1013,7 @@ int main(int argc, char* argv[])
     else if (cmd->name == "mail-test") out = cmdMailTest(p, *cmd);
     else if (cmd->name == "backup") out = cmdBackup(p, *cmd);
     else if (cmd->name == "run") out = cmdRun(p, *cmd);
+    else if (cmd->name == "autorun") out = cmdAutorun(p, *cmd);
     else if (cmd->name == "now") out = cmdNow(p, *cmd);
     else if (cmd->name == "weather") out = cmdWeather(p, *cmd);
     else if (cmd->name == "go") out = cmdGo(p, *cmd);
