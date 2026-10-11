@@ -420,21 +420,33 @@ QJsonObject forecastAccuracy()
             const auto it = perHour.constFind(a.toSecsSinceEpoch()); if (it == perHour.constEnd()) continue;
             const double cov = it->first + it->second; if (cov < 900) continue;       // at least 15 minutes of evidence
             const double obs = it->first / cov;
-            rows.append(QJsonObject{{"night", night}, {"hour_utc", a.toString("HH:mm")}, {"forecast", h["quality"]}, {"observed", std::round(obs * 100) / 100}, {"covered_min", int(cov / 60)}});
+            rows.append(QJsonObject{{"night", night}, {"hour_utc", a.toString("HH:mm")}, {"forecast", h["quality"]}, {"observed", std::round(obs * 100) / 100}, {"covered_min", int(cov / 60)}, {"models", h["models"]}});
             csv << QString("%1,%2,%3,%4,%5,%6,%7,%8").arg(night, a.toString(Qt::ISODate)).arg(h["quality"].toDouble()).arg(h["low"].toDouble()).arg(h["mid"].toDouble()).arg(h["high"].toDouble()).arg(obs, 0, 'f', 2).arg(int(cov / 60));
             ++used;
         }
         nights.append(QJsonObject{{"night", night}, {"hours_compared", used}});
     }
     int n = 0, poor = 0, poorUsable = 0, good = 0, goodUsable = 0; double sp = 0, so = 0, ae = 0;
+    QMap<QString, QVector<QPair<double, double>>> perModel;                          // model -> (forecast, observed)
+
     for (const QJsonValue& v : rows) {
         const QJsonObject r = v.toObject(); const double f = r["forecast"].toDouble(), o = r["observed"].toDouble();
         ++n; sp += f; so += o; ae += std::abs(o - f);
+        const QJsonObject mo = r["models"].toObject(); for (auto it = mo.constBegin(); it != mo.constEnd(); ++it) perModel[it.key()].append({it.value().toDouble(), o});
         if (f < 0.5) { ++poor; if (o >= 0.5) ++poorUsable; } else { ++good; if (o >= 0.5) ++goodUsable; }
     }
     QFile cf(dir + "/forecast_accuracy.csv"); if (cf.open(QIODevice::WriteOnly | QIODevice::Truncate)) cf.write((csv.join("\n") + "\n").toUtf8());
     QJsonObject r{{"ok", true}, {"hours_compared", n}, {"nights", nights}, {"hours_forecast_poor", poor}, {"poor_but_usable", poorUsable}, {"hours_forecast_good", good}, {"good_and_usable", goodUsable}};
     if (n) { r["mean_forecast"] = std::round(sp / n * 100) / 100; r["mean_observed"] = std::round(so / n * 100) / 100; r["bias_pessimism"] = std::round((so - sp) / n * 100) / 100; r["mean_abs_error"] = std::round(ae / n * 100) / 100; }
+    QList<QJsonObject> byModelL;
+    for (auto it = perModel.constBegin(); it != perModel.constEnd(); ++it) {
+        double mf = 0, mo2 = 0, mae = 0; for (const auto& pr : it.value()) { mf += pr.first; mo2 += pr.second; mae += std::abs(pr.second - pr.first); }
+        const int k = it.value().size();
+        byModelL.append(QJsonObject{{"model", it.key()}, {"hours", k}, {"mean_abs_error", std::round(mae / k * 100) / 100}, {"bias_pessimism", std::round((mo2 - mf) / k * 100) / 100}});
+    }
+    std::sort(byModelL.begin(), byModelL.end(), [](const QJsonObject& a, const QJsonObject& b) { return a["mean_abs_error"].toDouble() < b["mean_abs_error"].toDouble(); });
+    QJsonArray byModel; for (const QJsonObject& m : byModelL) byModel.append(m);
+    if (!byModel.isEmpty()) r["by_model_best_first"] = byModel;
     r["note"] = "only hours with at least 15 minutes of frames count, and those are mostly hours when we chose to shoot; positive bias_pessimism means the sky was better than forecast";
     QFile jf(dir + "/forecast_accuracy.json"); if (jf.open(QIODevice::WriteOnly | QIODevice::Truncate)) jf.write(QJsonDocument(QJsonObject{{"summary", r}, {"hours", rows}}).toJson());
     r["hours"] = rows;
@@ -448,6 +460,8 @@ QString trackRecordLine(const QJsonObject& a)
     QString s = QString("Forecast track record (%1 observed hours over %2 night(s)): the sky was on average %3 %4 than forecast (mean forecast quality %5, observed usable fraction %6).")
                     .arg(n).arg(a["nights"].toArray().size()).arg(std::abs(a["bias_pessimism"].toDouble()), 0, 'f', 2).arg(a["bias_pessimism"].toDouble() >= 0 ? "better" : "worse").arg(a["mean_forecast"].toDouble(), 0, 'f', 2).arg(a["mean_observed"].toDouble(), 0, 'f', 2);
     if (a["hours_forecast_poor"].toInt() > 0) s += QString(" Of %1 hours forecast poor, %2 were actually usable.").arg(a["hours_forecast_poor"].toInt()).arg(a["poor_but_usable"].toInt());
+    const QJsonArray bm = a["by_model_best_first"].toArray();
+    if (!bm.isEmpty()) s += QString(" Closest model so far: %1 (mean error %2).").arg(bm[0].toObject()["model"].toString()).arg(bm[0].toObject()["mean_abs_error"].toDouble(), 0, 'f', 2);
     if (a["hours_forecast_good"].toInt() > 0) s += QString(" Of %1 hours forecast good, %2 were.").arg(a["hours_forecast_good"].toInt()).arg(a["good_and_usable"].toInt());
     return s;
 }
@@ -517,12 +531,12 @@ QJsonObject cmdBriefing(const Parsed& p, const Cmd& c)
         body += QString("Sunset %1, astronomical dark %2 to %3. %4 of the %5 dark minutes are forecast usable; longest clear stretch %6 min.\n").arg(loc(sunset), loc(darkStart), loc(darkEnd)).arg(total).arg(int(darkStart.secsTo(darkEnd) / 60)).arg(best);
         if (wx.contains("rain_from")) body += "Rain is forecast from " + locJ(wx["rain_from"]) + ".\n";
         { const QJsonObject acc = forecastAccuracy(); body += "\n" + trackRecordLine(acc) + "\n"; }
-        body += "\nUsable windows (local): " + (when.isEmpty() ? "none" : when) + "\n\nHour by hour (local): cloud low/mid/high, rain chance, quality\n";
+        body += "\nUsable windows (local): " + (when.isEmpty() ? "none" : when) + "\n\nHour by hour (local): mean cloud (low/mid/high) of 7 models, rain chance, blended quality (range across models)\n";
         for (const QJsonValue& hv : wx["hours"].toArray()) {
             const QJsonObject h = hv.toObject();
-            body += QString("  %1  %2% (%3/%4/%5)  rain %6%  %7  %8\n").arg(loc(parseZ(h["utc"].toString().left(19) + "Z")), QString::number(h["cloud"].toDouble(), 'f', 0).rightJustified(3), QString::number(h["low"].toDouble(), 'f', 0),
+            body += QString("  %1  %2% (%3/%4/%5)  rain %6%  %7 (models %8-%9)  %10\n").arg(loc(parseZ(h["utc"].toString().left(19) + "Z")), QString::number(h["cloud"].toDouble(), 'f', 0).rightJustified(3), QString::number(h["low"].toDouble(), 'f', 0),
                          QString::number(h["mid"].toDouble(), 'f', 0), QString::number(h["high"].toDouble(), 'f', 0), QString::number(h["precip_prob"].toDouble(), 'f', 0), QString::number(h["quality"].toDouble(), 'f', 2),
-                         h["quality"].toDouble() >= o.minQuality ? "usable" : "");
+                         QString::number(h["q_min"].toDouble(), 'f', 2), QString::number(h["q_max"].toDouble(), 'f', 2), h["quality"].toDouble() >= o.minQuality ? "usable" : "");
         }
         if (!S["plan"].toArray().isEmpty()) {
             body += "\nPlan for the usable hours:\n";
