@@ -11,6 +11,8 @@
 #include "OriginBackend.hpp"
 #include "Planner.hpp"
 #include "Weather.hpp"
+#include "Mail.hpp"
+#include "Ephemeris.hpp"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -147,6 +149,12 @@ const QList<Cmd>& commands()
                   [] { QList<Arg> a = {O("name", 's', "current target key or name (default: the server's target, else the mount's pointing)"), O("min-sep", 'd', "minimum separation from the current pointing, deg", "40"),
                                        O("count", 'i', "backups to return", "3"), O("min-left", 'd', "minimum minutes the backup stays observable", "45"), O("avoid", 's', "comma-separated target keys already tried")};
                        return a + plannerArgs(); }()});
+        v.append({"briefing", "planning", "The two e-mails: --kind dusk (worth putting out tonight?) or night (safe to leave out at 22:00?); --auto sends whichever is due now, once (for cron every 5 minutes); --send mails it (Microsoft Graph, see mail-login). Always saved to <data dir>/briefings/.", "", false, true,
+                  [] { QList<Arg> a = {O("kind", 's', "dusk | night"), O("auto", 'b', "send the briefing that is due now, if not already sent tonight"), O("send", 'b', "e-mail it"), O("to", 's', "recipient (default: mail.conf)"),
+                                       O("night-at", 's', "local time of the safety e-mail", "22:00"), O("dusk-offset", 'd', "minutes after sunset for the dusk e-mail", "0")};
+                       return a + plannerArgs(); }()});
+        v.append({"mail-login", "planning", "One-time Microsoft sign-in for the briefing e-mails (OAuth device-code flow: prints a code and a URL; needs ~/.config/origin/mail.conf).", "", false, true, {}});
+        v.append({"mail-test", "planning", "Send a test e-mail through the same route.", "", false, true, {O("to", 's', "recipient (default: mail.conf)")}});
         v.append({"moon", "planning", "Moonrise, moonset, transit, illumination and phase (and sunrise/sunset) for each of the next days, from JPL DE440 via CSPICE when available (else a low-precision series; the reply says which).", "", false, true,
                   {O("date", 's', "first local date YYYY-MM-DD (default: today)"), O("days", 'i', "number of days", "7"), O("lat", 'd', "site latitude, deg north", "52.2054"), O("lon", 'd', "site longitude, deg east", "0.1218"),
                    O("time-zone", 's', "IANA time zone for the output", "Europe/London"), O("text", 'b', "one line per day instead of JSON")}});
@@ -350,6 +358,126 @@ QJsonObject cmdBackup(const Parsed& p, const Cmd& c)
     if (r["ok"].toBool()) r["current"] = from;
     if (!g_wx.isEmpty()) r["forecast"] = g_wx;
     return r;
+}
+
+
+// ---------------------------------------------------------------------------------------------------------------------------------------
+// briefing: the two e-mails. "dusk" (at sunset): is it worth putting the telescope out tonight? "night" (22:00): is it safe to put it out for the night?
+// Both always saved to <data dir>/briefings/; sent with --send (Microsoft Graph, see Mail.hpp). --auto decides which one is due now and whether it was already
+// sent (<data dir>/briefings_sent.json), so a cron entry every 5 minutes is all the scheduling there is.
+// ---------------------------------------------------------------------------------------------------------------------------------------
+QJsonObject cmdBriefing(const Parsed& p, const Cmd& c)
+{
+    g_fresh = true;                                                                  // always a fresh forecast
+    Planner::Options o = plannerOptions(p, c); if (!p.v.contains("date")) o.date = Planner::currentNightDate(o.timeZone);
+    const QTimeZone zone(o.timeZone.toUtf8());
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    const QString night = o.date.toString(Qt::ISODate);
+    const QJsonObject sm = Planner::sunMoonDay(o.date, o.site, o.timeZone);
+    const QJsonObject S = Planner::schedule(o);
+    if (!S["ok"].toBool()) return S;
+    auto loc = [&](const QDateTime& t) { return t.toTimeZone(zone).toString("HH:mm"); };
+    auto locJ = [&](const QJsonValue& v) { return v.isNull() || v.isUndefined() ? QString("--:--") : loc(parseZ(v.toString())); };
+    const QDateTime sunset = parseZ(sm["sunset"].toString()), darkStart = parseZ(S["dark_start"].toString()), darkEnd = parseZ(S["dark_end"].toString());
+
+    // which briefing
+    QString kind = str(p, "kind");
+    QJsonObject sent; { QFile f(originDataDir() + "/briefings_sent.json"); if (f.open(QIODevice::ReadOnly)) sent = QJsonDocument::fromJson(f.readAll()).object(); }
+    const QStringList nh = str(p, "night-at", "22:00").split(':');
+    const QDateTime nightAt = QDateTime(now.toTimeZone(zone).date().addDays(now.toTimeZone(zone).time().hour() < 12 ? -1 : 0), QTime(nh.value(0).toInt(), nh.value(1).toInt()), zone).toUTC();
+    if (p.v.contains("auto")) {
+        const QDateTime duskAt = sunset.addSecs(int(num(p, c, "dusk-offset")) * 60);
+        if (now >= duskAt && now < darkEnd && !sent.contains(night + "_dusk") && now < nightAt) kind = "dusk";
+        else if (now >= nightAt && now < nightAt.addSecs(90 * 60) && now < darkEnd && !sent.contains(night + "_night")) kind = "night";
+        else return {{"ok", true}, {"due", false}, {"night", night}, {"note", "no briefing due now"}};
+    }
+    if (kind != "dusk" && kind != "night") return failure("--kind dusk|night (or --auto)");
+
+    // forecast hours with gusts, and the next hours of rain at 15-minute resolution
+    QVector<Weather::Hour> hrs; const QJsonObject fr = Weather::fetch(o.site.latDeg, o.site.lonDeg, 3, 0, originDataDir(), &hrs);
+    const QJsonObject wx = S["weather"].toObject();
+    QString subject, body;
+    const QString title = QDateTime(o.date, QTime(12, 0), zone).toString("dddd d MMMM");
+    const QString moonLine = QString("Moon: %1, %2% lit; rises %3, sets %4 (%5)").arg(sm["moon_phase"].toString()).arg(int(sm["moon_illumination"].toDouble() * 100 + 0.5)).arg(locJ(sm["moonrise"]), locJ(sm["moonset"]),
+                                  Ephemeris::description().startsWith("JPL") ? "JPL DE440" : "approximate");
+    const QString footer = QString("\n--\nForecast: %1 (fetched %2Z). Quality is 0..1: low and mid cloud block, high cloud counts half, cut for rain, fog, dew risk and wind; windows need >= %3.\n%4\nSent by OriginHeadless briefing (%5).\n")
+                               .arg(fr["source"].toString(), fr["fetched"].toString().mid(11, 5)).arg(o.minQuality).arg(moonLine, kind);
+
+    if (kind == "dusk") {
+        // usable windows = runs of forecast hours (inside the dark) with quality >= min
+        struct Win { QDateTime a, b; double q = 0; int n = 0; };
+        QList<Win> wins; Win cur; bool open = false;
+        for (const QJsonValue& hv : wx["hours"].toArray()) {
+            const QJsonObject h = hv.toObject(); const QDateTime a = parseZ(h["utc"].toString().left(19) + "Z");
+            const QDateTime from = std::max(a, std::max(darkStart, now)), to = std::min(a.addSecs(3600), darkEnd);
+            if (to <= from) continue;
+            if (h["quality"].toDouble() >= o.minQuality) { if (!open) { cur = Win(); cur.a = from; open = true; } cur.b = to; cur.q += h["quality"].toDouble(); ++cur.n; }
+            else if (open) { wins.append(cur); open = false; }
+        }
+        if (open) wins.append(cur);
+        int best = 0, total = 0; for (const Win& w : wins) { const int m = int(w.a.secsTo(w.b) / 60); total += m; best = std::max(best, m); }
+        const QString verdict = best >= 90 ? "WORTH PUTTING OUT" : best >= 40 ? "MARGINAL" : "NOT WORTH IT";
+        QString when; for (const Win& w : wins) when += (when.isEmpty() ? "" : ", ") + loc(w.a) + "-" + loc(w.b);
+        subject = QString("[Origin] Dusk: %1%2").arg(verdict, wins.isEmpty() ? " - no usable sky forecast" : " - clear " + when);
+        body = QString("%1 (night of %2)\n\nVERDICT: %3\n").arg(verdict, title, best >= 90 ? "put the telescope out." : best >= 40 ? "only short gaps are forecast; your call." : "leave it in.");
+        body += QString("Sunset %1, astronomical dark %2 to %3. %4 of the %5 dark minutes are forecast usable; longest clear stretch %6 min.\n").arg(loc(sunset), loc(darkStart), loc(darkEnd)).arg(total).arg(int(darkStart.secsTo(darkEnd) / 60)).arg(best);
+        if (wx.contains("rain_from")) body += "Rain is forecast from " + locJ(wx["rain_from"]) + ".\n";
+        body += "\nUsable windows (local): " + (when.isEmpty() ? "none" : when) + "\n\nHour by hour (local): cloud low/mid/high, rain chance, quality\n";
+        for (const QJsonValue& hv : wx["hours"].toArray()) {
+            const QJsonObject h = hv.toObject();
+            body += QString("  %1  %2% (%3/%4/%5)  rain %6%  %7  %8\n").arg(loc(parseZ(h["utc"].toString().left(19) + "Z")), QString::number(h["cloud"].toDouble(), 'f', 0).rightJustified(3), QString::number(h["low"].toDouble(), 'f', 0),
+                         QString::number(h["mid"].toDouble(), 'f', 0), QString::number(h["high"].toDouble(), 'f', 0), QString::number(h["precip_prob"].toDouble(), 'f', 0), QString::number(h["quality"].toDouble(), 'f', 2),
+                         h["quality"].toDouble() >= o.minQuality ? "usable" : "");
+        }
+        if (!S["plan"].toArray().isEmpty()) {
+            body += "\nPlan for the usable hours:\n";
+            for (const QJsonValue& v : S["plan"].toArray()) {
+                const QJsonObject e = v.toObject(); QStringList bs; for (const QJsonValue& bv : e["backups"].toArray()) bs << bv.toObject()["key"].toString();
+                body += QString("  %1-%2  %3 (alt %4->%5)%6\n").arg(loc(parseZ(e["start"].toString())), loc(parseZ(e["end"].toString())), e["name"].toString()).arg(e["alt_start"].toInt()).arg(e["alt_end"].toInt())
+                            .arg(bs.isEmpty() ? QString() : "   backups: " + bs.join(", "));
+            }
+        }
+    } else {
+        const QVector<QPair<QDateTime, double>> nc = Weather::nowcast(o.site.latDeg, o.site.lonDeg, 3);
+        const QDateTime horizon = darkEnd.addSecs(3600);
+        double maxProb = 0, sumMm = 0, maxGust = 0, minDew = 99, minVis = 1e9, maxHum = 0; QString rainFrom; int n = 0;
+        for (const Weather::Hour& h : hrs) {
+            if (h.utc.addSecs(3600) < now || h.utc > horizon) continue;
+            ++n; maxProb = std::max(maxProb, h.precipProb); sumMm += h.precip; maxGust = std::max(maxGust, h.gust); minDew = std::min(minDew, h.temp - h.dew); minVis = std::min(minVis, h.visibilityM); maxHum = std::max(maxHum, h.humidity);
+            if (rainFrom.isEmpty() && (h.precipProb >= 50 || h.precip >= 0.2)) rainFrom = loc(h.utc);
+        }
+        double ncMm = 0; QString ncFrom; for (const auto& q : nc) { ncMm += q.second; if (ncFrom.isEmpty() && q.second >= 0.1) ncFrom = loc(q.first); }
+        const bool unsafe = !rainFrom.isEmpty() || ncMm >= 0.2, caution = !unsafe && (maxProb >= 25 || maxGust > 12 || minDew < 1.0);
+        const QString verdict = unsafe ? "NOT SAFE" : caution ? "CAUTION" : "SAFE";
+        int usableAfter = 0; for (const QJsonValue& hv : wx["hours"].toArray()) { const QJsonObject h = hv.toObject(); const QDateTime a = parseZ(h["utc"].toString().left(19) + "Z");
+            if (h["quality"].toDouble() >= o.minQuality && a.addSecs(3600) > now) usableAfter += 60; }
+        subject = QString("[Origin] %1: %2 to put out%3").arg(nightAt.toTimeZone(zone).toString("HH:mm"), verdict, unsafe ? (ncFrom.isEmpty() ? " - rain from " + rainFrom : " - rain within 3 h (" + ncFrom + ")") : caution ? "" : QString(" - dry until %1").arg(loc(darkEnd)));
+        body = QString("%1 for leaving the telescope out tonight (%2).\n\n").arg(verdict, title);
+        body += unsafe ? "VERDICT: keep it in (or take it in before the rain).\n" : caution ? "VERDICT: possible, but keep an eye on it.\n" : "VERDICT: safe to put out; no rain forecast before dawn.\n";
+        body += QString("\nNext %1 forecast hours (to %2): rain chance up to %3%, %4 mm in total, wind gusts up to %5 m/s (%6 mph), lowest temperature-dew point margin %7 degC, humidity up to %8%, visibility down to %9 km.\n")
+                    .arg(n).arg(loc(horizon)).arg(maxProb, 0, 'f', 0).arg(sumMm, 0, 'f', 1).arg(maxGust, 0, 'f', 0).arg(maxGust * 2.237, 0, 'f', 0).arg(minDew, 0, 'f', 1).arg(maxHum, 0, 'f', 0).arg(minVis / 1000, 0, 'f', 0);
+        if (!rainFrom.isEmpty()) body += "Rain (>= 50% chance or >= 0.2 mm) first forecast at " + rainFrom + ".\n";
+        if (!nc.isEmpty()) body += QString("Next 3 hours at 15-minute resolution: %1 mm%2.\n").arg(ncMm, 0, 'f', 1).arg(ncFrom.isEmpty() ? ", dry" : ", first rain at " + ncFrom);
+        body += QString("Usable imaging sky still forecast: %1 min.\n").arg(usableAfter);
+        if (minDew < 1.0) body += "Dew risk: the air is within 1 degC of the dew point at some point; use the dew heater.\n";
+    }
+    body += footer;
+
+    QJsonObject out{{"ok", true}, {"kind", kind}, {"night", night}, {"subject", subject}, {"body", body}};
+    const QString dir = originDataDir() + "/briefings"; QDir().mkpath(dir);
+    QFile cf(dir + "/" + night + "_" + kind + ".txt"); if (cf.open(QIODevice::WriteOnly | QIODevice::Truncate)) { cf.write(("Subject: " + subject + "\n\n" + body).toUtf8()); out["saved"] = cf.fileName(); }
+    if (p.v.contains("send") || p.v.contains("auto")) {
+        const QJsonObject r = Mail::send(subject, body, str(p, "to"));
+        out["sent"] = r["ok"].toBool(); if (!r["ok"].toBool()) out["send_error"] = r["error"];
+        if (r["ok"].toBool() && p.v.contains("auto")) { sent[night + "_" + kind] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate); QFile f(originDataDir() + "/briefings_sent.json"); if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) f.write(QJsonDocument(sent).toJson()); }
+        out["ok"] = r["ok"].toBool();
+    }
+    return out;
+}
+
+QJsonObject cmdMailTest(const Parsed& p, const Cmd&)
+{
+    return Mail::send("[Origin] test message", "If you can read this, the OriginHeadless briefing e-mails can reach you.\n" + QDateTime::currentDateTime().toString(Qt::ISODate), str(p, "to"));
 }
 
 QJsonObject cmdNow(const Parsed& p, const Cmd& c)
@@ -764,6 +892,9 @@ int main(int argc, char* argv[])
     else if (cmd->name == "schedule") out = cmdSchedule(p, *cmd);
     else if (cmd->name == "fieldrot") { Astro::Site s{num(p, *cmd, "lat"), num(p, *cmd, "lon")}; out = Planner::fieldRotation(num(p, *cmd, "ra-hours"), num(p, *cmd, "dec-deg"), s, num(p, *cmd, "tol"), num(p, *cmd, "hours")); }
     else if (cmd->name == "moon") out = cmdMoon(p, *cmd);
+    else if (cmd->name == "briefing") out = cmdBriefing(p, *cmd);
+    else if (cmd->name == "mail-login") out = Mail::login();
+    else if (cmd->name == "mail-test") out = cmdMailTest(p, *cmd);
     else if (cmd->name == "backup") out = cmdBackup(p, *cmd);
     else if (cmd->name == "run") out = cmdRun(p, *cmd);
     else if (cmd->name == "now") out = cmdNow(p, *cmd);

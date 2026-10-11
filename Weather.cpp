@@ -30,7 +30,7 @@ QJsonObject toJson(const Hour& h)
 {
     auto r1 = [](double v) { return std::round(v * 10) / 10; };
     return {{"utc", h.utc.toString(Qt::ISODate)}, {"cloud", h.cloud}, {"low", h.low}, {"mid", h.mid}, {"high", h.high}, {"precip_prob", h.precipProb}, {"precip_mm", h.precip},
-            {"visibility_km", r1(h.visibilityM / 1000)}, {"humidity", h.humidity}, {"dew_c", h.dew}, {"temp_c", h.temp}, {"wind_ms", h.wind}, {"quality", std::round(h.quality * 100) / 100}};
+            {"visibility_km", r1(h.visibilityM / 1000)}, {"humidity", h.humidity}, {"dew_c", h.dew}, {"temp_c", h.temp}, {"wind_ms", h.wind}, {"gust_ms", h.gust}, {"quality", std::round(h.quality * 100) / 100}};
 }
 
 static bool parse(const QJsonObject& d, QVector<Hour>* out)
@@ -45,7 +45,7 @@ static bool parse(const QJsonObject& d, QVector<Hour>* out)
         x.utc = QDateTime::fromString(t[i].toString(), "yyyy-MM-ddTHH:mm"); x.utc.setTimeZone(QTimeZone::UTC);
         x.cloud = col("cloud_cover", i, 0); x.low = col("cloud_cover_low", i, 0); x.mid = col("cloud_cover_mid", i, 0); x.high = col("cloud_cover_high", i, 0);
         x.precipProb = col("precipitation_probability", i, 0); x.precip = col("precipitation", i, 0); x.visibilityM = col("visibility", i, 1e5);
-        x.humidity = col("relative_humidity_2m", i, 0); x.dew = col("dew_point_2m", i, 0); x.temp = col("temperature_2m", i, 10); x.wind = col("wind_speed_10m", i, 0);
+        x.humidity = col("relative_humidity_2m", i, 0); x.dew = col("dew_point_2m", i, 0); x.temp = col("temperature_2m", i, 10); x.wind = col("wind_speed_10m", i, 0); x.gust = col("wind_gusts_10m", i, x.wind);
         x.quality = quality(x);
         if (x.utc.isValid()) out->append(x);
     }
@@ -72,7 +72,7 @@ QJsonObject fetch(double lat, double lon, int days, int maxAgeMin, const QString
     QUrl url("https://api.open-meteo.com/v1/forecast");
     QUrlQuery q;
     q.addQueryItem("latitude", QString::number(lat, 'f', 4)); q.addQueryItem("longitude", QString::number(lon, 'f', 4));
-    q.addQueryItem("hourly", "cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,precipitation_probability,precipitation,visibility,relative_humidity_2m,dew_point_2m,temperature_2m,wind_speed_10m");
+    q.addQueryItem("hourly", "cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,precipitation_probability,precipitation,visibility,relative_humidity_2m,dew_point_2m,temperature_2m,wind_speed_10m,wind_gusts_10m");
     q.addQueryItem("forecast_days", QString::number(std::max(1, std::min(days, 7)))); q.addQueryItem("past_days", "1");
     q.addQueryItem("timezone", "UTC"); q.addQueryItem("wind_speed_unit", "ms");
     url.setQuery(q);
@@ -96,6 +96,28 @@ QJsonObject fetch(double lat, double lon, int days, int maxAgeMin, const QString
     }
     if (cached.contains("data")) return done(cached["data"].toObject(), true, fetchedMs, "forecast request failed (" + err + "); using the cached copy");
     return {{"ok", false}, {"error", "weather forecast unavailable: " + err}};
+}
+
+QVector<QPair<QDateTime, double>> nowcast(double lat, double lon, int hours)
+{
+    QVector<QPair<QDateTime, double>> out;
+    QUrl url("https://api.open-meteo.com/v1/forecast"); QUrlQuery q;
+    q.addQueryItem("latitude", QString::number(lat, 'f', 4)); q.addQueryItem("longitude", QString::number(lon, 'f', 4));
+    q.addQueryItem("minutely_15", "precipitation"); q.addQueryItem("forecast_minutely_15", QString::number(std::max(1, hours) * 4 + 4)); q.addQueryItem("timezone", "UTC");
+    url.setQuery(q);
+    QNetworkAccessManager nam; QNetworkReply* rep = nam.get(QNetworkRequest(url));
+    QEventLoop loop; QTimer::singleShot(15000, &loop, &QEventLoop::quit); QObject::connect(rep, &QNetworkReply::finished, &loop, &QEventLoop::quit); loop.exec();
+    if (rep->isFinished() && rep->error() == QNetworkReply::NoError) {
+        const QJsonObject m = QJsonDocument::fromJson(rep->readAll()).object()["minutely_15"].toObject();
+        const QJsonArray t = m["time"].toArray(), p = m["precipitation"].toArray();
+        const QDateTime now = QDateTime::currentDateTimeUtc();
+        for (int i = 0; i < t.size() && i < p.size(); ++i) {
+            QDateTime d = QDateTime::fromString(t[i].toString(), "yyyy-MM-ddTHH:mm"); d.setTimeZone(QTimeZone::UTC);
+            if (d >= now.addSecs(-900) && d <= now.addSecs(hours * 3600)) out.append({d, p[i].toDouble()});
+        }
+    } else rep->abort();
+    rep->deleteLater();
+    return out;
 }
 
 const Hour* at(const QVector<Hour>& hours, const QDateTime& utc)

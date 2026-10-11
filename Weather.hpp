@@ -16,7 +16,7 @@ struct Hour {
     QDateTime utc;                                // start of the hour
     double cloud = 0, low = 0, mid = 0, high = 0; // cloud cover, %
     double precipProb = 0, precip = 0;            // % and mm
-    double visibilityM = 1e5, humidity = 0, dew = 0, temp = 0, wind = 0;   // m, %, degC, degC, m/s
+    double visibilityM = 1e5, humidity = 0, dew = 0, temp = 0, wind = 0, gust = 0;   // m, %, degC, degC, m/s, m/s
     double quality = 1;                           // 0 (hopeless) .. 1 (clear and dry), see quality()
 };
 
@@ -30,6 +30,9 @@ QJsonObject fetch(double latDeg, double lonDeg, int days, int maxAgeMin, const Q
 
 /// The hour containing `utc` (nearest hour start), or nullptr when the forecast does not cover it.
 const Hour* at(const QVector<Hour>& hours, const QDateTime& utc);
+
+/// Precipitation (mm) per 15 minutes for the next `hours` hours (Open-Meteo minutely_15; covers the UK), never cached. Empty on failure.
+QVector<QPair<QDateTime, double>> nowcast(double latDeg, double lonDeg, int hours);
 
 QJsonObject toJson(const Hour& h);
 

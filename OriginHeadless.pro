@@ -19,6 +19,7 @@ SOURCES += \
     Planner.cpp \
     Ephemeris.cpp \
     Weather.cpp \
+    Mail.cpp \
     CoordinateUtils.cpp \
     TelescopeDataProcessor.cpp \
     OriginBackend.cpp \
