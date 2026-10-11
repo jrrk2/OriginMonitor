@@ -265,7 +265,7 @@ Planner::Options plannerOptions(const Parsed& p, const Cmd& c)
     g_wx = QJsonObject();
     if (str(p, "weather", "on") != "off") {
         o.minQuality = num(p, c, "min-quality");
-        QJsonObject r = Weather::fetch(o.site.latDeg, o.site.lonDeg, 3, g_fresh ? 0 : 60, originDataDir(), &o.weather);
+        QJsonObject r = Weather::fetch(o.site.latDeg, o.site.lonDeg, 7, g_fresh ? 0 : 60, originDataDir(), &o.weather);
         r.remove("hours"); g_wx = r;                                           // keep the planner usable when the forecast cannot be had
         if (!r["ok"].toBool()) o.weather.clear();
     }
@@ -290,7 +290,7 @@ QJsonObject cmdSchedule(const Parsed& p, const Cmd& c)
 QJsonObject cmdWeather(const Parsed& p, const Cmd& c)
 {
     QVector<Weather::Hour> hrs;
-    QJsonObject r = Weather::fetch(num(p, c, "lat"), num(p, c, "lon"), 3, g_fresh ? 0 : 60, originDataDir(), &hrs);
+    QJsonObject r = Weather::fetch(num(p, c, "lat"), num(p, c, "lon"), 7, g_fresh ? 0 : 60, originDataDir(), &hrs);
     if (!r["ok"].toBool()) return r;
     const QDateTime from = QDateTime::currentDateTimeUtc().addSecs(-1800), to = from.addSecs(3600 * int(num(p, c, "hours")));
     QJsonArray out; QString text;
