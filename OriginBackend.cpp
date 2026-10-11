@@ -240,6 +240,10 @@ bool OriginBackend::takeSnapshot(double exposure, int iso, int binning)
         return false;
     }
 
+    // Remember what was asked, so that the parameters are resent after the capture: the telescope resets them and a frame taken with the reset values comes back as a PNG
+    // instead of the raw FITS (every frame of a 2026-10-11 survey did, because explicit-exposure snapshots never registered their parameters)
+    if (exposure > 0) m_requestedExposure = exposure;
+    if (iso > 0) m_requestedISO = iso;
     m_snapshotInProgress = true;
     // RunSampleCapture command triggers a single snapshot
     QJsonObject params;

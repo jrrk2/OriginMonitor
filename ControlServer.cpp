@@ -410,6 +410,11 @@ QJsonObject ControlServer::doSnapshot(const QJsonObject& req)
     if (!sent) { disconnect(conn); return fail("snapshot request failed"); }
     loop.exec();
     disconnect(conn);
+    // a PNG instead of the raw FITS (seen on the first frame after a slew, and whenever the telescope has reset the capture parameters): ask once more, now that they were resent
+    if (done && result["ok"].toBool() && req.contains("exposure") && !req["_retry"].toBool() && !result["path"].toString().endsWith(".fits", Qt::CaseInsensitive)) {
+        QEventLoop pause; QTimer::singleShot(1500, &pause, &QEventLoop::quit); pause.exec();
+        QJsonObject again = req; again["_retry"] = true; return doSnapshot(again);
+    }
     return done ? result : fail("timed out waiting for snapshot");
 }
 
