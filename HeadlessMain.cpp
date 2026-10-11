@@ -1240,6 +1240,12 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
         note({{"autorun", "initializing the mount"}});
         QJsonObject r = call("initialize", {{"lat_deg", o.site.latDeg}, {"lon_deg", o.site.lonDeg}, {"timezone", o.timeZone}, {"wait", true}, {"timeout", 300}}, 360000);
         if (!r["ok"].toBool() || r["outcome"].toString().toLower() == "failed") {
+            if (r["error"].toString().contains("enough stars", Qt::CaseInsensitive) || r["summary"].toString().contains("enough stars", Qt::CaseInsensitive)) {
+                // the sky is not clear enough yet: that is weather, not a mount fault, so it does not use up one of the 3 attempts (at most 12 such tries a night)
+                st["init_attempts"] = st["init_attempts"].toInt() - 1; st["star_fails"] = st["star_fails"].toInt() + 1; save();
+                if (st["star_fails"].toInt() > 12) return idle("the alignment found too few stars 12 times tonight; giving up until the sky clears (touch nothing; it will keep trying tomorrow)");
+                return idle("initialize: not enough stars for alignment (cloud?); will retry next tick");
+            }
             if (str(p, "init-fallback", "off") != "fake-init") return idle("initialize failed: " + r["error"].toString() + r["summary"].toString() + " (will retry; --init-fallback fake-init is off)");
             // Patchy cloud makes the star alignment fail. Fake-initialize (no alignment, just a coordinate frame), point at sky on the other side of the
             // meridian with an ordinary RA/Dec goto, and try the real initialize again on the next tick. The mount is NOT trusted until that succeeds.
@@ -1250,6 +1256,11 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
             QJsonObject g = fk["ok"].toBool() ? gotoAltAz(newAlt, newAz, o.site, 240) : fk;
             st["need_real_init"] = true; st["moves"] = st["moves"].toInt() + 1; st["last_init_error"] = r["summary"]; save();
             return idle(QString("initialize failed (%1); fake-init %2, moved to az %3 alt %4 (%5); will retry the real initialize").arg(r["summary"].toString(), fk["ok"].toBool() ? "ok" : "failed").arg(newAz, 0, 'f', 0).arg(newAlt, 0, 'f', 0).arg(g["ok"].toBool() ? "goto ok" : g["error"].toString()));
+        }
+        // never launch the run on a mount that is not aligned, whatever the initialize call reported
+        if (!call("mount_status", {{"fresh", true}}, 15000)["mount"].toObject()["IsAligned"].toBool()) {
+            st["need_real_init"] = false; save();
+            return idle("initialize returned but the mount is not aligned; will retry next tick");
         }
         st["need_real_init"] = false; save();
     }

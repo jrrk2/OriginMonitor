@@ -29,6 +29,7 @@ ControlServer::ControlServer(OriginBackend* backend, bool allowRaw, QObject* par
     connect(&m_server, &QTcpServer::newConnection, this, &ControlServer::onNewConnection);
     connect(m_backend, &OriginBackend::messageReceived, this, [this](const QJsonObject& m) {
         m_last[m["Source"].toString() + "/" + m["Command"].toString()] = m;
+        if (m["Source"].toString() == "TaskController" && !m["ErrorMessage"].toString().isEmpty()) { m_tcError = m["ErrorMessage"].toString(); m_tcErrorMs = QDateTime::currentMSecsSinceEpoch(); }
         if (m["Type"].toString() == "Response")
             m_responses[m["SequenceID"].toInt()] = m;
         if (m["Source"].toString() == "Focuser" && m.contains("CalibrationLowerLimit")) {
@@ -172,12 +173,13 @@ QJsonObject ControlServer::doInitialize(const QJsonObject& req)
     }
     if (!req["wait"].toBool(true)) { r["ok"] = true; r["outcome"] = "started"; r["summary"] = "RunInitialize accepted; not waiting"; return r; }
 
-    QElapsedTimer t; t.start();
+    QElapsedTimer t; t.start(); const qint64 startMs = QDateTime::currentMSecsSinceEpoch();
     const int timeoutMs = req["timeout"].toInt(300) * 1000;
     QJsonArray steps; QString lastStep, state, stage, errorText; int pct = 0; bool sawInit = false;
     QJsonObject cur;
     while (t.elapsed() < timeoutMs) {
-        QEventLoop loop; QTimer::singleShot(2000, &loop, &QEventLoop::quit); loop.exec();
+        QEventLoop loop; QTimer::singleShot(500, &loop, &QEventLoop::quit); loop.exec();
+        if (!m_tcError.isEmpty() && m_tcErrorMs >= startMs) { errorText = m_tcError; cur = queryTaskController(); state = cur["State"].toString(); stage = cur["Stage"].toString(); break; }   // an error that the next status message overwrote
         cur = queryTaskController();
         if (cur.isEmpty() || cur["State"].toString().isEmpty()) continue;       // no usable reply while the mount is busy: keep waiting
         state = cur["State"].toString(); stage = cur["Stage"].toString();
@@ -196,6 +198,9 @@ QJsonObject ControlServer::doInitialize(const QJsonObject& req)
         r["summary"] = QString("initialisation failed during %1: %2").arg(lastStep.isEmpty() ? "an unknown step" : lastStep, errorText);
     } else if (state == "INITIALIZING" || cur.isEmpty()) {
         r["outcome"] = "timeout"; r["summary"] = QString("still %1 after %2 s (step %3, %4%)").arg(cur.isEmpty() ? "silent" : "INITIALIZING").arg(timeoutMs / 1000).arg(lastStep.isEmpty() ? "?" : lastStep).arg(pct);
+    } else if (!req["fake"].toBool(false) && !queryMount(5000)["IsAligned"].toBool()) {
+        // IDLE and not initialising is not the same as aligned: a failed alignment also ends there (seen 2026-10-11: "Did not find enough stars")
+        r["outcome"] = "failed"; r["error"] = "the mount is not aligned after the initialisation"; r["summary"] = QString("initialisation ended in %1 but the mount reports IsAligned false").arg(state);
     } else if (cur["IsReady"].toBool() || state == "IDLE") {
         r["ok"] = true; r["outcome"] = "initialized";
         r["summary"] = QString("initialised in %1 s; state %2%3, ready %4").arg(int(t.elapsed() / 1000)).arg(state, stage.isEmpty() ? "" : "/" + stage, cur["IsReady"].toBool() ? "yes" : "no");
