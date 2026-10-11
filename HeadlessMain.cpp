@@ -156,8 +156,8 @@ const QList<Cmd>& commands()
                        return a + pa; }()});
         v.append({"sky-report", "planning", "Tell the forecast what the sky looks like now: percent of the sky covered by low/mid cloud (0 clear .. 100 overcast). Counts as an observation at the site (heavier than any airport METAR) for 90 minutes and steers the model blend; its influence fades over about 3 hours.", "", false, true,
                   {O("cover", 'd', "cloud cover now, percent")}});
-        v.append({"survey", "action", "Twilight obstruction survey: while waiting for darkness, point at a random sample of the places the night's plan will use (block start, middle, end, backups), take a very short frame at each, and judge whether the view is blocked (trees, roofs) from the sky level and the spread of the frame. Needs an aligned mount and the Sun below --sun-limit. Records evidence in the learned obstruction map, writes survey_<night>.json and a picture per sample.",
-                  "", true, false, [] { QList<Arg> a = {O("samples", 'i', "places to sample", "8"), O("seed", 'i', "random seed (default: the night's date)"), O("sun-limit", 'd', "Sun altitude it must be below, deg", "-7"), O("max-minutes", 'd', "stop after this long", "35"),
+        v.append({"survey", "action", "Twilight obstruction survey: while waiting for darkness, point at a sample of the places the night's plan will use (places the obstruction map has never seen first, then random) (block start, middle, end, backups), take a very short frame at each, and judge whether the view is blocked (trees, roofs) from the sky level and the spread of the frame. Needs an aligned mount and the Sun below --sun-limit. Records evidence in the learned obstruction map, writes survey_<night>.json and a picture per sample.",
+                  "", true, false, [] { QList<Arg> a = {O("samples", 'i', "places to sample", "8"), O("seed", 'i', "random seed for the order within equally-visited places (default: the night's date)"), O("sun-limit", 'd', "Sun altitude it must be below, deg", "-7"), O("max-minutes", 'd', "stop after this long", "35"),
                                                    O("dry-run", 'b', "list the sample points, do nothing"), O("iso", 'i', "ISO", "800")}; return a + plannerArgs(); }()});
         v.append({"goto-altaz", "action", "Slew to a horizontal position by converting it to J2000 RA/Dec for the current time and using the ordinary goto (bounded by the mount's own limits). Needs an aligned (or fake-initialized) mount.", "", true, false,
                   {O("az", 'd', "azimuth, deg (0=N, 90=E, 180=S, 270=W)"), O("alt", 'd', "altitude, deg", "50"), O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218"), O("timeout", 'i', "seconds", "240")}});
@@ -988,7 +988,7 @@ QJsonObject cmdSurvey(const Parsed& p, const Cmd& c)
     if (!S["ok"].toBool()) return S;
     const QString night = S["night"].toString();
     // candidate places: block start, middle and end, and the first two backups of each block
-    struct Pt { double az, alt; QString what; };
+    struct Pt { double az, alt; QString what; int visits = 0; };
     QList<Pt> cand;
     for (const QJsonValue& bv : S["plan"].toArray()) {
         const QJsonObject b = bv.toObject(); const QString name = b["name"].toString(b["key"].toString());
@@ -1004,11 +1004,18 @@ QJsonObject cmdSurvey(const Parsed& p, const Cmd& c)
         if (!dup) uniq.append(q);
     }
     if (uniq.isEmpty()) return failure("the plan has nothing to sample");
+    // unvisited places first: how often has the learned obstruction map (10 deg x 5 deg bins) seen each place? Fewest visits first, random order within equal counts.
+    QJsonObject bins; { QFile mf(originDataDir() + "/sky_map.json"); if (mf.open(QIODevice::ReadOnly)) bins = QJsonDocument::fromJson(mf.readAll()).object()["bins"].toObject(); }
+    for (Pt& q : uniq) {
+        const QJsonObject b = bins[QString("%1_%2").arg(int(std::floor(q.az / 10.0)) * 10).arg(int(std::floor(q.alt / 5.0)) * 5)].toObject();
+        q.visits = b["good"].toInt() + b["bad"].toInt() + b["cloud"].toInt() + b["unk"].toInt();
+    }
     std::mt19937 rng(p.v.contains("seed") ? uint32_t(str(p, "seed").toInt()) : uint32_t(QDate::fromString(night, Qt::ISODate).toJulianDay()));
     std::shuffle(uniq.begin(), uniq.end(), rng);
+    std::stable_sort(uniq.begin(), uniq.end(), [](const Pt& a, const Pt& b) { return a.visits < b.visits; });
     uniq = uniq.mid(0, std::max(1, int(num(p, c, "samples"))));
     std::sort(uniq.begin(), uniq.end(), [](const Pt& a, const Pt& b) { return a.az < b.az; });       // sweep in azimuth: least slewing
-    QJsonArray plan; for (const Pt& q : uniq) plan.append(QJsonObject{{"az", std::round(q.az)}, {"alt", std::round(q.alt)}, {"for", q.what}});
+    QJsonArray plan; for (const Pt& q : uniq) plan.append(QJsonObject{{"az", std::round(q.az)}, {"alt", std::round(q.alt)}, {"for", q.what}, {"bin_visits", q.visits}});
     if (p.v.contains("dry-run")) return {{"ok", true}, {"dry_run", true}, {"night", night}, {"samples", plan}};
 
     const QDateTime t0 = QDateTime::currentDateTimeUtc();
