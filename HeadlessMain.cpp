@@ -148,6 +148,7 @@ const QList<Cmd>& commands()
                        return a + pa; }()});
         v.append({"goto-altaz", "action", "Slew to a horizontal position by converting it to J2000 RA/Dec for the current time and using the ordinary goto (bounded by the mount's own limits). Needs an aligned (or fake-initialized) mount.", "", true, false,
                   {O("az", 'd', "azimuth, deg (0=N, 90=E, 180=S, 270=W)"), O("alt", 'd', "altitude, deg", "50"), O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218"), O("timeout", 'i', "seconds", "240")}});
+        v.append({"forecast-accuracy", "planning", "How good the weather forecast has been: compares the archived dusk forecast of each night with the frames the sequencer took (usable fraction per hour). Writes forecast_accuracy.csv/.json in the data dir; reports bias (positive = the sky was better than forecast).", "", false, true, {}});
         v.append({"autorun", "planning", "Dusk launcher for cron (every 5 minutes): once per night, if the telescope is out and reachable, starts the daemon, connects, initializes the mount if needed and starts 'run --unattended --mail' in the background. Does nothing (quietly) when the telescope does not answer, when nothing is observable, when rain is forecast, or when ~/.config/origin/autorun.off exists. Slews the telescope: only schedule it if that is wanted.", "", true, false,
                   [] { QList<Arg> a = {O("telescope", 's', "telescope host", "192.168.1.195"), O("start-after", 's', "\"dusk\" (Sun below -12 deg at the site) or a local HH:MM; never act before this", "dusk"), O("stop-before-dawn", 'd', "minutes before the end of darkness after which no run is started", "60"),
                                        O("dry-run", 'b', "say what would be done, do nothing"), O("init-fallback", 'o', "off | fake-init: after a failed initialize, fake-initialize, goto sky on the other side of the meridian and retry (UNTESTED on the real mount; off by default)", "off"), O("ignore-time", 'b', "skip the evening/dawn time gates (testing)"), O("no-mail", 'b', "send no e-mails (testing)"), O("iso", 'i', "ISO for the run", "800"), O("max-exposure", 'd', "longest exposure for the run, s", "20")};
@@ -373,6 +374,85 @@ QJsonObject cmdBackup(const Parsed& p, const Cmd& c)
 
 
 // ---------------------------------------------------------------------------------------------------------------------------------------
+// Forecast track record. The dusk forecast for each night is archived (<data dir>/forecasts/<night>.json, the first one saved between sunset-1h and
+// 22:00, i.e. what the decision to put the telescope out is based on). It is compared hour by hour with what the sequencer measured that night
+// (sequence_<date>.jsonl: 'clear'/'hazy' frames are usable, 'cloudy'/'patchy' are not; 'unreadable' and obstruction frames say nothing about the sky),
+// weighted by the time each frame covers so sparse probing in cloud does not flatter the forecast. Results: forecast_accuracy.csv (one row per hour)
+// and forecast_accuracy.json (summary). Positive bias = the forecast was too pessimistic.
+// ---------------------------------------------------------------------------------------------------------------------------------------
+void archiveForecast(const QString& night, const QJsonArray& hours)
+{
+    const QString dir = originDataDir() + "/forecasts"; QDir().mkpath(dir);
+    QFile f(dir + "/" + night + ".json");
+    if (f.exists() || hours.isEmpty()) return;
+    if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(QJsonObject{{"night", night}, {"saved", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}, {"hours", hours}}).toJson());
+}
+
+QJsonObject forecastAccuracy()
+{
+    const QString dir = originDataDir();
+    QJsonArray rows; QStringList csv{"night,hour_utc,forecast_quality,cloud_low,cloud_mid,cloud_high,observed_usable,covered_min"};
+    QJsonArray nights;
+    for (const QFileInfo& fi : QDir(dir + "/forecasts").entryInfoList({"*.json"}, QDir::Files, QDir::Name)) {
+        QFile ff(fi.absoluteFilePath()); if (!ff.open(QIODevice::ReadOnly)) continue;
+        const QJsonObject fc = QJsonDocument::fromJson(ff.readAll()).object(); const QString night = fc["night"].toString();
+        const QDate d0 = QDate::fromString(night, Qt::ISODate); if (!d0.isValid()) continue;
+        struct Fr { QDateTime t; bool good; }; QList<Fr> frames;
+        for (const QDate& d : {d0, d0.addDays(1)}) {
+            QFile sf(dir + "/sequence_" + d.toString("yyyyMMdd") + ".jsonl"); if (!sf.open(QIODevice::ReadOnly)) continue;
+            while (!sf.atEnd()) {
+                const QJsonObject o = QJsonDocument::fromJson(sf.readLine()).object(); const QString v = o["verdict"].toString();
+                if (v == "unreadable" || v.isEmpty() || o["cause"].toString() == "obstruction") continue;
+                QDateTime t = QDateTime::fromString(o["time"].toString(), Qt::ISODateWithMs); if (!t.isValid()) continue;
+                frames.append({t.toUTC(), v == "clear" || v == "hazy"});
+            }
+        }
+        std::sort(frames.begin(), frames.end(), [](const Fr& a, const Fr& b) { return a.t < b.t; });
+        QMap<qint64, QPair<double, double>> perHour;                                   // hour start (epoch s) -> {good s, bad s}
+        for (int i = 0; i < frames.size(); ++i) {
+            const double w = i + 1 < frames.size() ? std::min<double>(frames[i].t.secsTo(frames[i + 1].t), 600.0) : 30.0;
+            const qint64 hs = frames[i].t.toSecsSinceEpoch() / 3600 * 3600;
+            (frames[i].good ? perHour[hs].first : perHour[hs].second) += w;
+        }
+        int used = 0;
+        for (const QJsonValue& hv : fc["hours"].toArray()) {
+            const QJsonObject h = hv.toObject(); const QDateTime a = parseZ(h["utc"].toString().left(19) + "Z");
+            const auto it = perHour.constFind(a.toSecsSinceEpoch()); if (it == perHour.constEnd()) continue;
+            const double cov = it->first + it->second; if (cov < 900) continue;       // at least 15 minutes of evidence
+            const double obs = it->first / cov;
+            rows.append(QJsonObject{{"night", night}, {"hour_utc", a.toString("HH:mm")}, {"forecast", h["quality"]}, {"observed", std::round(obs * 100) / 100}, {"covered_min", int(cov / 60)}});
+            csv << QString("%1,%2,%3,%4,%5,%6,%7,%8").arg(night, a.toString(Qt::ISODate)).arg(h["quality"].toDouble()).arg(h["low"].toDouble()).arg(h["mid"].toDouble()).arg(h["high"].toDouble()).arg(obs, 0, 'f', 2).arg(int(cov / 60));
+            ++used;
+        }
+        nights.append(QJsonObject{{"night", night}, {"hours_compared", used}});
+    }
+    int n = 0, poor = 0, poorUsable = 0, good = 0, goodUsable = 0; double sp = 0, so = 0, ae = 0;
+    for (const QJsonValue& v : rows) {
+        const QJsonObject r = v.toObject(); const double f = r["forecast"].toDouble(), o = r["observed"].toDouble();
+        ++n; sp += f; so += o; ae += std::abs(o - f);
+        if (f < 0.5) { ++poor; if (o >= 0.5) ++poorUsable; } else { ++good; if (o >= 0.5) ++goodUsable; }
+    }
+    QFile cf(dir + "/forecast_accuracy.csv"); if (cf.open(QIODevice::WriteOnly | QIODevice::Truncate)) cf.write((csv.join("\n") + "\n").toUtf8());
+    QJsonObject r{{"ok", true}, {"hours_compared", n}, {"nights", nights}, {"hours_forecast_poor", poor}, {"poor_but_usable", poorUsable}, {"hours_forecast_good", good}, {"good_and_usable", goodUsable}};
+    if (n) { r["mean_forecast"] = std::round(sp / n * 100) / 100; r["mean_observed"] = std::round(so / n * 100) / 100; r["bias_pessimism"] = std::round((so - sp) / n * 100) / 100; r["mean_abs_error"] = std::round(ae / n * 100) / 100; }
+    r["note"] = "only hours with at least 15 minutes of frames count, and those are mostly hours when we chose to shoot; positive bias_pessimism means the sky was better than forecast";
+    QFile jf(dir + "/forecast_accuracy.json"); if (jf.open(QIODevice::WriteOnly | QIODevice::Truncate)) jf.write(QJsonDocument(QJsonObject{{"summary", r}, {"hours", rows}}).toJson());
+    r["hours"] = rows;
+    return r;
+}
+
+QString trackRecordLine(const QJsonObject& a)
+{
+    const int n = a["hours_compared"].toInt();
+    if (n < 8) return QString("Forecast track record: only %1 observed hour(s) compared so far; too few to say how reliable the forecast is here (the dusk forecast is archived each night and compared with the frames the telescope takes).").arg(n);
+    QString s = QString("Forecast track record (%1 observed hours over %2 night(s)): the sky was on average %3 %4 than forecast (mean forecast quality %5, observed usable fraction %6).")
+                    .arg(n).arg(a["nights"].toArray().size()).arg(std::abs(a["bias_pessimism"].toDouble()), 0, 'f', 2).arg(a["bias_pessimism"].toDouble() >= 0 ? "better" : "worse").arg(a["mean_forecast"].toDouble(), 0, 'f', 2).arg(a["mean_observed"].toDouble(), 0, 'f', 2);
+    if (a["hours_forecast_poor"].toInt() > 0) s += QString(" Of %1 hours forecast poor, %2 were actually usable.").arg(a["hours_forecast_poor"].toInt()).arg(a["poor_but_usable"].toInt());
+    if (a["hours_forecast_good"].toInt() > 0) s += QString(" Of %1 hours forecast good, %2 were.").arg(a["hours_forecast_good"].toInt()).arg(a["good_and_usable"].toInt());
+    return s;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------
 // briefing: the two e-mails. "dusk" (at sunset): is it worth putting the telescope out tonight? "night" (22:00): is it safe to put it out for the night?
 // Both always saved to <data dir>/briefings/; sent with --send (Microsoft Graph, see Mail.hpp). --auto decides which one is due now and whether it was already
 // sent (<data dir>/briefings_sent.json), so a cron entry every 5 minutes is all the scheduling there is.
@@ -390,6 +470,9 @@ QJsonObject cmdBriefing(const Parsed& p, const Cmd& c)
     auto loc = [&](const QDateTime& t) { return t.toTimeZone(zone).toString("HH:mm"); };
     auto locJ = [&](const QJsonValue& v) { return v.isNull() || v.isUndefined() ? QString("--:--") : loc(parseZ(v.toString())); };
     const QDateTime sunset = parseZ(sm["sunset"].toString()), darkStart = parseZ(S["dark_start"].toString()), darkEnd = parseZ(S["dark_end"].toString());
+    { const QStringList nh0 = str(p, "night-at", "22:00").split(':');
+      const QDateTime cutoff = QDateTime(o.date, QTime(nh0.value(0).toInt(), nh0.value(1).toInt()), zone).toUTC();
+      if (now >= sunset.addSecs(-3600) && now <= std::max(cutoff, darkStart)) archiveForecast(night, S["weather"].toObject()["hours"].toArray()); }
 
     // which briefing
     QString kind = str(p, "kind");
@@ -427,12 +510,13 @@ QJsonObject cmdBriefing(const Parsed& p, const Cmd& c)
         }
         if (open) wins.append(cur);
         int best = 0, total = 0; for (const Win& w : wins) { const int m = int(w.a.secsTo(w.b) / 60); total += m; best = std::max(best, m); }
-        const QString verdict = best >= 90 ? "WORTH PUTTING OUT" : best >= 40 ? "MARGINAL" : "NOT WORTH IT";
+        const QString verdict = best >= 90 ? "WORTH PUTTING OUT" : best >= 40 ? "MARGINAL" : "POOR FORECAST";
         QString when; for (const Win& w : wins) when += (when.isEmpty() ? "" : ", ") + loc(w.a) + "-" + loc(w.b);
-        subject = QString("[Origin] Dusk: %1%2").arg(verdict, wins.isEmpty() ? " - no usable sky forecast" : " - clear " + when);
-        body = QString("%1 (night of %2)\n\nVERDICT: %3\n").arg(verdict, title, best >= 90 ? "put the telescope out." : best >= 40 ? "only short gaps are forecast; your call." : "leave it in.");
+        subject = QString("[Origin] Dusk: %1%2").arg(verdict, wins.isEmpty() ? " - no usable hours forecast (but it has been wrong before)" : " - clear " + when);
+        body = QString("%1 (night of %2)\n\nVERDICT: %3\n").arg(verdict, title, best >= 90 ? "put the telescope out." : best >= 40 ? "only short gaps are forecast; worth trying." : "the forecast is poor, but forecasts here have often been too pessimistic, so it is not a reason to stay in. Trying costs only the put-out; if it is out and answering, autorun will image whatever breaks.");
         body += QString("Sunset %1, astronomical dark %2 to %3. %4 of the %5 dark minutes are forecast usable; longest clear stretch %6 min.\n").arg(loc(sunset), loc(darkStart), loc(darkEnd)).arg(total).arg(int(darkStart.secsTo(darkEnd) / 60)).arg(best);
         if (wx.contains("rain_from")) body += "Rain is forecast from " + locJ(wx["rain_from"]) + ".\n";
+        { const QJsonObject acc = forecastAccuracy(); body += "\n" + trackRecordLine(acc) + "\n"; }
         body += "\nUsable windows (local): " + (when.isEmpty() ? "none" : when) + "\n\nHour by hour (local): cloud low/mid/high, rain chance, quality\n";
         for (const QJsonValue& hv : wx["hours"].toArray()) {
             const QJsonObject h = hv.toObject();
@@ -777,6 +861,7 @@ void mailRunSummary(const QString& outcome, const QString& night)
     }
     const QJsonObject st = call("sequence", {{"action", "status"}}, 20000)["status"].toObject();
     if (!st.isEmpty()) body += QString("\nLast sequence: %1 frames, %2 good.\n").arg(st["frames"].toInt()).arg(st["good"].toInt());
+    body += "\n" + trackRecordLine(forecastAccuracy()) + "\n";
     body += "\nFull log: " + g_run.logPath + "\nStacks: " + originDataDir() + "/stacks\nThe telescope was parked on Polaris. Put it away when convenient.\n";
     const QJsonObject r = Mail::send(QString("[Origin] night %1: %2").arg(night, outcome), body);
     note({{"summary_mail", r["ok"]}, {"error", r["error"]}});
@@ -1073,6 +1158,7 @@ int main(int argc, char* argv[])
     else if (cmd->name == "backup") out = cmdBackup(p, *cmd);
     else if (cmd->name == "run") out = cmdRun(p, *cmd);
     else if (cmd->name == "autorun") out = cmdAutorun(p, *cmd);
+    else if (cmd->name == "forecast-accuracy") out = forecastAccuracy();
     else if (cmd->name == "goto-altaz") out = cmdGotoAltAz(p, *cmd);
     else if (cmd->name == "now") out = cmdNow(p, *cmd);
     else if (cmd->name == "weather") out = cmdWeather(p, *cmd);
