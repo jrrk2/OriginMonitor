@@ -21,6 +21,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QRegularExpression>
+#include <QPixmap>
 #include <QListWidget>
 #include <QMainWindow>
 #include <QPainter>
@@ -152,7 +154,7 @@ public:
         connect(m_client, &Client::state, this, [this](bool up) { m_conn->setText(up ? "daemon: connected" : QString("daemon: not reachable on port %1 (start it with OriginHeadless serve)").arg(m_port)); if (!up) clearNow(); });
         connect(&m_poll, &QTimer::timeout, this, &Window::poll); m_poll.start(2000);
         connect(&m_files, &QTimer::timeout, this, &Window::readRunLog); m_files.start(3000);
-        connect(&m_fcTimer, &QTimer::timeout, this, &Window::reloadForecast); m_fcTimer.start(30 * 60 * 1000);
+        connect(&m_fcTimer, &QTimer::timeout, this, &Window::reloadForecast); m_fcTimer.start(5 * 60 * 1000);
         resize(1100, 760); poll(); readRunLog(); reloadStacks(); QTimer::singleShot(200, this, &Window::reloadForecast);
     }
     void showTab(int i) { if (auto* t = findChild<QTabWidget*>()) t->setCurrentIndex(i); }
@@ -165,6 +167,9 @@ private:
         auto* w = new QWidget; auto* v = new QVBoxLayout(w);
         auto* top = new QHBoxLayout; auto* refresh = new QPushButton("Refresh now"); m_fcInfo = new QLabel("fetching..."); m_fcInfo->setWordWrap(true);
         top->addWidget(m_fcInfo, 1); top->addWidget(refresh); v->addLayout(top);
+        auto* nowBox = new QHBoxLayout; m_fcSky = new QLabel; m_fcSky->setFixedSize(130, 160); m_fcSky->setScaledContents(true); m_fcSky->hide();
+        m_fcNow = new QLabel("nowcast..."); m_fcNow->setWordWrap(true); m_fcNow->setTextFormat(Qt::RichText); m_fcNow->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+        nowBox->addWidget(m_fcSky); nowBox->addWidget(m_fcNow, 1); v->addLayout(nowBox);
         m_fcTable = new QTableWidget(0, 15); m_fcTable->setEditTriggers(QAbstractItemView::NoEditTriggers); m_fcTable->setSelectionMode(QAbstractItemView::NoSelection);
         m_fcTable->setHorizontalHeaderLabels({"Local", "Quality", "Range", "Cloud %", "Low", "Mid", "High", "Rain %", "Met Office", "ECMWF", "AIFS", "ICON", "GFS", "M-France", "KNMI"});
         m_fcTable->verticalHeader()->hide(); m_fcTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
@@ -176,6 +181,27 @@ private:
         return w;
     }
     static QColor tint(double q) { return q >= 0.5 ? QColor(20, 110, 40) : q >= 0.3 ? QColor(150, 110, 20) : QColor(120, 30, 30); }
+    void showNowcast(const QJsonObject& r, const QVector<Weather::Hour>& hrs, const QTimeZone& zone)
+    {
+        const QJsonObject mt = r["metar"].toObject();
+        if (!mt["ok"].toBool()) { m_fcNow->setText("<b>Nowcast:</b> no observations available (all-sky camera and airport reports unreachable); the forecast below is the models alone."); m_fcSky->hide(); return; }
+        QString sky = "<i>none</i>", obs = "<i>none</i>", ap;
+        for (const QJsonValue& v : mt["stations"].toArray()) {
+            const QJsonObject o = v.toObject(); const QString id = o["id"].toString();
+            if (id == "allsky") sky = o.contains("error") ? "<i>unavailable: " + o["error"].toString() + "</i>" : QString("<b>%1%</b> cloud (%2)").arg(o["cover"].toDouble() * 100, 0, 'f', 0).arg(o["raw"].toString().section(", ", 1).left(19));
+            else if (id == "observer") obs = QString("<b>%1%</b>").arg(o["cover"].toDouble() * 100, 0, 'f', 0);
+            else { QString raw = o["raw"].toString(); const QRegularExpressionMatch m = QRegularExpression("(NCD|CLR|SKC|(?:FEW|SCT|BKN|OVC)\\d+)").match(raw);
+                   ap += QString("%1 %2 km %3; ").arg(id).arg(o["km"].toInt()).arg(m.hasMatch() ? m.captured(1) : o["cover"].toDouble() == 0 ? QString("clear") : QString("?")); }
+        }
+        if (QFile::exists(m_dir + "/allsky_latest.jpg") && mt["stations"].toArray().size() > 0) { QPixmap pm(m_dir + "/allsky_latest.jpg"); if (!pm.isNull()) { m_fcSky->setPixmap(pm); m_fcSky->show(); } }
+        const Weather::Hour* cur = Weather::at(hrs, QDateTime::currentDateTimeUtc());
+        QString eff = cur && cur->qModel >= 0 ? QString("Current hour: models alone %1 quality, with the nowcast <b>%2</b> (observation weight %3%).").arg(cur->qModel, 0, 'f', 2).arg(cur->quality, 0, 'f', 2).arg(cur->obsWeight * 100, 0, 'f', 0) : QString();
+        m_fcNow->setText(QString("<b>Nowcast: observations now</b> (low/mid cloud fraction; steers the models, fading over about 3 hours)<br>"
+                                 "All-sky camera, Institute of Astronomy: %1<br>Your sky-report: %2 (OriginHeadless sky-report --cover N)<br>Airports: %3<br>"
+                                 "<b>Combined observed cover: %4%</b> at %5 local. %6")
+                             .arg(sky, obs, ap.isEmpty() ? "<i>none</i>" : ap.left(ap.size() - 2)).arg(mt["cover_pct"].toDouble(), 0, 'f', 0)
+                             .arg(QDateTime::fromString(mt["obs_time"].toString(), Qt::ISODate).toTimeZone(zone).toString("HH:mm"), eff));
+    }
     void reloadForecast()
     {
         m_fcInfo->setText("fetching..."); qApp->processEvents();
@@ -184,6 +210,7 @@ private:
         const QTimeZone zone("Europe/London"); const QDateTime now = QDateTime::currentDateTimeUtc();
         m_fcInfo->setText(QString("%1, fetched %2 (local). %3 Site %4 N %5 E.").arg(r["source"].toString(), QDateTime::fromString(r["fetched"].toString(), Qt::ISODate).toTimeZone(zone).toString("ddd HH:mm"),
                                                                                  r["note"].toString(), QString::number(m_lat, 'f', 2), QString::number(m_lon, 'f', 2)));
+        showNowcast(r, hrs, zone);
         static const QStringList ids = {"ukmo_seamless", "ecmwf_ifs025", "ecmwf_aifs025_single", "icon_seamless", "gfs_seamless", "meteofrance_seamless", "knmi_seamless"};
         m_fcTable->setRowCount(0);
         int row = 0;
@@ -401,7 +428,7 @@ private:
     }
 
     Client* m_client = nullptr; QString m_dir; int m_port; double m_lat, m_lon; QTimer m_poll, m_files, m_liveTimer, m_fcTimer;
-    QLabel *m_fcInfo = nullptr, *m_fcAcc = nullptr; QTableWidget* m_fcTable = nullptr; bool m_fcFresh = false;
+    QLabel *m_fcInfo = nullptr, *m_fcAcc = nullptr, *m_fcNow = nullptr, *m_fcSky = nullptr; QTableWidget* m_fcTable = nullptr; bool m_fcFresh = false;
     QLabel *m_conn, *m_tLink, *m_tState, *m_tMount, *m_tBatt, *m_pRaDec, *m_pAltAz, *m_pGoto, *m_pTarget, *m_fPos, *m_cExp, *m_cTemp, *m_sState, *m_sFrames, *m_sLast, *m_sCause, *m_sFocus, *m_sTiming,
            *m_aVerdict, *m_aWhy, *m_aSky, *m_rLast, *m_rCount, *m_liveInfo, *m_stackInfo;
     QCheckBox *m_night, *m_showEv, *m_showRun, *m_follow, *m_auto; QPlainTextEdit* m_log; ImageView *m_live, *m_stackView; QListWidget* m_list;
