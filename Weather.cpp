@@ -294,14 +294,14 @@ QJsonObject metarNowcast(double lat, double lon, const QString& cacheDir, int ma
             }
             if (sw2 <= 0) continue;
             h.qModel = h.quality;
-            // persistence: the models' re-weighted low+mid cover is also pulled towards what is observed now (80% at lead 0, fading over ~3 h), since a cloud field
+            // persistence: the models' re-weighted low+mid cover is also pulled towards what is observed now (90% at lead 0, fading over ~3 h), since a cloud field
             // seen overhead now is a better guide to the next hour or two than any model; the layers are scaled and the quality follows
             Hour a = h; a.low = lo / sw2; a.mid = mi / sw2; a.high = hi / sw2;
-            const double mc = 100 * (1 - (1 - a.low / 100) * (1 - a.mid / 100)), mc2 = mc + 0.8 * fade * (obs - mc), k = mc > 0.5 ? std::max(0.0, mc2) / mc : 1.0;
+            const double mc = 100 * (1 - (1 - a.low / 100) * (1 - a.mid / 100)), mc2 = mc + 0.9 * fade * (obs - mc), k = mc > 0.5 ? std::max(0.0, mc2) / mc : 1.0;
             Hour b = a; b.low = std::min(100.0, a.low * k); b.mid = std::min(100.0, a.mid * k);
             const double qa = quality(a), qb = quality(b);
             h.quality = std::max(0.0, std::min(1.0, qa > 0.01 ? (q / sw2) * qb / qa : qb));
-            h.low = b.low; h.mid = b.mid; h.high = b.high; h.cloud = std::max(0.0, tc / sw2 + (mc2 - mc)); h.obsWeight = fade;
+            h.low = b.low; h.mid = b.mid; h.high = b.high; h.cloud = std::max(0.0, tc / sw2 + 0.9 * fade * (obs - tc / sw2)); /* the camera sees all cloud, so the total goes to it directly */ h.obsWeight = fade;
         }
     }
     return {{"ok", true}, {"cover_pct", std::round(obs)}, {"obs_time", newest.toString(Qt::ISODate)}, {"stations", st}};
