@@ -244,9 +244,11 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
 
     // --- trailed stars: many sources but almost none round (seen 2026-10-11: the mount tracked at about half the sidereal rate for 6 minutes after a goto and the frames read "cloudy").
     // That is the mount, not the sky: say so, keep the frame out of the stack and the obstruction map, and let the supervisor re-centre instead of leaving for a backup target.
-    if (F.stars.size() >= 100 && focus.stars <= 5 && source != "unknown") {
+    const StreakInfo streaks = streakInfo(F);
+    o["streaks"] = QJsonObject{{"elongated", streaks.elongated}, {"coherence", std::round(streaks.coherence * 100) / 100}, {"angle_deg", std::round(streaks.angleDeg)}};
+    if (streaks.trailed && focus.stars <= 5 && source != "unknown") {
         o["verdict"] = "trailed"; o["cause"] = "mount";
-        o["reasons"] = QJsonArray{QString("%1 sources detected but only %2 round stars: the stars are trailed (mount not tracking correctly) or badly defocused").arg(F.stars.size()).arg(focus.stars)};
+        o["reasons"] = QJsonArray{QString("%1 elongated sources all pointing the same way (%2 deg, coherence %3) and only %4 round stars: trailed (the mount moved during the exposure)").arg(streaks.elongated).arg(streaks.angleDeg, 0, 'f', 0).arg(streaks.coherence, 0, 'f', 2).arg(focus.stars)};
         o["cause_reasons"] = QJsonArray{"trailed stars point at the mount or focus, not cloud"}; o["notes"] = QJsonArray(); o["stack"] = stackSummary();
         return o;
     }

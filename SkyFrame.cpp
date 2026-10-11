@@ -147,15 +147,38 @@ SkyFrame analyseFrame(const QByteArray& data, double detectSigma, int maxStars)
             if (sw <= 0) break;
             cx = sx / sw; cy = sy / sw;
         }
+        double mxx = 0, myy = 0, mxy = 0, mw = 0;                // second moments about the final centroid
+        for (int dy = -kRadius; dy <= kRadius; ++dy)
+            for (int dx = -kRadius; dx <= kRadius; ++dx) {
+                const int X = int(std::lround(cx)) + dx, Y = int(std::lround(cy)) + dy;
+                if (X < 0 || Y < 0 || X >= w || Y >= h || std::hypot(X - cx, Y - cy) > kRadius) continue;
+                const double v = std::max(0.0, double(res[size_t(Y) * w + X]) - noise);
+                mxx += v * (X - cx) * (X - cx); myy += v * (Y - cy) * (Y - cy); mxy += v * (X - cx) * (Y - cy); mw += v;
+            }
         if (flux <= 0) continue;
         const double radius = rsum / flux;
         double nb = 0; int n = 0;                              // a real star lifts its neighbours, a hot sensel does not
         for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) if (dx || dy) { nb += res[size_t(c.y + dy) * w + c.x + dx]; ++n; }
         if (nb / n < 0.1 * c.peak || radius < 0.45) continue;
         SkyStar s; s.x = float(cx); s.y = float(cy); s.flux = float(flux); s.peak = c.peak; s.hfr = float(radius); s.sigma = float(c.peak / noise);
+        if (mw > 0) {
+            mxx /= mw; myy /= mw; mxy /= mw;
+            const double tr = mxx + myy, det = mxx * myy - mxy * mxy, disc = std::sqrt(std::max(0.0, tr * tr / 4 - det)), l1 = tr / 2 + disc, l2 = std::max(1e-6, tr / 2 - disc);
+            s.elong = float(std::sqrt(std::max(1.0, l1 / l2))); s.angle = float(0.5 * std::atan2(2 * mxy, mxx - myy));
+        }
         s.isolated = !crowded && c.peak >= 8 * noise;
         F.stars.push_back(s);
     }
     F.valid = true;
     return F;
+}
+
+StreakInfo streakInfo(const SkyFrame& f)
+{
+    StreakInfo r; double sc = 0, ss = 0; int n = 0;
+    for (size_t i = 0; i < f.stars.size() && i < 100; ++i) if (f.stars[i].elong >= 2.0f) { sc += std::cos(2.0 * f.stars[i].angle); ss += std::sin(2.0 * f.stars[i].angle); ++n; }
+    r.elongated = n;
+    if (n > 0) { r.coherence = std::hypot(sc, ss) / n; r.angleDeg = 0.5 * std::atan2(ss, sc) * 180.0 / 3.14159265358979323846; }
+    r.trailed = n >= 25 && r.coherence >= 0.8;
+    return r;
 }

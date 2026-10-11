@@ -229,6 +229,7 @@ QJsonObject ControlServer::frameStats(const QString& path, double exposureS, int
     const double satFrac = double(sat) / v.size();
     QJsonArray hist; { const int n = std::max(2, std::min(bins, 256)); std::vector<int> h(n, 0); for (float x : v) ++h[std::min(n - 1, int(x / fs * n))]; for (int c : h) hist.append(double(c) / v.size()); }
     int strong = 0; for (const SkyStar& s : F.stars) if (s.sigma >= 10) ++strong;
+    const StreakInfo streaks = streakInfo(F);
     const double skyRate = std::max(0.0, F.background - black) / std::max(exposureS, 1e-6);
     const double suggest = std::clamp(skyRate > 0 ? targetAdu / skyRate : maxExposureS, 1e-5, maxExposureS);
     QString verdict = "ok", why;
@@ -244,7 +245,7 @@ QJsonObject ControlServer::frameStats(const QString& path, double exposureS, int
     }
     return QJsonObject{{"ok", true}, {"verdict", verdict}, {"why", why}, {"median_adu", std::round(F.background)}, {"noise_adu", std::round(F.noise * 10) / 10}, {"black_level", black},
                        {"percentiles", QJsonObject{{"p1", pct(0.01)}, {"p5", pct(0.05)}, {"p25", pct(0.25)}, {"p50", pct(0.5)}, {"p75", pct(0.75)}, {"p95", pct(0.95)}, {"p99", pct(0.99)}, {"max", double(v.back())}}},
-                       {"saturated_fraction", std::round(satFrac * 10000) / 10000}, {"stars", int(F.stars.size())}, {"stars_sigma10", strong}, {"exposure_s", exposureS},
+                       {"saturated_fraction", std::round(satFrac * 10000) / 10000}, {"stars", int(F.stars.size())}, {"stars_sigma10", strong}, {"streaks", QJsonObject{{"elongated", streaks.elongated}, {"coherence", std::round(streaks.coherence * 100) / 100}, {"angle_deg", std::round(streaks.angleDeg)}, {"trailed", streaks.trailed}}}, {"exposure_s", exposureS},
                        {"sky_rate_adu_per_s", std::round(skyRate)}, {"suggested_exposure_s", suggestOut}, {"histogram", hist}};
 }
 
