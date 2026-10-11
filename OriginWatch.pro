@@ -8,6 +8,7 @@ TARGET = OriginWatch
 CONFIG += c++17
 QT += core gui widgets network
 INCLUDEPATH += .
+LIBS += -ljpeg
 DESTDIR = build
 OBJECTS_DIR = build/obj
 MOC_DIR = build/moc

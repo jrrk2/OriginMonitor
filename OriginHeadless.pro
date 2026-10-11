@@ -10,6 +10,7 @@ QT = core network websockets          # QT = (not +=) drops the default gui modu
 DEFINES += ORIGIN_NO_GUI
 INCLUDEPATH += .
 QMAKE_CXXFLAGS += -g
+LIBS += -ljpeg
 DESTDIR = build
 OBJECTS_DIR = build/obj
 MOC_DIR = build/moc

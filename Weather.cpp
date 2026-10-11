@@ -13,6 +13,13 @@
 #include <QUrlQuery>
 #include <algorithm>
 #include <cmath>
+#include <csetjmp>
+#include <cstdio>
+#include <vector>
+extern "C" {
+#include <jpeglib.h>
+}
+#include <QDir>
 
 namespace Weather {
 
@@ -145,6 +152,70 @@ static QByteArray httpGet(const QUrl& u, QString* err)
     return body;
 }
 
+// --- Institute of Astronomy all-sky camera (tel05.ast.cam.ac.uk, a 576x720 greyscale fisheye frame every ~10 s) ----------------------------------------
+
+namespace {
+struct JpegErr { jpeg_error_mgr pub; jmp_buf jb; };
+bool decodeGray(const QByteArray& data, int* w, int* h, std::vector<unsigned char>* px)
+{
+    jpeg_decompress_struct c; JpegErr err; c.err = jpeg_std_error(&err.pub);
+    err.pub.error_exit = [](j_common_ptr cp) { longjmp(reinterpret_cast<JpegErr*>(cp->err)->jb, 1); };
+    if (setjmp(err.jb)) { jpeg_destroy_decompress(&c); return false; }
+    jpeg_create_decompress(&c);
+    jpeg_mem_src(&c, reinterpret_cast<const unsigned char*>(data.constData()), data.size());
+    jpeg_read_header(&c, TRUE); c.out_color_space = JCS_GRAYSCALE;
+    jpeg_start_decompress(&c);
+    *w = int(c.output_width); *h = int(c.output_height); px->assign(size_t(*w) * *h, 0);
+    while (c.output_scanline < c.output_height) { JSAMPROW row = px->data() + size_t(c.output_scanline) * *w; jpeg_read_scanlines(&c, &row, 1); }
+    jpeg_finish_decompress(&c); jpeg_destroy_decompress(&c);
+    return true;
+}
+}
+
+/// Cloud fraction (0..1) over the central 75% of the fisheye radius (zenith angle up to about 65 deg, which clears the dome, wall and trees at the edge), from the latest frame.
+/// Daytime/twilight method calibrated on one frame: pixels more than 25 grey levels above the 20th percentile (clear sky, capped at 90) count as cloud.
+/// Returns ok=false when the frame is stale or too dark for that method (night frames are archived under allsky/ for calibrating a night method).
+static QJsonObject allSkyCover(const QString& dir, double* cover, QDateTime* when)
+{
+    const QString img = dir + "/allsky_latest.jpg", meta = dir + "/allsky_latest.json";
+    QJsonObject m; { QFile f(meta); if (f.open(QIODevice::ReadOnly)) m = QJsonDocument::fromJson(f.readAll()).object(); }
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (!QFile::exists(img) || nowMs - qint64(m["fetched_ms"].toDouble()) > 5 * 60000) {
+        QNetworkAccessManager nam; QNetworkRequest rq{QUrl("http://tel05.ast.cam.ac.uk/images/latest_image.jpg")};
+        QNetworkReply* rep = nam.get(rq);
+        QEventLoop loop; QTimer::singleShot(10000, &loop, &QEventLoop::quit); QObject::connect(rep, &QNetworkReply::finished, &loop, &QEventLoop::quit); loop.exec();
+        if (rep->isFinished() && rep->error() == QNetworkReply::NoError) {
+            const QByteArray body = rep->readAll(); const QDateTime lm = rep->header(QNetworkRequest::LastModifiedHeader).toDateTime().toUTC();
+            if (body.size() > 1000) {
+                QFile f(img); if (f.open(QIODevice::WriteOnly)) { f.write(body); f.close(); }
+                m = QJsonObject{{"fetched_ms", double(nowMs)}, {"modified", lm.isValid() ? lm.toString(Qt::ISODate) : QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}};
+                QFile mf(meta); if (mf.open(QIODevice::WriteOnly)) mf.write(QJsonDocument(m).toJson(QJsonDocument::Compact));
+                // archive a frame every 10 minutes (3 days kept) so night frames can be used to calibrate a night method
+                QDir ad(dir + "/allsky"); ad.mkpath(".");
+                const QString stamp = QDateTime::currentDateTimeUtc().toString("yyyyMMdd_HHmm");
+                const QStringList have = ad.entryList({"*.jpg"}, QDir::Files, QDir::Name);
+                if (have.isEmpty() || QDateTime::fromString(have.last().left(13), "yyyyMMdd_HHmm").secsTo(QDateTime::currentDateTimeUtc()) >= 600) QFile::copy(img, ad.filePath(stamp + ".jpg"));
+                for (const QString& n : have) if (QDateTime::fromString(n.left(13), "yyyyMMdd_HHmm").secsTo(QDateTime::currentDateTimeUtc()) > 3 * 86400) ad.remove(n);
+            }
+        } else rep->abort();
+        rep->deleteLater();
+    }
+    QFile f(img); if (!f.open(QIODevice::ReadOnly)) return {{"ok", false}, {"error", "all-sky image unavailable"}};
+    const QDateTime mod = QDateTime::fromString(m["modified"].toString(), Qt::ISODate);
+    if (!mod.isValid() || mod.secsTo(QDateTime::currentDateTimeUtc()) > 1200) return {{"ok", false}, {"error", "all-sky image is stale"}};
+    int w = 0, h = 0; std::vector<unsigned char> px;
+    if (!decodeGray(f.readAll(), &w, &h, &px)) return {{"ok", false}, {"error", "all-sky image unreadable"}};
+    std::vector<unsigned char> v; const double cx = w / 2.0, cy = h / 2.0, rmax = 0.75 * w / 2.0;
+    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) if (std::hypot(x - cx, y - cy) < rmax) v.push_back(px[size_t(y) * w + x]);
+    if (v.size() < 1000) return {{"ok", false}, {"error", "all-sky image has an unexpected size"}};
+    std::vector<unsigned char> sorted = v; std::sort(sorted.begin(), sorted.end());
+    const double p20 = sorted[sorted.size() / 5], med = sorted[sorted.size() / 2];
+    if (med < 45) return {{"ok", false}, {"error", "all-sky image too dark for the daytime method"}, {"median", med}};
+    const double thr = std::min(p20, 90.0) + 25; size_t n = 0; for (unsigned char c : v) if (c > thr) ++n;
+    *cover = double(n) / v.size(); *when = mod;
+    return {{"ok", true}, {"cover", *cover}, {"median", med}, {"p20", p20}, {"image_time", mod.toString(Qt::ISODate)}};
+}
+
 QJsonObject metarNowcast(double lat, double lon, const QString& cacheDir, int maxAgeMin, QVector<Hour>* hours)
 {
     // reports from the last 3 hours of stations in a box around the site (aviationweather.gov, free, no key); cached so repeated calls are cheap
@@ -191,11 +262,14 @@ QJsonObject metarNowcast(double lat, double lon, const QString& cacheDir, int ma
         const QJsonObject r = QJsonDocument::fromJson(sf.readAll()).object(); sf.close();
         const QDateTime t = QDateTime::fromString(r["time"].toString(), Qt::ISODate);
         if (t.isValid() && t.secsTo(QDateTime::currentDateTimeUtc()) < 5400) {
-            const double w = 6.0 / (10.0 * 10.0);
+            const double w = 0.3;
             sw += w; sc += w * r["cover_pct"].toDouble() / 100; if (!newest.isValid() || t > newest) newest = t;
             st.append(QJsonObject{{"id", "observer"}, {"km", 0}, {"cover", r["cover_pct"].toDouble() / 100}, {"raw", "sky-report"}});
         }
     }
+    { double ac = 0; QDateTime at; const QJsonObject a = allSkyCover(cacheDir, &ac, &at);
+      if (a["ok"].toBool()) { sw += 0.1; sc += 0.1 * ac; if (!newest.isValid() || at > newest) newest = at; st.append(QJsonObject{{"id", "allsky"}, {"km", 0}, {"cover", ac}, {"raw", "IoA all-sky camera, " + at.toString(Qt::ISODate)}}); }
+      else st.append(QJsonObject{{"id", "allsky"}, {"error", a["error"]}}); }
     if (sw <= 0) return {{"ok", false}, {"error", "no recent METAR within 60 km"}};
     const double obs = sc / sw * 100;   // % low/mid cover now
 
