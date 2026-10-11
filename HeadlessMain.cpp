@@ -1032,6 +1032,28 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
     const QJsonObject mount = call("mount_status", {}, 15000)["mount"].toObject();
     if (!mount["IsAligned"].toBool() || st["need_real_init"].toBool()) {
         if (st["init_attempts"].toInt() >= 3) return idle("mount will not align (3 attempts); needs a look");
+        // Before the first init: raise the tube if the tilt sensor says it is low (the GUI's unpark, at most 3 times a night), then take a frame and plate-solve it.
+        // The solve proves there are stars to align on and tells us where the tube points; it is advisory for now: after 2 failed solves the initialize is tried anyway.
+        {
+            const QJsonObject ms = call("mount_status", {}, 15000);
+            if (ms.contains("tilt_alt_deg") && ms["tilt_alt_deg"].toDouble() < 45) {
+                if (st["unparks"].toInt() >= 3) return idle("tube still low after 3 unpark attempts; needs a look");
+                st["unparks"] = st["unparks"].toInt() + 1; save();
+                note({{"autorun", "tube is low (tilt sensor); unparking"}, {"tilt", ms["tilt_alt_deg"]}});
+                const QJsonObject u = call("unpark", {}, 150000);
+                note({{"autorun", "unpark"}, {"result", u}});
+                if (!u["ok"].toBool()) return idle("unpark: " + u["error"].toString());
+            }
+            call("set", {{"exposure", 3.0}, {"iso", 800}, {"binning", 1}}, 15000);
+            const QJsonObject sv = call("solve", {{"lat_deg", o.site.latDeg}, {"lon_deg", o.site.lonDeg}, {"cpulimit", 40}}, 200000);
+            note({{"autorun", "plate solve before init"}, {"result", sv}});
+            if (sv["solved"].toBool()) { st["solve_fails"] = 0; st["last_solve"] = sv["summary"]; save(); }
+            else {
+                st["solve_fails"] = st["solve_fails"].toInt() + 1; st["last_solve_error"] = sv["error"]; save();
+                if (st["solve_fails"].toInt() < 2) return idle("no plate solution yet (" + sv["error"].toString() + "); will retry next tick");
+                note({{"autorun", "no plate solution twice; initializing anyway"}});
+            }
+        }
         st["init_attempts"] = st["init_attempts"].toInt() + 1; save();
         note({{"autorun", "initializing the mount"}});
         QJsonObject r = call("initialize", {{"lat_deg", o.site.latDeg}, {"lon_deg", o.site.lonDeg}, {"timezone", o.timeZone}, {"wait", true}, {"timeout", 300}}, 360000);
