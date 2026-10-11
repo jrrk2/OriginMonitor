@@ -4,6 +4,7 @@
 #include "DataDir.hpp"
 #include "Sequencer.hpp"
 #include "Astro.hpp"
+#include "SkyFrame.hpp"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -204,6 +205,57 @@ QJsonObject ControlServer::doInitialize(const QJsonObject& req)
     return r;
 }
 
+// Statistics of one raw frame, for deciding whether it is worth a plate solve (or what exposure to try next). Percentiles and a histogram of the half-resolution
+// luminance (ADU, 16-bit), the saturated fraction, background and noise, the stars the finder sees, and the sky rate (ADU/s above the black level: the
+// twilight brightness, which is what the exposure has to follow). "verdict": ok | too_bright | too_short | few_stars | unreadable, with a suggested exposure that puts the
+// sky about 6000 ADU above black (never more than maxExposureS).
+QJsonObject ControlServer::frameStats(const QString& path, double exposureS, int bins, double maxExposureS)
+{
+    QFile f(path); if (!f.open(QIODevice::ReadOnly)) return QJsonObject{{"ok", false}, {"verdict", "unreadable"}, {"error", "cannot open " + path}};
+    const SkyFrame F = analyseFrame(f.readAll());
+    if (!F.valid || F.lum.empty()) return QJsonObject{{"ok", false}, {"verdict", "unreadable"}, {"error", F.note.isEmpty() ? "not a raw 16-bit FITS frame" : F.note}};
+    std::vector<float> v = F.lum; std::sort(v.begin(), v.end());
+    auto pct = [&](double q) { return double(v[std::min(v.size() - 1, size_t(q * (v.size() - 1)))]); };
+    const double fs = 65535.0, black = 4985.0;
+    size_t sat = 0; for (float x : v) if (x >= 0.95 * fs) ++sat;
+    const double satFrac = double(sat) / v.size();
+    QJsonArray hist; { const int n = std::max(2, std::min(bins, 256)); std::vector<int> h(n, 0); for (float x : v) ++h[std::min(n - 1, int(x / fs * n))]; for (int c : h) hist.append(double(c) / v.size()); }
+    int strong = 0; for (const SkyStar& s : F.stars) if (s.sigma >= 10) ++strong;
+    const double skyRate = std::max(0.0, F.background - black) / std::max(exposureS, 1e-6);
+    const double suggest = std::clamp(skyRate > 0 ? 6000.0 / skyRate : maxExposureS, 1e-5, maxExposureS);
+    QString verdict = "ok", why;
+    double suggestOut = suggest;
+    if (satFrac > 0.02 || F.background > 0.7 * fs) {
+        verdict = "too_bright"; why = QString("saturated: %1% of the frame is at full scale, median %2 ADU").arg(satFrac * 100, 0, 'f', 1).arg(F.background, 0, 'f', 0);
+        if (satFrac > 0.5) suggestOut = std::max(1e-5, exposureS / 30);      // clipped: the true brightness is hidden, so step down hard instead of trusting the rate
+    }
+    else if (int(F.stars.size()) < 12 && F.background - black > 12000 && exposureS > 2e-5) { verdict = "too_bright"; why = QString("sky is %1 ADU above black and no stars show; a shorter exposure may reveal them").arg(F.background - black, 0, 'f', 0); }
+    else if (int(F.stars.size()) < 12) {
+        if (exposureS < maxExposureS * 0.9 && F.background - black < 2500) { verdict = "too_short"; why = QString("only %1 stars and the sky is just %2 ADU above black").arg(F.stars.size()).arg(F.background - black, 0, 'f', 0); }
+        else { verdict = "few_stars"; why = QString("only %1 stars (cloud, or the sky is still too bright for the stars)").arg(F.stars.size()); }
+    }
+    return QJsonObject{{"ok", true}, {"verdict", verdict}, {"why", why}, {"median_adu", std::round(F.background)}, {"noise_adu", std::round(F.noise * 10) / 10}, {"black_level", black},
+                       {"percentiles", QJsonObject{{"p1", pct(0.01)}, {"p5", pct(0.05)}, {"p25", pct(0.25)}, {"p50", pct(0.5)}, {"p75", pct(0.75)}, {"p95", pct(0.95)}, {"p99", pct(0.99)}, {"max", double(v.back())}}},
+                       {"saturated_fraction", std::round(satFrac * 10000) / 10000}, {"stars", int(F.stars.size())}, {"stars_sigma10", strong}, {"exposure_s", exposureS},
+                       {"sky_rate_adu_per_s", std::round(skyRate)}, {"suggested_exposure_s", suggestOut}, {"histogram", hist}};
+}
+
+// {"file"} or a fresh snapshot ({"exposure","iso","binning"}); {"bins"} (default 16), {"max_exposure"} (default 6 s).
+QJsonObject ControlServer::doFrameStats(const QJsonObject& req)
+{
+    QString file = req["file"].toString(); double expo = req["exposure"].toDouble(0); QJsonObject snap;
+    if (file.isEmpty()) {
+        if (!m_backend->isConnected()) return fail("not connected");
+        QJsonObject sreq{{"timeout", req["snapshot_timeout"].toInt(30)}};
+        if (req.contains("exposure")) { sreq["exposure"] = req["exposure"]; sreq["iso"] = req["iso"].toInt(800); sreq["binning"] = req["binning"].toInt(1); }
+        snap = doSnapshot(sreq); if (!snap["ok"].toBool()) return snap;
+        file = snap["path"].toString(); expo = snap["exposure"].toDouble(expo);
+    }
+    QJsonObject r = frameStats(file, expo, req["bins"].toInt(16), req["max_exposure"].toDouble(6.0)); r["file"] = file;
+    if (!snap.isEmpty()) r["snapshot"] = snap;
+    return r;
+}
+
 // The telescope's own tilt sensor (OrientationSensor notifications), valid before the mount has aligned. Whole degrees.
 double ControlServer::tiltAltitude(double* ageSec) const
 {
@@ -253,12 +305,21 @@ QJsonObject ControlServer::doSolve(const QJsonObject& req)
     const QDateTime when = QDateTime::currentDateTimeUtc();
     if (file.isEmpty()) {
         if (!m_backend->isConnected()) return fail("not connected");
-        snap = doSnapshot(QJsonObject{{"timeout", req["snapshot_timeout"].toInt(30)}});
+        QJsonObject sreq{{"timeout", req["snapshot_timeout"].toInt(30)}};
+        if (req.contains("exposure")) { sreq["exposure"] = req["exposure"]; sreq["iso"] = req["iso"].toInt(800); sreq["binning"] = req["binning"].toInt(1); }
+        snap = doSnapshot(sreq);
         if (!snap["ok"].toBool()) return snap;
         file = snap["path"].toString();
         if (!file.endsWith(".fits", Qt::CaseInsensitive)) return QJsonObject{{"ok", false}, {"error", "the snapshot came back as " + QFileInfo(file).suffix() + ", not FITS (the first frame after a slew can); try again"}, {"snapshot", snap}};
     }
     if (!QFile::exists(file)) return fail("no such file: " + file);
+    // cheap check first: a saturated, too-short or starless frame cannot be solved, and solve-field would burn 30-90 s finding that out
+    const QJsonObject fs = frameStats(file, snap.isEmpty() ? req["exposure"].toDouble(1.0) : snap["exposure"].toDouble(1.0), 8, req["max_exposure"].toDouble(6.0));
+    if (!req["force"].toBool() && fs["verdict"].toString() != "ok") {
+        QJsonObject r{{"ok", false}, {"solved", false}, {"skipped", true}, {"file", file}, {"stats", fs}, {"verdict", fs["verdict"]}, {"suggested_exposure_s", fs["suggested_exposure_s"]}};
+        if (!snap.isEmpty()) r["snapshot"] = snap;
+        r["error"] = "not worth solving: " + fs["verdict"].toString() + (fs["why"].toString().isEmpty() ? QString() : " (" + fs["why"].toString() + ")"); return r;
+    }
     QString idx = req["index_dir"].toString(); if (idx.isEmpty()) idx = qEnvironmentVariable("ORIGIN_INDEX_DIR", QDir::homePath() + "/astrometry_indices");
     if (!QDir(idx).exists()) return fail("index directory not found: " + idx + " (astrometry.net index files for 20-120 arcmin fields)");
     QTemporaryDir tmp; if (!tmp.isValid()) return fail("no temporary directory");
@@ -269,10 +330,17 @@ QJsonObject ControlServer::doSolve(const QJsonObject& req)
     p.start("solve-field", {"--config", cfg.fileName(), "-z", QString::number(req["downsample"].toInt(2)), "--overwrite", "--no-plots", "--scale-units", "arcsecperpix",
                             "--scale-low", QString::number(req["scale_low"].toDouble(1.3)), "--scale-high", QString::number(req["scale_high"].toDouble(3.2)), "-D", tmp.path(), file});
     if (!p.waitForStarted(5000)) return fail("cannot run solve-field (is astrometry.net installed?)");
-    if (!p.waitForFinished((cpu + 30) * 1000)) { p.kill(); return QJsonObject{{"ok", false}, {"error", "solve-field did not finish in time"}, {"file", file}}; }
+    {   // wait on the event loop, not with waitForFinished: a blocked loop stops the websocket answering the telescope's pings and it hangs up
+        QEventLoop loop; QTimer limit; limit.setSingleShot(true);
+        QObject::connect(&p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), &loop, &QEventLoop::quit);
+        QObject::connect(&limit, &QTimer::timeout, &loop, &QEventLoop::quit);
+        limit.start((cpu + 30) * 1000);
+        if (p.state() != QProcess::NotRunning) loop.exec();
+        if (p.state() != QProcess::NotRunning) { p.kill(); p.waitForFinished(2000); return QJsonObject{{"ok", false}, {"solved", false}, {"error", "no solution within the time limit"}, {"file", file}}; }
+    }
     const QString out = QString::fromUtf8(p.readAll());
     const QRegularExpressionMatch c = QRegularExpression(R"(Field center: \(RA,Dec\) = \(([-\d.]+), ([-\d.]+)\) deg)").match(out);
-    QJsonObject r{{"file", file}};
+    QJsonObject r{{"file", file}, {"stats", fs}};
     if (!snap.isEmpty()) r["snapshot"] = snap;
     if (!c.hasMatch()) { r["ok"] = false; r["solved"] = false; r["error"] = "no solution (too few stars, cloud, or no matching index)"; return r; }
     const double ra = c.captured(1).toDouble(), dec = c.captured(2).toDouble();
@@ -316,7 +384,9 @@ QJsonObject ControlServer::doSnapshot(const QJsonObject& req)
     QTimer timer; timer.setSingleShot(true);
     connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
     timer.start(timeoutMs);
-    if (!m_backend->takeSingleSnapshot()) { disconnect(conn); return fail("snapshot request failed"); }
+    // explicit values go straight into the capture request; takeSingleSnapshot uses the last values the camera has confirmed, which lag a request behind
+    const bool sent = req.contains("exposure") ? m_backend->takeSnapshot(req["exposure"].toDouble(), req["iso"].toInt(800), req["binning"].toInt(1)) : m_backend->takeSingleSnapshot();
+    if (!sent) { disconnect(conn); return fail("snapshot request failed"); }
     loop.exec();
     disconnect(conn);
     return done ? result : fail("timed out waiting for snapshot");
@@ -375,7 +445,7 @@ QJsonObject ControlServer::handle(const QJsonObject& req)
     if (cmd == "commands" || cmd == "help")
         return QJsonObject{{"ok", true}, {"note", "server commands; the OriginHeadless CLI has a fuller catalogue: OriginHeadless commands"},
                            {"commands", QJsonArray{"ping", "connect", "status", "manual", "auto", "set", "snapshot", "mount_status", "goto", "focus_status", "analysis", "events", "target", "stack",
-                                                   "sky_map", "preview", "monitor", "focuser_status", "focuser_move", "focuser_settings", "initialize", "unpark", "solve", "sequence", "send", "cache", "quit"}}};
+                                                   "sky_map", "preview", "monitor", "focuser_status", "focuser_move", "focuser_settings", "initialize", "unpark", "solve", "frame_stats", "sequence", "send", "cache", "quit"}}};
     int ttl = cacheTtlMs(cmd);
     if (cmd == "target" && req.contains("name")) ttl = 0;                       // that form changes the target
     if (!m_cacheOn || ttl == 0) {
@@ -492,7 +562,7 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
         return r.isEmpty() ? fail("no response") : out;
     }
     // the sequencer owns the camera and the mount while it runs
-    if (m_seq->active() && (cmd == "snapshot" || cmd == "goto" || cmd == "focuser_move" || cmd == "initialize" || cmd == "set" || cmd == "unpark" || cmd == "solve"))
+    if (m_seq->active() && (cmd == "snapshot" || cmd == "goto" || cmd == "focuser_move" || cmd == "initialize" || cmd == "set" || cmd == "unpark" || cmd == "solve" || (cmd == "frame_stats" && !req.contains("file"))))
         return fail("a sequence is running; stop it first ({\"cmd\":\"sequence\",\"action\":\"stop\"})");
     if (cmd == "sequence") {                          // action start|stop|status; see Sequencer.hpp
         const QString action = req["action"].toString("status");
@@ -504,6 +574,7 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
     if (cmd == "initialize") return doInitialize(req);
     if (cmd == "unpark") return doUnpark(req);
     if (cmd == "solve") return doSolve(req);
+    if (cmd == "frame_stats") return doFrameStats(req);
 
     if (cmd == "focuser_status") {
         if (!m_backend->isConnected()) return fail("not connected");

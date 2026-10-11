@@ -109,7 +109,7 @@ const QList<Cmd>& commands()
         pass("target", "config", "Choose or read the live-stack target; resumes a saved stack of the same name unless --reset.", "target",
              {P("name", 's', "target name, e.g. M31 (omit to read the current one)", false), O("ra-hours", 'd', "J2000 RA hours"), O("dec-deg", 'd', "J2000 Dec degrees"), O("reset", 'b', "discard the saved stack")});
         // --- actions
-        pass("snapshot", "action", "Take one frame, download it and report the path.", "snapshot", {O("dir", 's', "output directory (default: data dir)"), O("timeout", 'i', "seconds", "30")}, true);
+        pass("snapshot", "action", "Take one frame, download it and report the path. With --exposure the values go straight into the capture request (without it the last values the camera confirmed are used, which lag a request behind a set).", "snapshot", {O("dir", 's', "output directory (default: data dir)"), O("timeout", 'i', "seconds", "30"), O("exposure", 'd', "seconds"), O("iso", 'i', "ISO", "800"), O("binning", 'i', "binning", "1")}, true);
         pass("goto", "action", "Slew to J2000 coordinates and wait for the mount to finish (the firmware then centres and autofocuses for about 50 s).", "goto",
              {P("ra-hours", 'd', "J2000 RA, hours 0..24", true, "ra_hours"), P("dec-deg", 'd', "J2000 Dec, degrees", true, "dec_deg"), O("timeout", 'i', "seconds", "180")}, true);
         pass("initialize", "action", "RunInitialize: the mount homes and aligns. Waits and reports the outcome.", "initialize",
@@ -119,7 +119,9 @@ const QList<Cmd>& commands()
              {O("alt", 'd', "target tilt altitude, deg", "60", "alt_deg"), O("rate", 'i', "AltRate 1..9", "9"), O("timeout", 'i', "seconds", "90"), O("max-age", 'd', "oldest acceptable tilt reading, s", "5", "max_age")}, true);
         pass("solve", "action", "Plate solve (astrometry.net, -z2): take a snapshot (works before the mount has aligned) or use --file, and report RA/Dec, rotation, and the altitude/azimuth of the tube checked against the tilt sensor.", "solve",
              {O("file", 's', "solve this FITS file instead of taking a snapshot"), O("lat", 'd', "site latitude", "52.2054", "lat_deg"), O("lon", 'd', "site longitude", "0.1218", "lon_deg"),
-              O("cpulimit", 'i', "seconds the solver may use", "60"), O("index-dir", 's', "astrometry.net index files (default $ORIGIN_INDEX_DIR or ~/astrometry_indices)", QString(), "index_dir"), O("downsample", 'i', "solve-field -z", "2")}, true);
+              O("cpulimit", 'i', "seconds the solver may use", "60"), O("force", 'b', "run solve-field even if the frame statistics say it is hopeless"), O("exposure", 'd', "seconds for the snapshot (default: the camera's current setting)"), O("iso", 'i', "ISO for the snapshot"), O("binning", 'i', "binning for the snapshot"), O("index-dir", 's', "astrometry.net index files (default $ORIGIN_INDEX_DIR or ~/astrometry_indices)", QString(), "index_dir"), O("downsample", 'i', "solve-field -z", "2")}, true);
+        pass("frame-stats", "analysis", "Statistics of one raw frame (a fresh snapshot, or --file): percentiles, histogram, saturated fraction, background, noise, star count, the sky rate in ADU/s above black (twilight brightness), a verdict (ok, too_bright, too_short, few_stars) and the exposure that would put the sky about 6000 ADU above black. Used by solve to skip hopeless frames.", "frame_stats",
+             {O("file", 's', "analyse this FITS file instead of taking a snapshot"), O("exposure", 'd', "seconds for the snapshot"), O("iso", 'i', "ISO", "800"), O("binning", 'i', "binning", "1"), O("bins", 'i', "histogram bins (2-256)", "16"), O("max-exposure", 'd', "longest exposure to suggest, s", "6", "max_exposure")}, true);
         pass("focuser-move", "action", "Move the focuser to an absolute position (within travel limits and --max-step of the current one).", "focuser_move",
              {P("position", 'i', "absolute focuser position"), O("max-step", 'i', "largest allowed move", "3000"), O("timeout", 'i', "seconds", "60")}, true);
         pass("sequence", "action", "Unattended exposure loop inside the server: start, stop or status.", "sequence",
@@ -1049,20 +1051,30 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
                 note({{"autorun", "unpark"}, {"result", u}});
                 if (!u["ok"].toBool()) return idle("unpark: " + u["error"].toString());
             }
-            // Rayleigh-scattered twilight brightens by roughly 1 magnitude per degree of Sun depression, so the exposure scales as 10^(0.4 (depression - 12)) from 3 s at -12 deg,
-            // and widens by 3x after each failed solve (cloud or too short). Every probe is appended to solve_probes.jsonl so the real limit can be read off later.
-            const double depr = std::max(0.0, -sunNow), fails = st["solve_fails"].toInt();
-            const double expo = std::clamp(3.0 * std::pow(10.0, 0.4 * (depr - 12.0)) * std::pow(3.0, std::min(fails, 3.0)), 0.02, 6.0);
-            call("set", {{"exposure", expo}, {"iso", 800}, {"binning", 1}}, 15000);
-            const QJsonObject sv = call("solve", {{"lat_deg", o.site.latDeg}, {"lon_deg", o.site.lonDeg}, {"cpulimit", 40}}, 200000);
-            note({{"autorun", "plate solve before init"}, {"sun_alt", sunNow}, {"exposure_s", expo}, {"result", sv}});
-            { QFile pf(originDataDir() + "/solve_probes.jsonl"); if (pf.open(QIODevice::Append)) pf.write(QJsonDocument(QJsonObject{{"utc", now.toString(Qt::ISODate)}, {"sun_alt", sunNow}, {"exposure_s", expo}, {"solved", sv["solved"].toBool()},
-                {"summary", sv["summary"]}, {"error", sv["error"]}}).toJson(QJsonDocument::Compact) + "\n"); }
+            // Rayleigh-scattered twilight brightens by roughly 1 magnitude per degree of Sun depression, so the first guess is 10^(0.4 (depression - 12)) * 3 s (3 s at -12 deg);
+            // `solve` measures the frame first (frame-stats) and, when it is saturated or empty, suggests the exposure that puts the sky about 6000 ADU above black. Up to 5 quick
+            // corrections per tick cost seconds each (no solve-field). Every probe is appended to solve_probes.jsonl so the real limit can be read off later.
+            const double depr = std::max(0.0, -sunNow);
+            double expo = std::clamp(3.0 * std::pow(10.0, 0.4 * (depr - 12.0)), 1e-5, 6.0);
+            call("manual", {}, 15000);
+            QJsonObject sv;
+            for (int attempt = 0; attempt < 5; ++attempt) {
+                sv = call("solve", {{"lat_deg", o.site.latDeg}, {"lon_deg", o.site.lonDeg}, {"cpulimit", 40}, {"exposure", expo}, {"iso", 800}, {"binning", 1}}, 200000);
+                const QJsonObject fs = sv["stats"].toObject();
+                note({{"autorun", "plate solve before init"}, {"attempt", attempt + 1}, {"sun_alt", sunNow}, {"exposure_s", expo}, {"verdict", fs["verdict"]}, {"stars", fs["stars"]}, {"sky_rate", fs["sky_rate_adu_per_s"]}, {"result", sv}});
+                { QFile pf(originDataDir() + "/solve_probes.jsonl"); if (pf.open(QIODevice::Append)) pf.write(QJsonDocument(QJsonObject{{"utc", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}, {"sun_alt", sunNow}, {"exposure_s", expo},
+                    {"verdict", fs["verdict"]}, {"median_adu", fs["median_adu"]}, {"stars", fs["stars"]}, {"sky_rate_adu_per_s", fs["sky_rate_adu_per_s"]}, {"solved", sv["solved"].toBool()}, {"summary", sv["summary"]}, {"error", sv["error"]}}).toJson(QJsonDocument::Compact) + "\n"); }
+                if (sv["solved"].toBool()) break;
+                const QString verdict = sv["verdict"].toString();
+                const double next = sv["suggested_exposure_s"].toDouble(0);
+                if (sv["skipped"].toBool() && (verdict == "too_bright" || verdict == "too_short") && next > 0 && std::abs(std::log10(next / expo)) > 0.1) { expo = next; continue; }
+                break;
+            }
             if (sv["solved"].toBool()) { st["solve_fails"] = 0; st["last_solve"] = sv["summary"]; save(); }
             else {
                 st["solve_fails"] = st["solve_fails"].toInt() + 1; st["last_solve_error"] = sv["error"]; save();
                 // before nautical dark a failed solve just means the sky is still too bright (or cloudy): wait. From -12 deg on, two failures and the initialize is tried anyway.
-                if (sunNow > -12.0 || st["solve_fails"].toInt() < 2) return idle(QString("no plate solution yet (%1; Sun %2 deg, %3 s); will retry next tick").arg(sv["error"].toString()).arg(sunNow, 0, 'f', 1).arg(expo, 0, 'f', 2));
+                if (sunNow > -12.0 || st["solve_fails"].toInt() < 2) return idle(QString("no plate solution yet (%1; Sun %2 deg, %3 s); will retry next tick").arg(sv["error"].toString()).arg(sunNow, 0, 'f', 1).arg(expo, 0, 'g', 3));
                 note({{"autorun", "no plate solution twice in the dark; initializing anyway"}});
             }
         }
