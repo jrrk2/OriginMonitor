@@ -1227,6 +1227,12 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
                 st["solve_fails"] = st["solve_fails"].toInt() + 1; st["last_solve_error"] = sv["error"]; save();
                 // before nautical dark a failed solve just means the sky is still too bright (or cloudy): wait. From -12 deg on, two failures and the initialize is tried anyway.
                 if (sunNow > -12.0 || st["solve_fails"].toInt() < 2) return idle(QString("no plate solution yet (%1; Sun %2 deg, %3 s); will retry next tick").arg(sv["error"].toString()).arg(sunNow, 0, 'f', 1).arg(expo, 0, 'g', 3));
+                // ...unless the sky is overcast: an initialize needs stars as much as a solve does, and would only use up its 3 attempts on cloud
+                const QJsonObject nc = Weather::metarNowcast(o.site.latDeg, o.site.lonDeg, originDataDir(), 15, nullptr);
+                if (nc["ok"].toBool() && nc["cover_pct"].toDouble() >= 80) {
+                    st["solve_fails"] = 1; save();
+                    return idle(QString("overcast (%1% cloud now) and no plate solution; not spending an initialize on cloud, will retry next tick").arg(nc["cover_pct"].toDouble(), 0, 'f', 0));
+                }
                 note({{"autorun", "no plate solution twice in the dark; initializing anyway"}});
             }
         }
