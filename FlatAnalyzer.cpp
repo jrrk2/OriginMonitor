@@ -113,18 +113,22 @@ QJsonObject analyseFlats(const QStringList& files, const QString& outDir, const 
     const double gx = (sxx > 0 ? sxz / sxx : 0) * w * 100, gy = (syy > 0 ? syz / syy : 0) * h * 100;
 
     // dust: green over its own large-scale smooth version
-    const std::vector<float> smooth = boxBlur(boxBlur(G, w, h, 40), w, h, 40);
-    std::vector<float> ratio(G.size()); for (size_t i = 0; i < G.size(); ++i) ratio[i] = smooth[i] > 0.05f ? G[i] / smooth[i] : 1.f;
+    // The master is smoothed 5x5 first (a dust shadow is tens of pixels across, noise is not), and a region only counts when it is deeper than 3% AND 5 sigma of the
+    // remaining noise, measured from the scatter of the ratio itself.
+    const std::vector<float> smooth = boxBlur(boxBlur(G, w, h, 40), w, h, 40), Gs = boxBlur(G, w, h, 2);
+    std::vector<float> ratio(G.size()); for (size_t i = 0; i < G.size(); ++i) ratio[i] = smooth[i] > 0.05f ? Gs[i] / smooth[i] : 1.f;
+    double noiseSigma; { std::vector<float> dev; for (size_t i = 0; i < ratio.size(); i += 13) dev.push_back(std::fabs(ratio[i] - 1.f)); noiseSigma = 1.4826 * medianOf(dev); }
+    const float cut = float(1.0 - std::max(0.03, 5.0 * noiseSigma));
     std::vector<int> label(G.size(), 0); struct Blob { double sx = 0, sy = 0; int area = 0; float depth = 0; }; std::vector<Blob> blobs;
     std::vector<int> stack;
     for (int y = 2; y < h - 2; ++y) for (int x = 2; x < w - 2; ++x) {
-        const size_t i = size_t(y) * w + x; if (label[i] || ratio[i] >= 0.97f) continue;
+        const size_t i = size_t(y) * w + x; if (label[i] || ratio[i] >= cut) continue;
         Blob b; const int id = int(blobs.size()) + 1; stack.assign(1, int(i)); label[i] = id;
         while (!stack.empty()) {
             const int j = stack.back(); stack.pop_back(); const int jx = j % w, jy = j / w;
             b.sx += jx; b.sy += jy; ++b.area; b.depth = std::max(b.depth, 1.f - ratio[size_t(j)]);
             const int nb[4] = {j - 1, j + 1, j - w, j + w}; const bool ok[4] = {jx > 1, jx < w - 2, jy > 1, jy < h - 2};
-            for (int k = 0; k < 4; ++k) if (ok[k] && !label[size_t(nb[k])] && ratio[size_t(nb[k])] < 0.97f) { label[size_t(nb[k])] = id; stack.push_back(nb[k]); }
+            for (int k = 0; k < 4; ++k) if (ok[k] && !label[size_t(nb[k])] && ratio[size_t(nb[k])] < cut) { label[size_t(nb[k])] = id; stack.push_back(nb[k]); }
         }
         if (b.area >= 6) blobs.push_back(b);
     }
@@ -158,7 +162,7 @@ QJsonObject analyseFlats(const QStringList& files, const QString& outDir, const 
                        {"single_frame_snr_per_pixel", std::round(singleFrameSnr * 10) / 10},
                        {"vignetting", QJsonObject{{"rings_centre_to_corner", profile}, {"corner_over_centre", profile[9]}}},
                        {"gradient_percent_across", QJsonObject{{"width", std::round(gx * 10) / 10}, {"height", std::round(gy * 10) / 10}, {"note", "change of the green master across the frame: an uneven sky, not the optics"}}},
-                       {"dust", QJsonObject{{"regions_ge_3pct", ge3}, {"regions_ge_5pct", ge5}, {"deepest", top}, {"coordinates", "full-resolution pixels, origin top-left"}}},
+                       {"dust", QJsonObject{{"noise_sigma_percent", std::round(noiseSigma * 1000) / 10}, {"detection_depth_percent", std::round((1.0 - cut) * 1000) / 10}, {"regions_ge_3pct", ge3}, {"regions_ge_5pct", ge5}, {"deepest", top}, {"coordinates", "full-resolution pixels, origin top-left"}}},
                        {"colour_at_corners", QJsonObject{{"red_over_green", std::round(cornerRatio(0) * 1000) / 1000}, {"blue_over_green", std::round(cornerRatio(2) * 1000) / 1000}}},
                        {"centre_levels_relative", QJsonObject{{"r", std::round(centre[0] / centre[1] * 1000) / 1000}, {"b", std::round(centre[2] / centre[1] * 1000) / 1000}}},
                        {"files", QJsonObject{{"flat_png", okPic ? picPath : QString()}, {"dust_png", okDust ? dustPath : QString()}, {"master_fits", okFits ? fitsPath : QString()}}},
