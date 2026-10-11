@@ -36,6 +36,9 @@ QString scheduleText(const QJsonObject& s, int top);
 QDate currentNightDate(const QString& timeZone);
 /// Look a target up by key ("M31") or name among those observable tonight (minBlockMin 0); returns the target object or {ok:false}.
 QJsonObject findTarget(const Options& o, const QString& name);
+/// Sun and Moon events for one local day: {ok, date, ephemeris, moonrise, moonset (ISO UTC or null), moon_transit{time, alt_deg}, moon_illumination (at local midnight),
+/// moon_phase, moon_waxing, sunrise, sunset}. Rise and set use the topocentric altitude of the centre at -(34' refraction + semi-diameter), found to a second.
+QJsonObject sunMoonDay(const QDate& day, const Astro::Site& site, const QString& timeZone);
 /// Backup targets for "partial cloud covers what I am pointing at": targets observable at `utc` for at least minLeftMin more minutes, at least minSepDeg away
 /// (as seen in the sky, since clouds move with the sky's alt/az frame, not with the stars), ranked by priority, altitude, separation and time left; with each one's field-rotation exposure limit.
 /// {ok, from:{...}, backups:[{key, name, ra_hours, dec_deg, priority, separation_deg, alt, az, minutes_left, t_max_s}]}. `avoid` lists keys already tried.

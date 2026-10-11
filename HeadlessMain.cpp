@@ -147,6 +147,9 @@ const QList<Cmd>& commands()
                   [] { QList<Arg> a = {O("name", 's', "current target key or name (default: the server's target, else the mount's pointing)"), O("min-sep", 'd', "minimum separation from the current pointing, deg", "40"),
                                        O("count", 'i', "backups to return", "3"), O("min-left", 'd', "minimum minutes the backup stays observable", "45"), O("avoid", 's', "comma-separated target keys already tried")};
                        return a + plannerArgs(); }()});
+        v.append({"moon", "planning", "Moonrise, moonset, transit, illumination and phase (and sunrise/sunset) for each of the next days, from JPL DE440 via CSPICE when available (else a low-precision series; the reply says which).", "", false, true,
+                  {O("date", 's', "first local date YYYY-MM-DD (default: today)"), O("days", 'i', "number of days", "7"), O("lat", 'd', "site latitude, deg north", "52.2054"), O("lon", 'd', "site longitude, deg east", "0.1218"),
+                   O("time-zone", 's', "IANA time zone for the output", "Europe/London"), O("text", 'b', "one line per day instead of JSON")}});
         v.append({"fieldrot", "planning", "Field-rotation limit on exposure time for an alt-az mount, for a target over the next hours.", "", false, true,
                   {P("ra-hours", 'd', "J2000 RA, hours", true, "ra_hours"), P("dec-deg", 'd', "J2000 Dec, degrees", true, "dec_deg"), O("tol", 'd', "allowed corner trail, px", "2"), O("hours", 'd', "hours to cover", "8"),
                    O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218")}});
@@ -304,6 +307,26 @@ QJsonObject cmdWeather(const Parsed& p, const Cmd& c)
     r["hours"] = out;
     if (p.v.contains("text")) r["text"] = text;
     return r;
+}
+
+QJsonObject cmdMoon(const Parsed& p, const Cmd& c)
+{
+    const QString zoneId = str(p, "time-zone", "Europe/London"); const QTimeZone zone(zoneId.toUtf8());
+    if (!zone.isValid()) return failure("unknown time zone " + zoneId);
+    const Astro::Site site{num(p, c, "lat"), num(p, c, "lon")};
+    QDate d = p.v.contains("date") ? QDate::fromString(str(p, "date"), Qt::ISODate) : QDateTime::currentDateTimeUtc().toTimeZone(zone).date();
+    if (!d.isValid()) return failure("date must be YYYY-MM-DD");
+    auto local = [&](const QJsonValue& v) { if (v.isNull() || v.isUndefined()) return QString("--:--:--"); return parseZ(v.toString()).toTimeZone(zone).toString("HH:mm:ss"); };
+    QJsonArray days; QString text, eph;
+    for (int i = 0; i < int(num(p, c, "days")); ++i, d = d.addDays(1)) {
+        const QJsonObject r = Planner::sunMoonDay(d, site, zoneId); eph = r["ephemeris"].toString();
+        days.append(r);
+        text += QString("%1  moonrise %2  moonset %3  transit %4 (alt %5)  %6% %7   sunrise %8 sunset %9\n").arg(d.toString("ddd dd MMM"), local(r["moonrise"]), local(r["moonset"]),
+                    local(r["moon_transit"].toObject()["time"]), QString::number(r["moon_transit"].toObject()["alt_deg"].toDouble(), 'f', 0)).arg(int(r["moon_illumination"].toDouble() * 100 + 0.5)).arg(r["moon_phase"].toString(), local(r["sunrise"]), local(r["sunset"]));
+    }
+    QJsonObject out{{"ok", true}, {"ephemeris", eph}, {"time_zone", zoneId}, {"site", QJsonObject{{"lat_deg", site.latDeg}, {"lon_deg", site.lonDeg}}}, {"days", days}};
+    if (p.v.contains("text")) out["text"] = text;
+    return out;
 }
 
 QJsonObject cmdBackup(const Parsed& p, const Cmd& c)
@@ -740,6 +763,7 @@ int main(int argc, char* argv[])
     if (cmd->name == "commands") out = catalogue();
     else if (cmd->name == "schedule") out = cmdSchedule(p, *cmd);
     else if (cmd->name == "fieldrot") { Astro::Site s{num(p, *cmd, "lat"), num(p, *cmd, "lon")}; out = Planner::fieldRotation(num(p, *cmd, "ra-hours"), num(p, *cmd, "dec-deg"), s, num(p, *cmd, "tol"), num(p, *cmd, "hours")); }
+    else if (cmd->name == "moon") out = cmdMoon(p, *cmd);
     else if (cmd->name == "backup") out = cmdBackup(p, *cmd);
     else if (cmd->name == "run") out = cmdRun(p, *cmd);
     else if (cmd->name == "now") out = cmdNow(p, *cmd);

@@ -1,4 +1,5 @@
 #include "Astro.hpp"
+#include "Ephemeris.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -24,10 +25,26 @@ double lstDegrees(double jd, double lonDeg)
     return wrap360(gmst + lonDeg);
 }
 
+Equatorial precess(const Equatorial& eq, double jdFrom, double jdTo)
+{
+    const double T = (jdFrom - 2451545.0) / 36525.0, t = (jdTo - jdFrom) / 36525.0;
+    const double as = kPi / 648000.0;                                         // arcsecond in radians
+    const double zeta = ((2306.2181 + 1.39656 * T - 0.000139 * T * T) * t + (0.30188 - 0.000344 * T) * t * t + 0.017998 * t * t * t) * as;
+    const double z = ((2306.2181 + 1.39656 * T - 0.000139 * T * T) * t + (1.09468 + 0.000066 * T) * t * t + 0.018203 * t * t * t) * as;
+    const double theta = ((2004.3109 - 0.85330 * T - 0.000217 * T * T) * t - (0.42665 + 0.000217 * T) * t * t - 0.041833 * t * t * t) * as;
+    const double a0 = rad(eq.raHours * 15.0), d0 = rad(eq.decDeg);
+    const double A = std::cos(d0) * std::sin(a0 + zeta);
+    const double B = std::cos(theta) * std::cos(d0) * std::cos(a0 + zeta) - std::sin(theta) * std::sin(d0);
+    const double C = std::sin(theta) * std::cos(d0) * std::cos(a0 + zeta) + std::cos(theta) * std::sin(d0);
+    return {wrap360(deg(std::atan2(A, B) + z)) / 15.0, deg(std::asin(std::clamp(C, -1.0, 1.0)))};
+}
+
 AltAz altAz(const Equatorial& eq, const Site& site, const QDateTime& utc)
 {
-    const double ha = rad(lstDegrees(julianDate(utc), site.lonDeg) - eq.raHours * 15.0);
-    const double dec = rad(eq.decDeg), lat = rad(site.latDeg);
+    const double jd = julianDate(utc);
+    const Equatorial d = precess(eq, 2451545.0, jd);
+    const double ha = rad(lstDegrees(jd, site.lonDeg) - d.raHours * 15.0);
+    const double dec = rad(d.decDeg), lat = rad(site.latDeg);
     const double sinAlt = std::sin(dec) * std::sin(lat) + std::cos(dec) * std::cos(lat) * std::cos(ha);
     const double alt = std::asin(std::clamp(sinAlt, -1.0, 1.0));
     const double y = -std::cos(dec) * std::sin(ha);
@@ -35,7 +52,8 @@ AltAz altAz(const Equatorial& eq, const Site& site, const QDateTime& utc)
     return {deg(alt), wrap360(deg(std::atan2(y, x)))};
 }
 
-Equatorial sunPosition(const QDateTime& utc)
+namespace {
+Equatorial sunOfDate(const QDateTime& utc)
 {
     const double n = julianDate(utc) - 2451545.0;
     const double L = wrap360(280.460 + 0.9856474 * n), g = rad(wrap360(357.528 + 0.9856003 * n));
@@ -43,6 +61,14 @@ Equatorial sunPosition(const QDateTime& utc)
     const double eps = rad(23.439 - 0.0000004 * n);
     const double ra = std::atan2(std::cos(eps) * std::sin(lam), std::cos(lam));
     return {wrap360(deg(ra)) / 15.0, deg(std::asin(std::sin(eps) * std::sin(lam)))};
+}
+}
+
+Equatorial sunPosition(const QDateTime& utc)
+{
+    Ephemeris::SunMoon sm;
+    if (Ephemeris::sunMoon(utc, &sm)) return {sm.sunRaHours, sm.sunDecDeg};
+    return precess(sunOfDate(utc), julianDate(utc), 2451545.0);       // the series is of date
 }
 
 namespace {
@@ -63,13 +89,25 @@ MoonGeo moonGeo(const QDateTime& utc)
 }
 }
 
-Equatorial moonPosition(const QDateTime& utc) { return moonGeo(utc).eq; }
+Equatorial moonPosition(const QDateTime& utc)
+{
+    Ephemeris::SunMoon sm;
+    if (Ephemeris::sunMoon(utc, &sm)) return {sm.moonRaHours, sm.moonDecDeg};
+    return precess(moonGeo(utc).eq, julianDate(utc), 2451545.0);      // the series is of date
+}
+
+double moonDistanceKm(const QDateTime& utc)
+{
+    Ephemeris::SunMoon sm;
+    if (Ephemeris::sunMoon(utc, &sm)) return sm.moonDistKm;
+    return 6378.14 / std::sin(rad(moonGeo(utc).parallaxDeg));
+}
 
 double moonAltitude(const Site& site, const QDateTime& utc)
 {
-    const MoonGeo g = moonGeo(utc);
-    const double alt = altAz(g.eq, site, utc).alt;
-    return alt - g.parallaxDeg * std::cos(rad(alt));
+    const double alt = altAz(moonPosition(utc), site, utc).alt;
+    const double par = deg(std::asin(6378.14 / moonDistanceKm(utc)));         // horizontal parallax
+    return alt - par * std::cos(rad(alt));
 }
 
 double separationDeg(const Equatorial& a, const Equatorial& b)
@@ -81,6 +119,8 @@ double separationDeg(const Equatorial& a, const Equatorial& b)
 
 double moonIllumination(const QDateTime& utc)
 {
+    Ephemeris::SunMoon sm;
+    if (Ephemeris::sunMoon(utc, &sm)) return sm.moonIllumination;
     const double elong = rad(separationDeg(sunPosition(utc), moonPosition(utc)));
     return (1.0 - std::cos(elong)) / 2.0;      // adequate: the moon's latitude is under 5 degrees
 }

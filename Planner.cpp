@@ -1,4 +1,5 @@
 #include "Planner.hpp"
+#include "Ephemeris.hpp"
 #include "MessierCatalog.hpp"
 
 #include <QCoreApplication>
@@ -264,7 +265,7 @@ QJsonObject schedule(const Options& o)
         if (!rainFrom.isEmpty()) wx["rain_from"] = rainFrom;
         if (rows.isEmpty() && total > 0) wx["note"] = "the forecast leaves no observable window; rerun with --weather off to plan without it";
     }
-    QJsonObject result{{"ok", true}, {"night", day.toString(Qt::ISODate)}, {"site", QJsonObject{{"lat_deg", o.site.latDeg}, {"lon_deg", o.site.lonDeg}}},
+    QJsonObject result{{"ok", true}, {"ephemeris", Ephemeris::description()}, {"night", day.toString(Qt::ISODate)}, {"site", QJsonObject{{"lat_deg", o.site.latDeg}, {"lon_deg", o.site.lonDeg}}},
                        {"dark_start", iso(times[d.first()])}, {"dark_end", iso(times[d.last()])}, {"moon_illumination", std::round(illum[d.first()] * 100) / 100},
                        {"horizon", src + (hz.learnedBins() ? QString(" + %1 learned bins").arg(hz.learnedBins()) : QString())}, {"plan", planJ}, {"targets", targetsJ}};
     if (!wx.isEmpty()) result["weather"] = wx;
@@ -307,6 +308,47 @@ QString scheduleText(const QJsonObject& s, int top)
     }
     if (s["plan"].toArray().isEmpty()) out += "  nothing observable for a useful block tonight\n";
     return out;
+}
+
+QJsonObject sunMoonDay(const QDate& day, const Astro::Site& site, const QString& timeZone)
+{
+    const QTimeZone zone(timeZone.toUtf8());
+    if (!zone.isValid()) return {{"ok", false}, {"error", "unknown timezone " + timeZone}};
+    const QDateTime t0 = QDateTime(day, QTime(0, 0), zone).toUTC();
+    const double kRad = M_PI / 180;
+    auto moonAlt = [&](const QDateTime& t) { return Astro::moonAltitude(site, t); };
+    auto moonH0 = [&](const QDateTime& t) { return -(34.0 / 60 + std::asin(1737.4 / Astro::moonDistanceKm(t)) / kRad); };
+    auto sunAlt = [&](const QDateTime& t) { return Astro::altAz(Astro::sunPosition(t), site, t).alt; };
+    auto crossing = [&](auto alt, auto h0, bool rising) -> QJsonValue {          // first crossing of h0 in the day, bisected to one second
+        QDateTime a = t0; double fa = alt(a) - h0(a);
+        for (int m = 1; m <= 24 * 60; ++m) {
+            const QDateTime b = t0.addSecs(m * 60); const double fb = alt(b) - h0(b);
+            if ((rising && fa < 0 && fb >= 0) || (!rising && fa >= 0 && fb < 0)) {
+                QDateTime lo = a, hi = b;
+                for (int i = 0; i < 12; ++i) { const QDateTime mid = lo.addMSecs(lo.msecsTo(hi) / 2); const double fm = alt(mid) - h0(mid); if ((fm >= 0) == rising) hi = mid; else lo = mid; }
+                return iso(hi);
+            }
+            a = b; fa = fb;
+        }
+        return QJsonValue();
+    };
+    QJsonObject r{{"ok", true}, {"date", day.toString(Qt::ISODate)}, {"time_zone", timeZone}, {"ephemeris", Ephemeris::description()}};
+    r["moonrise"] = crossing(moonAlt, moonH0, true); r["moonset"] = crossing(moonAlt, moonH0, false);
+    r["sunrise"] = crossing(sunAlt, [](const QDateTime&) { return -0.833; }, true); r["sunset"] = crossing(sunAlt, [](const QDateTime&) { return -0.833; }, false);
+    QDateTime best = t0; double bestAlt = -90;                                  // transit = highest altitude of the day
+    for (int m = 0; m <= 24 * 60; m += 2) { const QDateTime t = t0.addSecs(m * 60); const double a = moonAlt(t); if (a > bestAlt) { bestAlt = a; best = t; } }
+    for (int s = -120; s <= 120; s += 5) { const QDateTime t = best.addSecs(s); const double a = moonAlt(t); if (a > bestAlt) { bestAlt = a; best = t; } }
+    r["moon_transit"] = QJsonObject{{"time", iso(best)}, {"alt_deg", std::round(bestAlt * 10) / 10}};
+    const QDateTime mid = t0.addSecs(12 * 3600);                                 // illumination and phase at local midnight (end of the day)
+    const QDateTime night = t0.addSecs(24 * 3600);
+    const double ill = Astro::moonIllumination(night);
+    const Astro::Equatorial sun = Astro::sunPosition(night), moon = Astro::moonPosition(night);
+    double dra = moon.raHours - sun.raHours; while (dra > 12) dra -= 24; while (dra < -12) dra += 24;
+    const bool waxing = dra > 0;
+    QString name = ill < 0.02 ? "new" : ill > 0.98 ? "full" : ill < 0.45 ? (waxing ? "waxing crescent" : "waning crescent") : ill < 0.55 ? (waxing ? "first quarter" : "last quarter") : (waxing ? "waxing gibbous" : "waning gibbous");
+    r["moon_illumination"] = std::round(ill * 1000) / 1000; r["moon_waxing"] = waxing; r["moon_phase"] = name;
+    Q_UNUSED(mid)
+    return r;
 }
 
 QJsonObject backupTargets(const Options& base, double raHours, double decDeg, const QDateTime& utc, double minSepDeg, int count, double minLeftMin, const QStringList& avoid)

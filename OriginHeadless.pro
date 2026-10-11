@@ -17,6 +17,7 @@ MOC_DIR = build/moc
 SOURCES += \
     HeadlessMain.cpp \
     Planner.cpp \
+    Ephemeris.cpp \
     Weather.cpp \
     CoordinateUtils.cpp \
     TelescopeDataProcessor.cpp \
@@ -51,3 +52,14 @@ HEADERS += \
 
 target.path = /opt/OriginHeadless/bin
 INSTALLS += target
+
+# High-accuracy Sun and Moon (JPL DE440 through CSPICE). Optional: without it Astro.cpp falls back to a low-precision series.
+# Point at a CSPICE tree with ORIGIN_CSPICE=/path/to/cspice (needs include/SpiceUsr.h and lib/cspice.a); build/cspice/cspice is used if present
+# (extract NAIF's cspice.tar.Z in build/cspice). The kernels are found at run time, see Ephemeris.hpp.
+CSPICE_DIR = $$(ORIGIN_CSPICE)
+isEmpty(CSPICE_DIR): exists($$PWD/build/cspice/cspice/lib/cspice.a): CSPICE_DIR = $$PWD/build/cspice/cspice
+!isEmpty(CSPICE_DIR) {
+    DEFINES += ORIGIN_SPICE
+    INCLUDEPATH += $$CSPICE_DIR/include
+    LIBS += $$CSPICE_DIR/lib/cspice.a -lm
+}

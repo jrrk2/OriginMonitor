@@ -46,6 +46,7 @@ SOURCES += \
     Image16.cpp \
     SkyMonitor.cpp \
     Astro.cpp \
+    Ephemeris.cpp \
 
 # Original header files
 HEADERS += \
@@ -58,6 +59,7 @@ HEADERS += \
     Image16.hpp \
     SkyMonitor.hpp \
     Astro.hpp \
+    Ephemeris.hpp \
     CoordinateUtils.hpp \
     MessierCatalog.hpp \
     DataDir.hpp \
