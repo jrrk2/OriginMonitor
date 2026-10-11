@@ -139,7 +139,7 @@ void Sequencer::onFocus(const QJsonObject& o)
     const QJsonObject reg = o["registration"].toObject();
     QJsonObject rec{{"time", QDateTime::currentDateTime().toString(Qt::ISODateWithMs)}, {"state", m_state == State::Shooting ? "shooting" : "probing"},
                     {"file", m_curPath}, {"verdict", verdict}, {"stars", o["stars"].toInt()}, {"hfr_px", o["hfr_px"].toDouble()}, {"sky_rate", o["sky_rate"].toDouble()},
-                    {"transparency", reg["transparency"].toDouble()}, {"stacked", reg["stacked"].toBool()}, {"frames_in_stack", reg["frames_in_stack"].toInt()},
+                    {"cause", o["cause"].toString()}, {"transparency", reg["transparency"].toDouble()}, {"stacked", reg["stacked"].toBool()}, {"frames_in_stack", reg["frames_in_stack"].toInt()},
                     {"capture_ms", m_curCaptureMs}, {"download_ms", m_curDownloadMs}, {"analysis_ms", analysisMs}, {"cycle_ms", m_curCycleMs}, {"exposure", m_exposure}};
     bool drift = false;
     const double hfr = o["hfr_px"].toDouble();
@@ -157,6 +157,9 @@ void Sequencer::onFocus(const QJsonObject& o)
     QFile log(m_logPath);
     if (log.open(QIODevice::Append)) log.write(QJsonDocument(rec).toJson(QJsonDocument::Compact) + "\n");
 
+    if (!good && o["cause"].toString() == "obstruction" && m_lastCause != "obstruction")
+        m_b->recordEvent("sequence_obstructed", QString("frame blocked by a fixed obstruction, not cloud (%1): consider another target").arg(o["cause_reasons"].toArray().first().toString()));
+    m_lastCause = good ? QString() : o["cause"].toString();
     if (drift) {
         ++m_drifts; m_driftRun = 0; m_hfrWin.clear();
         m_b->recordEvent("sequence_focus_drift", QString("median HFR %1 px is %2 x the baseline %3 px: refocus").arg(m_hfrMedian, 0, 'f', 2).arg(m_hfrMedian / m_hfrBase, 0, 'f', 2).arg(m_hfrBase, 0, 'f', 2));

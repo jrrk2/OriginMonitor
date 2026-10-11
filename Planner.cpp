@@ -76,7 +76,7 @@ public:
                 const QJsonObject b = it.value().toObject();
                 if (b["good"].toInt() == 0 && b["bad"].toInt() >= 3 && b["bad_dates"].toArray().size() >= 2) {
                     const QStringList p = it.key().split('_');
-                    if (p.size() == 2) m_bins.append({p[0].toInt(), p[1].toInt()});
+                    if (p.size() == 2 && p[1].toInt() < 60) m_bins.append({p[0].toInt(), p[1].toInt()});     // above 60 deg it cannot be a tree line
                 }
             }
         }

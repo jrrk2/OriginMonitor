@@ -66,4 +66,5 @@ private:
     double m_hfrBase = 0, m_hfrMedian = 0, m_driftRatio = 1.15;
     int m_focusWin = 8, m_driftRun = 0, m_drifts = 0;
     bool m_focusPause = false;
+    QString m_lastCause;                            // cause of the previous bad frame (obstruction | cloud | unknown), empty after a good one
 };

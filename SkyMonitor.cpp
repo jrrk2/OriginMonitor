@@ -2,8 +2,10 @@
 #include "FocusAnalyzer.hpp"
 #include "DataDir.hpp"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <algorithm>
@@ -11,11 +13,54 @@
 
 namespace {
 constexpr double kPi = 3.14159265358979323846;
+constexpr double kMaxObstructionAlt = 60;       // a bin whose lower edge is above this cannot be a tree line or building
 QString baseDir() { return originDataDir(); }
 QString safeName(const QString& s) { QString o = s; for (QChar& c : o) if (!c.isLetterOrNumber() && c != '-' && c != '_') c = '_'; return o.isEmpty() ? "target" : o; }
 }
 
-SkyMonitor::SkyMonitor() { loadSkyMap(); }
+SkyMonitor::SkyMonitor() { loadSkyMap(); loadHorizon(); }
+
+void SkyMonitor::loadHorizon()
+{
+    QString file = qEnvironmentVariable("ORIGIN_HORIZON");
+    if (file.isEmpty()) for (const QString& c : {QString("tools/horizon.json"), QCoreApplication::applicationDirPath() + "/tools/horizon.json", QCoreApplication::applicationDirPath() + "/../tools/horizon.json",
+                                               QCoreApplication::applicationDirPath() + "/../../tools/horizon.json", QCoreApplication::applicationDirPath() + "/../../../tools/horizon.json"})
+        if (QFileInfo::exists(c)) { file = c; break; }
+    QFile f(file);
+    if (file.isEmpty() || !f.open(QIODevice::ReadOnly)) return;
+    for (const QJsonValue& v : QJsonDocument::fromJson(f.readAll()).object()["points"].toArray()) m_horizon.append({v.toArray().at(0).toDouble(), v.toArray().at(1).toDouble()});
+    std::sort(m_horizon.begin(), m_horizon.end());
+}
+
+double SkyMonitor::horizonAlt(double az) const
+{
+    if (m_horizon.isEmpty()) return 0;
+    az = std::fmod(az, 360.0); if (az < 0) az += 360.0;
+    QList<QPair<double, double>> p;
+    for (const auto& q : m_horizon) p.append({q.first - 360, q.second});
+    p += m_horizon;
+    for (const auto& q : m_horizon) p.append({q.first + 360, q.second});
+    for (int i = 0; i + 1 < p.size(); ++i)
+        if (az >= p[i].first && az <= p[i + 1].first) { const double d = p[i + 1].first - p[i].first; return d > 0 ? p[i].second + (p[i + 1].second - p[i].second) * (az - p[i].first) / d : p[i].second; }
+    return p.first().second;
+}
+
+QString SkyMonitor::classifyBad(double az, double alt, double excess, bool dark, bool haveDark, QStringList* why) const
+{
+    int obs = 0, cld = 0;
+    const double hz = horizonAlt(az);
+    if (hz > 0 && alt < hz + 1.0) { obs += 2; *why << QString("pointing alt %1 is at or below the horizon profile (%2 at az %3)").arg(alt, 0, 'f', 0).arg(hz, 0, 'f', 0).arg(az, 0, 'f', 0); }
+    if (dark && haveDark) {
+        if (excess < -0.3) { obs += 2; *why << QString("sky %1% darker than the clear-sky baseline: something opaque blocks the light").arg(int(-excess * 100)); }
+        else if (excess > 0.3) { cld += 2; *why << QString("sky %1% brighter than the clear-sky baseline: cloud lit from below").arg(int(excess * 100)); }
+    }
+    const QJsonObject bin = m_skyMap[mapKey(az, alt)].toObject();
+    const int good = bin["good"].toInt(), bad = bin["bad"].toInt(), badNights = bin["bad_dates"].toArray().size();
+    if (good == 0 && bad >= 3 && badNights >= 2) { obs += 2; *why << QString("this direction was bad on %1 nights and never good").arg(badNights); }
+    else if (good >= 5) { cld += 1; *why << QString("this direction has been clear before (%1 good frames)").arg(good); }
+    if (alt > kMaxObstructionAlt) { cld += 2; *why << QString("alt %1 is too high for a tree line or building").arg(alt, 0, 'f', 0); }
+    return obs >= cld + 2 ? "obstruction" : cld > obs ? "cloud" : "unknown";
+}
 
 QJsonObject SkyMonitor::settings() const
 {
@@ -67,32 +112,41 @@ void SkyMonitor::saveSkyMap() const
     if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(QJsonObject{{"bins", m_skyMap}, {"dark_rate", d}}).toJson(QJsonDocument::Indented));
 }
 
-void SkyMonitor::noteSkyMap(double az, double alt, bool good, const QDateTime& utc)
+void SkyMonitor::noteSkyMap(double az, double alt, Kind kind, const QDateTime& utc)
 {
     if (alt < 0) return;
     const QString key = mapKey(az, alt);
     QJsonObject b = m_skyMap[key].toObject();
-    b[good ? "good" : "bad"] = b[good ? "good" : "bad"].toInt() + 1;
-    const QString field = good ? "good_dates" : "bad_dates", day = utc.date().toString(Qt::ISODate);
-    QJsonArray dates = b[field].toArray();
-    bool have = false; for (const auto& v : dates) if (v.toString() == day) have = true;
-    if (!have) { dates.append(day); while (dates.size() > 30) dates.removeFirst(); }
-    b[field] = dates;
+    const char* count = kind == Kind::Good ? "good" : kind == Kind::Obstruction ? "bad" : kind == Kind::Cloud ? "cloud" : "unk";
+    b[count] = b[count].toInt() + 1;
+    if (kind != Kind::Unknown) {
+        const QString field = kind == Kind::Good ? "good_dates" : kind == Kind::Obstruction ? "bad_dates" : "cloud_dates", day = utc.date().toString(Qt::ISODate);
+        QJsonArray dates = b[field].toArray();
+        bool have = false; for (const auto& v : dates) if (v.toString() == day) have = true;
+        if (!have) { dates.append(day); while (dates.size() > 30) dates.removeFirst(); }
+        b[field] = dates;
+    }
     m_skyMap[key] = b;
     if (++m_mapDirty >= 20) { saveSkyMap(); m_mapDirty = 0; }
 }
 
 QJsonObject SkyMonitor::obstructionMap() const
 {
-    // A bin is "suspect" when bad frames were seen on at least two different nights and no good frame was ever seen there
-    QJsonArray suspect, mixed;
+    // A bin is an obstruction when frames attributed to an obstruction were seen on at least two different nights and no good frame was ever seen there.
+    // Cloud frames are listed separately and never count; a candidate above 60 degrees is implausible and listed apart (nothing there is a tree line).
+    QJsonArray suspect, mixed, implausible, profile;
     for (auto it = m_skyMap.begin(); it != m_skyMap.end(); ++it) {
         const QJsonObject b = it.value().toObject();
         const int good = b["good"].toInt(), bad = b["bad"].toInt(), badNights = b["bad_dates"].toArray().size();
-        QJsonObject e{{"bin", it.key()}, {"good", good}, {"bad", bad}, {"bad_nights", badNights}, {"good_nights", b["good_dates"].toArray().size()}};
-        if (good == 0 && bad >= 3 && badNights >= 2) suspect.append(e); else if (bad > 0) mixed.append(e);
+        const QStringList p = it.key().split('_'); const int az = p.value(0).toInt(), alt = p.value(1).toInt();
+        QJsonObject e{{"bin", it.key()}, {"good", good}, {"bad", bad}, {"bad_nights", badNights}, {"good_nights", b["good_dates"].toArray().size()},
+                      {"cloud", b["cloud"].toInt()}, {"cloud_nights", b["cloud_dates"].toArray().size()}, {"unattributed", b["unk"].toInt()}};
+        if (good == 0 && bad >= 3 && badNights >= 2) {
+            if (alt >= kMaxObstructionAlt) implausible.append(e);
+            else { suspect.append(e); profile.append(QJsonObject{{"az", az}, {"obstructed_up_to_alt", alt + 5}, {"horizon_file_alt", std::round(horizonAlt(az + 5))}}); }
+        } else if (bad > 0 || b["cloud"].toInt() > 0) mixed.append(e);
     }
-    return QJsonObject{{"ok", true}, {"likely_obstructed", suspect}, {"sometimes_bad", mixed}, {"bins_total", m_skyMap.size()}};
+    return QJsonObject{{"ok", true}, {"likely_obstructed", suspect}, {"obstruction_profile", profile}, {"sometimes_bad", mixed}, {"implausible", implausible}, {"bins_total", m_skyMap.size()}};
 }
 
 QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int iso, double raRad, double decRad, const QDateTime& utc)
@@ -193,10 +247,17 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
 
     // --- obstruction memory: only frames whose geometry is trustworthy count
     const bool good = verdict == "clear" || verdict == "moon_glow" || verdict == "twilight" || verdict == "hazy";
-    if (pointingOk && verdict != "unknown") noteSkyMap(aa.az, aa.alt, good, utc);
+    QString cause = "none";
+    if (!good && pointingOk && verdict != "unknown") {
+        QStringList why;
+        cause = classifyBad(aa.az, aa.alt, excess, dark, m_darkRate.contains(isoKey), &why);
+        o["cause"] = cause; o["cause_reasons"] = QJsonArray::fromStringList(why);
+    }
+    if (pointingOk && verdict != "unknown")
+        noteSkyMap(aa.az, aa.alt, good ? Kind::Good : cause == "obstruction" ? Kind::Obstruction : cause == "cloud" ? Kind::Cloud : Kind::Unknown, utc);
     o["sky_map_bin"] = mapKey(aa.az, aa.alt);
     const QJsonObject bin = m_skyMap[mapKey(aa.az, aa.alt)].toObject();
-    o["sky_map_history"] = QJsonObject{{"good", bin["good"].toInt()}, {"bad", bin["bad"].toInt()}, {"bad_nights", bin["bad_dates"].toArray().size()}, {"good_nights", bin["good_dates"].toArray().size()}};
+    o["sky_map_history"] = QJsonObject{{"good", bin["good"].toInt()}, {"bad", bin["bad"].toInt()}, {"cloud", bin["cloud"].toInt()}, {"bad_nights", bin["bad_dates"].toArray().size()}, {"good_nights", bin["good_dates"].toArray().size()}};
 
     o["verdict"] = verdict; o["reasons"] = QJsonArray::fromStringList(reasons);
     o["stack"] = stackSummary();
