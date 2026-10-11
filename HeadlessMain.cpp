@@ -140,7 +140,9 @@ const QList<Cmd>& commands()
                                        O("max-exposure", 'd', "longest exposure, s (further limited by field rotation for each block)", "20"),
                                        O("cloud-patience", 'd', "minutes of cloud before going to a backup target", "10"), O("give-up", 'd', "minutes of cloud on one block before moving to the next block", "60"),
                                        O("not-before", 's', "local HH:MM; no slewing before this in the evening", "20:00"), O("connect", 's', "telescope host to reconnect to (default: the server's)")};
-                       return a + plannerArgs(); }()});
+                       QList<Arg> pa = plannerArgs();
+                       for (Arg& x : pa) if (x.name == "min-quality") x.help += " (run default 0.2: the forecast is a soft prior, the sky monitor decides)";
+                       return a + pa; }()});
         v.append({"park", "planning", "Save the stack and slew to Polaris (safe park).", "", true, false, {}});
         v.append({"schedule", "planning", "Plan one night: observable windows against the local horizon, Sun and Moon, plus a greedy one-target-at-a-time plan.", "", false, true, plannerArgs()});
         v.append({"weather", "planning", "Hourly forecast for the site from Open-Meteo: cloud low/mid/high, rain chance, visibility, dew point, wind and a 0..1 imaging quality per hour (cached 1 h; --fresh bypasses).", "", false, true,
@@ -747,6 +749,7 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
 {
     if (!p.v.contains("dry-run") && !p.v.contains("unattended")) return failure("run takes over the night and slews the telescope; add --unattended to confirm (or --dry-run to see the plan)");
     Planner::Options o = plannerOptions(p, c); o.date = Planner::currentNightDate(o.timeZone);
+    if (!p.v.contains("min-quality")) o.minQuality = 0.2;      // the forecast is a soft prior here: only write off hours that are clearly hopeless, the sky monitor and backups handle the rest
     const QJsonObject S = Planner::schedule(o);
     if (!S["ok"].toBool()) return S;
     if (p.v.contains("dry-run")) { QJsonObject d{{"ok", true}, {"dry_run", true}, {"plan", S["plan"]}, {"weather", S["weather"]}}; if (!g_wx.isEmpty()) d["forecast"] = g_wx; return d; }
