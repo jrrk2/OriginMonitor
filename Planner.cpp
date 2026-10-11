@@ -34,6 +34,7 @@ const QHash<QString, int>& priorities()
 
 struct Target { QString name, key, type, seen; double ra = 0, dec = 0, size = 0; int prio = 3; };
 
+QMap<QString, int> g_boost;   // catalogue id -> priority added (the user's wish list, e.g. M1 +5)
 QString g_stacksDir;          // where the live stacks of earlier nights are kept; empty = no novelty preference
 
 // "M31", "NGC 6992 Eastern Veil", "NGC6992_Veil" -> the catalogue id ("M31", "NGC6992"); the Veil's two halves share one id
@@ -49,8 +50,8 @@ QString catalogId(const QString& s)
 //   never imaged: +4   imaged over 30 days ago: +0   within 30 days: -4   within 3 days: -5   (priority never below 1)
 void applyNovelty(QList<Target>& targets)
 {
-    if (g_stacksDir.isEmpty()) return;
     QHash<QString, QDateTime> last;
+    if (g_stacksDir.isEmpty()) { for (Target& t : targets) { const QString id = catalogId(t.key.isEmpty() ? t.name : t.key); if (g_boost.contains(id)) t.prio += g_boost[id]; } return; }
     for (const QFileInfo& d : QDir(g_stacksDir).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
         const QString id = catalogId(d.fileName()); if (id.isEmpty()) continue;
         if (!last.contains(id) || d.lastModified() > last[id]) last[id] = d.lastModified();
@@ -58,6 +59,7 @@ void applyNovelty(QList<Target>& targets)
     const QDateTime now = QDateTime::currentDateTime();
     for (Target& t : targets) {
         const QString id = catalogId(t.key.isEmpty() ? t.name : t.key);
+        if (g_boost.contains(id)) t.prio += g_boost[id];                    // the user's own priority boost: it wins whenever the target is observable
         if (id.isEmpty() || !last.contains(id)) { t.prio += 4; t.seen = "new"; continue; }
         const double days = last[id].secsTo(now) / 86400.0;
         t.seen = QString("imaged %1 days ago").arg(days, 0, 'f', days < 10 ? 1 : 0);
@@ -179,6 +181,7 @@ QDate currentNightDate(const QString& timeZone)
 }
 
 void setStacksDir(const QString& dir) { g_stacksDir = dir; }
+void setBoosts(const QMap<QString, int>& boosts) { g_boost.clear(); for (auto it = boosts.begin(); it != boosts.end(); ++it) g_boost[catalogId(it.key()).isEmpty() ? it.key().toUpper() : catalogId(it.key())] = it.value(); }
 
 QJsonObject schedule(const Options& o)
 {

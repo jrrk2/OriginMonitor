@@ -70,6 +70,7 @@ QList<Arg> plannerArgs()
             O("moon-sep", 'd', "minimum Moon separation, deg", "30"), O("min-block", 'd', "shortest useful block, minutes", "45"), O("max-block", 'd', "longest time on one target, minutes", "150"),
             O("step", 'd', "time step, minutes", "5"), O("sky-map", 'b', "also use the obstruction bins learned in <data dir>/sky_map.json"),
             O("lat", 'd', "site latitude, deg north", "52.2054"), O("lon", 'd', "site longitude, deg east", "0.1218"), O("top", 'i', "targets to list", "25"), O("text", 'b', "human-readable table instead of JSON"),
+            O("boost", 's', "priority boosts, e.g. M1=5,M31=2 (added to ~/.config/origin/target_boost.json); a boosted target wins whenever it is observable"),
             O("novelty", 'o', "on|off prefer targets not imaged before: a target with a saved stack in <data dir>/stacks loses priority (-4, or -5 within 3 days), a new one gains +4", "on"),
             O("weather", 'o', "on|off drop hours the Open-Meteo forecast calls cloudy, wet or foggy (cached 1 h in the data dir; ignored if the request fails)", "on"),
             O("min-quality", 'd', "forecast quality 0..1 below which an hour is unobservable", "0.5")};
@@ -305,6 +306,13 @@ Planner::Options plannerOptions(const Parsed& p, const Cmd& c)
     o.minAlt = num(p, c, "min-alt"); o.sunAlt = num(p, c, "sun-alt"); o.moonSep = num(p, c, "moon-sep");
     o.minBlockMin = num(p, c, "min-block"); o.maxBlockMin = num(p, c, "max-block"); o.stepMin = num(p, c, "step"); o.top = int(num(p, c, "top"));
     Planner::setStacksDir(str(p, "novelty", "on") == "off" ? QString() : originDataDir() + "/stacks");     // prefer targets not imaged before
+    {   // wish list: ~/.config/origin/target_boost.json {"M1": 5} and/or --boost M1=5,M31=2
+        QMap<QString, int> boosts;
+        QFile bf(QDir::homePath() + "/.config/origin/target_boost.json");
+        if (bf.open(QIODevice::ReadOnly)) { const QJsonObject b = QJsonDocument::fromJson(bf.readAll()).object(); for (auto it = b.begin(); it != b.end(); ++it) boosts[it.key()] = it.value().toInt(); }
+        if (p.v.contains("boost")) for (const QString& kv : str(p, "boost").split(',', Qt::SkipEmptyParts)) { const QStringList a = kv.split('='); if (a.size() == 2) boosts[a[0].trimmed()] = a[1].toInt(); }
+        Planner::setBoosts(boosts);
+    }
     g_wx = QJsonObject();
     if (str(p, "weather", "on") != "off") {
         o.minQuality = num(p, c, "min-quality");

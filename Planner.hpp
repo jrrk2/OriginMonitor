@@ -4,6 +4,7 @@
 #include "Weather.hpp"
 
 #include <QDate>
+#include <QMap>
 #include <QDateTime>
 #include <QJsonObject>
 #include <QList>
@@ -31,6 +32,8 @@ struct Options {
 /// With a forecast in Options::weather the result also has a "weather" block (hourly cloud/quality over the dark window, rain_from) and each plan entry a mean forecast quality.
 /// Directory of earlier nights' live stacks: targets with a stack there are demoted (the more recent, the more), unseen ones promoted. Empty = no preference.
 void setStacksDir(const QString& dir);
+/// Priority added to named targets ("M1" -> 5), applied on top of the novelty preference; the planner already keeps a target out of the plan while it is below the horizon profile or a learned obstruction.
+void setBoosts(const QMap<QString, int>& boosts);
 QJsonObject schedule(const Options& o);
 /// Human-readable table of the same thing.
 QString scheduleText(const QJsonObject& s, int top);
