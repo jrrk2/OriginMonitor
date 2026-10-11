@@ -110,6 +110,14 @@ public:
         QFile m(skyMap);
         if (!skyMap.isEmpty() && m.open(QIODevice::ReadOnly)) {
             const QJsonObject bins = QJsonDocument::fromJson(m.readAll()).object()["bins"].toObject();
+            {   // glare from neighbours' lights: bins whose clear-sky background is far above the typical bin (see SkyMonitor::obstructionMap) are avoided like obstructions
+                QList<double> means; QList<QPair<QString, double>> all;
+                for (auto it = bins.begin(); it != bins.end(); ++it) { const QJsonObject b = it.value().toObject(); const int n = b["ex_n"].toInt(); if (n >= 5) { const double mm = b["ex_sum"].toDouble() / n; means << mm; all.append({it.key(), mm}); } }
+                if (means.size() >= 4) {
+                    std::sort(means.begin(), means.end()); const double med = means[means.size() / 2];
+                    for (const auto& e : all) if (e.second >= std::max(1.6 * med, med + 0.4)) { const QStringList p = e.first.split('_'); if (p.size() == 2 && p[1].toInt() < 60) m_bins.append({p[0].toInt(), p[1].toInt()}); }
+                }
+            }
             for (auto it = bins.begin(); it != bins.end(); ++it) {
                 const QJsonObject b = it.value().toObject();
                 if (b["good"].toInt() == 0 && b["bad"].toInt() >= 3 && b["bad_dates"].toArray().size() >= 2) {

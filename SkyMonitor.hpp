@@ -49,6 +49,9 @@ public:
     /// Evidence from a deliberate twilight survey (frames pointed at the places the night will use): a clear view counts as good, a blocked one as an obstruction.
     void noteSurvey(double az, double alt, bool obstructed, const QDateTime& utc) { noteSkyMap(az, alt, obstructed ? Kind::Obstruction : Kind::Good, utc); }
 
+    /// Sky background of a CLEAR frame taken in the dark, by direction: a bin much brighter than the others is glare (a neighbour's security light, a street lamp), not cloud.
+    void noteGlare(double az, double alt, double excessOverDark, const QDateTime& utc);
+
     QJsonObject obstructionMap() const;
 
 private:

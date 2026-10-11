@@ -131,8 +131,32 @@ void SkyMonitor::noteSkyMap(double az, double alt, Kind kind, const QDateTime& u
     if (++m_mapDirty >= 20) { saveSkyMap(); m_mapDirty = 0; }
 }
 
+void SkyMonitor::noteGlare(double az, double alt, double excess, const QDateTime& utc)
+{
+    if (alt < 0) return;
+    const QString key = mapKey(az, alt);
+    QJsonObject b = m_skyMap[key].toObject();
+    b["ex_sum"] = b["ex_sum"].toDouble() + excess; b["ex_n"] = b["ex_n"].toInt() + 1;
+    const QString day = utc.date().toString(Qt::ISODate); QJsonArray dates = b["ex_dates"].toArray();
+    bool have = false; for (const auto& v : dates) if (v.toString() == day) have = true;
+    if (!have) { dates.append(day); while (dates.size() > 30) dates.removeFirst(); }
+    b["ex_dates"] = dates;
+    m_skyMap[key] = b;
+    if (++m_mapDirty >= 20) { saveSkyMap(); m_mapDirty = 0; }
+}
+
 QJsonObject SkyMonitor::obstructionMap() const
 {
+    // glare: bins (at least 5 clear dark frames) whose mean sky excess is far above the typical bin: at least 1.6x the median and 0.4 above it (needs 4 such bins to have a median)
+    QJsonArray glare;
+    {
+        QList<double> means; QList<QPair<QString, QPair<double, int>>> all;
+        for (auto it = m_skyMap.begin(); it != m_skyMap.end(); ++it) { const QJsonObject b = it.value().toObject(); const int n = b["ex_n"].toInt(); if (n >= 5) { const double m = b["ex_sum"].toDouble() / n; means << m; all.append({it.key(), {m, n}}); } }
+        if (means.size() >= 4) {
+            std::sort(means.begin(), means.end()); const double med = means[means.size() / 2];
+            for (const auto& e : all) if (e.second.first >= std::max(1.6 * med, med + 0.4)) glare.append(QJsonObject{{"bin", e.first}, {"mean_excess", std::round(e.second.first * 100) / 100}, {"frames", e.second.second}, {"median_excess", std::round(med * 100) / 100}});
+        }
+    }
     // A bin is an obstruction when frames attributed to an obstruction were seen on at least two different nights and no good frame was ever seen there.
     // Cloud frames are listed separately and never count; a candidate above 60 degrees is implausible and listed apart (nothing there is a tree line).
     QJsonArray suspect, mixed, implausible, profile;
@@ -147,7 +171,7 @@ QJsonObject SkyMonitor::obstructionMap() const
             else { suspect.append(e); profile.append(QJsonObject{{"az", az}, {"obstructed_up_to_alt", alt + 5}, {"horizon_file_alt", std::round(horizonAlt(az + 5))}}); }
         } else if (bad > 0 || b["cloud"].toInt() > 0) mixed.append(e);
     }
-    return QJsonObject{{"ok", true}, {"likely_obstructed", suspect}, {"obstruction_profile", profile}, {"sometimes_bad", mixed}, {"implausible", implausible}, {"bins_total", m_skyMap.size()}};
+    return QJsonObject{{"ok", true}, {"likely_obstructed", suspect}, {"obstruction_profile", profile}, {"sometimes_bad", mixed}, {"implausible", implausible}, {"glare_bins", glare}, {"bins_total", m_skyMap.size()}};
 }
 
 // A picture of the frame for the eye (checking for trees, roofs and cloud): half-resolution colour binned again 2x2, black level removed, R and B scaled to the green
@@ -320,6 +344,7 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
         cause = classifyBad(aa.az, aa.alt, excess, dark, m_darkRate.contains(isoKey), &why);
         o["cause"] = cause; o["cause_reasons"] = QJsonArray::fromStringList(why);
     }
+    if (good && verdict == "clear" && dark && m_darkRate.contains(isoKey) && pointingOk) noteGlare(aa.az, aa.alt, excess, utc);
     if (pointingOk && verdict != "unknown")
         noteSkyMap(aa.az, aa.alt, good ? Kind::Good : cause == "obstruction" ? Kind::Obstruction : cause == "cloud" ? Kind::Cloud : Kind::Unknown, utc);
     o["sky_map_bin"] = mapKey(aa.az, aa.alt);
