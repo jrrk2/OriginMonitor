@@ -1006,6 +1006,7 @@ void OriginBackend::updateStatusFromProcessor()
     m_status.isTracking = data.mount.isTracking;
     m_status.isSlewing = !data.mount.isGotoOver;
     m_status.isAligned = data.mount.isAligned;
+    m_sky.setMountAligned(data.mount.isAligned);
     
     // Convert coordinates from radians
     m_status.raPosition = radiansToHours(data.mount.enc0); // Assuming enc0 is RA

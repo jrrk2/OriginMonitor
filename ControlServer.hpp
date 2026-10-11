@@ -67,6 +67,8 @@ private:
     QSet<QTcpSocket*> m_busy;                       // sockets with a command in progress (handle() runs nested event loops)
     QHash<QString, QJsonObject> m_last;         // "Source/Command" -> last message seen
     QHash<int, QJsonObject> m_responses;        // SequenceID -> response
+    QJsonObject m_lastSolve;                    // summary of the latest plate-solve attempt (shown by the analysis command and OriginWatch)
+    void recordSolve(const QJsonObject& r);
     int m_focuserLower = 1975;                  // travel limits, updated from telescope status
     int m_focuserUpper = 37527;
 };

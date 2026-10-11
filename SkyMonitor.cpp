@@ -1,6 +1,7 @@
 #include "SkyMonitor.hpp"
 #include "FocusAnalyzer.hpp"
 #include "DataDir.hpp"
+#include "Image16.hpp"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -149,6 +150,35 @@ QJsonObject SkyMonitor::obstructionMap() const
     return QJsonObject{{"ok", true}, {"likely_obstructed", suspect}, {"obstruction_profile", profile}, {"sometimes_bad", mixed}, {"implausible", implausible}, {"bins_total", m_skyMap.size()}};
 }
 
+// A picture of the frame for the eye (checking for trees, roofs and cloud): half-resolution colour binned again 2x2, black level removed, R and B scaled to the green
+// median, asinh stretch to the 99.5th percentile. No background removal, so gradients and silhouettes stay visible. Written at most every 15 s, atomically.
+static QString writePicture(const SkyFrame& F, double black, const QDateTime& utc, qint64* lastMs)
+{
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (nowMs - *lastMs < 15000 || F.width < 8 || F.height < 8 || F.g.size() < size_t(F.width) * F.height) return QString();
+    *lastMs = nowMs;
+    const int w = F.width / 2, h = F.height / 2;
+    std::vector<float> ch[3]; const std::vector<float>* src[3] = {&F.r, &F.g, &F.b};
+    for (int c = 0; c < 3; ++c) { ch[c].resize(size_t(w) * h); for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+        const size_t i = size_t(2 * y) * F.width + 2 * x; const std::vector<float>& v = *src[c];
+        ch[c][size_t(y) * w + x] = std::max(0.f, 0.25f * (v[i] + v[i + 1] + v[i + F.width] + v[i + F.width + 1]) - float(black)); } }
+    auto med = [](std::vector<float> v) { if (v.empty()) return 0.f; std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end()); return v[v.size() / 2]; };
+    std::vector<float> sub[3]; for (int c = 0; c < 3; ++c) for (size_t i = 0; i < ch[c].size(); i += 11) sub[c].push_back(ch[c][i]);
+    const float mg = med(sub[1]), gain[3] = {mg > 0 && med(sub[0]) > 0 ? mg / med(sub[0]) : 1.f, 1.f, mg > 0 && med(sub[2]) > 0 ? mg / med(sub[2]) : 1.f};
+    std::vector<float> lum; for (size_t i = 0; i < ch[1].size(); i += 7) lum.push_back(ch[1][i]);
+    std::sort(lum.begin(), lum.end()); const float top = std::max(lum.empty() ? 1.f : lum[size_t(0.995 * (lum.size() - 1))], 50.f), k = 12.f, norm = std::asinh(k);
+    Image16 img = Image16::make(w, h);
+    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) for (int c = 0; c < 3; ++c) {
+        const float v = std::clamp(ch[c][size_t(y) * w + x] * gain[c] / top, 0.f, 1.f);
+        img.row(y)[x * 3 + c] = quint16(std::clamp(std::asinh(k * v) / norm, 0.f, 1.f) * 65535.f);
+    }
+    const QString dir = originDataDir() + "/previews"; QDir().mkpath(dir);
+    const QString path = dir + "/last_frame.png", tmp = path + ".tmp";
+    if (!img.savePng(tmp)) return QString();
+    QFile::remove(path); QFile::rename(tmp, path); (void)utc;
+    return path;
+}
+
 QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int iso, double raRad, double decRad, const QDateTime& utc)
 {
     SkyFrame F = analyseFrame(fits);
@@ -158,12 +188,20 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     o["exposure"] = exposureS; o["iso"] = iso;
     if (!F.valid) { o["verdict"] = "unreadable"; o["reasons"] = QJsonArray{F.note}; return o; }
 
-    // --- geometry
-    const Astro::Equatorial pointing{raRad * 12.0 / kPi, decRad * 180.0 / kPi};
+    { const QString pic = writePicture(F, m_blackLevel, utc, &m_pictureMs); if (!pic.isEmpty()) { o["picture"] = pic; o["picture_time"] = utc.toString(Qt::ISODate); } }
+
+    // --- geometry. An unaligned mount reports meaningless RA/Dec: use the plate-solved pointing when there is a recent one, else the geometry is unknown.
+    QString source = "mount"; double useRa = raRad, useDec = decRad;
+    if (!m_mountAligned) {
+        if (m_fixAt.isValid() && m_fixAt.secsTo(utc) < 1800 && m_fixAt <= utc) { useRa = m_fixRa; useDec = m_fixDec; source = "plate_solve"; }
+        else source = "unknown";
+    }
+    o["pointing_source"] = source;
+    const Astro::Equatorial pointing{useRa * 12.0 / kPi, useDec * 180.0 / kPi};
     const Astro::AltAz aa = Astro::altAz(pointing, m_site, utc);
     const double sunAlt = Astro::altAz(Astro::sunPosition(utc), m_site, utc).alt;
     const double moonAlt = Astro::moonAltitude(m_site, utc), moonIll = Astro::moonIllumination(utc), moonSep = Astro::moonSeparationDeg(pointing, utc);
-    o["ra_hours"] = pointing.raHours; o["dec_deg"] = pointing.decDeg; o["alt_deg"] = aa.alt; o["az_deg"] = aa.az;
+    if (source != "unknown") { o["ra_hours"] = pointing.raHours; o["dec_deg"] = pointing.decDeg; o["alt_deg"] = aa.alt; o["az_deg"] = aa.az; }
     o["sun_alt_deg"] = sunAlt; o["moon_alt_deg"] = moonAlt; o["moon_illumination"] = moonIll; o["moon_separation_deg"] = moonSep;
     o["target"] = m_target;
     double offTarget = 0;
@@ -179,6 +217,14 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     if (dark && bgRate > 0 && (!m_darkRate.contains(isoKey) || bgRate < m_darkRate[isoKey])) { m_darkRate[isoKey] = bgRate; ++m_mapDirty; }
     double excess = 0;
     if (m_darkRate.contains(isoKey) && m_darkRate[isoKey] > 0) { excess = bgRate / m_darkRate[isoKey] - 1.0; o["sky_excess_over_dark"] = excess; }
+
+    // --- no usable pointing (mount not aligned, no plate solve): nothing about the geometry, the stack or the obstruction map can be judged
+    if (source == "unknown") {
+        o["verdict"] = "no_pointing";
+        o["reasons"] = QJsonArray{QString("pointing unknown: the mount is not aligned and there is no plate solve; %1 stars detected").arg(F.stars.size())};
+        o["notes"] = QJsonArray(); o["stack"] = stackSummary();
+        return o;
+    }
 
     // --- registration against the target's stack and per-tile coverage
     QStringList reasons; QString verdict = "clear";

@@ -30,6 +30,9 @@ public:
     void setBlackLevel(double adu) { m_blackLevel = adu; }
     void setAutoStack(bool on) { m_autoStack = on; }
     void setMinTransparency(double t) { m_minTransparency = t; }
+    /// While the mount is not aligned its RA/Dec mean nothing. A plate solve gives the true pointing (used for 30 minutes); without one the frame is scored "no_pointing".
+    void setMountAligned(bool aligned) { m_mountAligned = aligned; }
+    void setSolvedPointing(double raRad, double decRad, const QDateTime& when) { m_fixRa = raRad; m_fixDec = decRad; m_fixAt = when; }
     QJsonObject settings() const;
 
     /// Choose the stack frames are added to. A saved stack with the same name is resumed. Negative ra/dec leave the position unknown.
@@ -60,6 +63,9 @@ private:
     double m_blackLevel = 4985.0;
     bool m_autoStack = true;
     double m_minTransparency = 0.5;
+    bool m_mountAligned = true;
+    double m_fixRa = 0, m_fixDec = 0; QDateTime m_fixAt;   // latest plate-solved pointing
+    qint64 m_pictureMs = 0;                                 // last time the picture of the sky was written
     QString m_target = "auto";
     bool m_targetKnown = false;
     Astro::Equatorial m_targetPos;

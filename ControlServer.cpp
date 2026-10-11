@@ -256,6 +256,18 @@ QJsonObject ControlServer::doFrameStats(const QJsonObject& req)
     return r;
 }
 
+// Remember the latest plate-solve attempt; a solution also tells the sky analysis where an unaligned mount is pointing.
+void ControlServer::recordSolve(const QJsonObject& r)
+{
+    const QJsonObject fs = r["stats"].toObject();
+    QJsonObject s{{"time", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}, {"solved", r["solved"].toBool()}, {"skipped", r["skipped"].toBool()}, {"verdict", fs["verdict"]},
+                  {"stars", fs["stars"]}, {"median_adu", fs["median_adu"]}, {"sky_rate", fs["sky_rate_adu_per_s"]}, {"exposure_s", fs["exposure_s"]}, {"suggested_exposure_s", fs["suggested_exposure_s"]},
+                  {"error", r["error"]}, {"summary", r["summary"]}};
+    for (const char* k : {"ra_hours", "dec_deg", "alt_deg", "az_deg", "tilt_alt_deg", "up_deg_east_of_north"}) if (r.contains(k)) s[k] = r[k];
+    m_lastSolve = s;
+    if (r["solved"].toBool()) m_backend->sky().setSolvedPointing(r["ra_deg"].toDouble() * 3.14159265358979323846 / 180.0, r["dec_deg"].toDouble() * 3.14159265358979323846 / 180.0, QDateTime::currentDateTimeUtc());
+}
+
 // The telescope's own tilt sensor (OrientationSensor notifications), valid before the mount has aligned. Whole degrees.
 double ControlServer::tiltAltitude(double* ageSec) const
 {
@@ -511,7 +523,7 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
 
     if (cmd == "snapshot") return doSnapshot(req);
     if (cmd == "analysis") {                          // latest per-frame sky analysis, plus the newest "history" records
-        QJsonObject r{{"ok", true}, {"last", m_backend->lastFocus()}};
+        QJsonObject r{{"ok", true}, {"last", m_backend->lastFocus()}, {"solve", m_lastSolve}};
         if (req["history"].toInt() > 0) r["history"] = m_backend->focusHistory(req["history"].toInt());
         return r;
     }
@@ -573,7 +585,7 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
     if (cmd == "goto") return doGoto(req);
     if (cmd == "initialize") return doInitialize(req);
     if (cmd == "unpark") return doUnpark(req);
-    if (cmd == "solve") return doSolve(req);
+    if (cmd == "solve") { const QJsonObject r = doSolve(req); recordSolve(r); return r; }
     if (cmd == "frame_stats") return doFrameStats(req);
 
     if (cmd == "focuser_status") {

@@ -252,9 +252,13 @@ private:
         group("Pointing", {{"RA / Dec", &m_pRaDec}, {"Alt / Az", &m_pAltAz}, {"goto", &m_pGoto}, {"target", &m_pTarget}}, 0, 1);
         group("Focuser and camera", {{"focuser", &m_fPos}, {"exposure / ISO", &m_cExp}, {"sensor temp", &m_cTemp}}, 1, 0);
         group("Sequence", {{"state", &m_sState}, {"frames", &m_sFrames}, {"last frame", &m_sLast}, {"cause", &m_sCause}, {"focus watchdog", &m_sFocus}, {"timing", &m_sTiming}}, 1, 1);
-        group("Sky (last analysis)", {{"verdict", &m_aVerdict}, {"why", &m_aWhy}, {"sky", &m_aSky}}, 2, 0);
+        group("Sky (last analysis)", {{"verdict", &m_aVerdict}, {"why", &m_aWhy}, {"sky", &m_aSky}, {"pointing", &m_aPoint}, {"plate solve", &m_aSolve}}, 2, 0);
+        {   // the last frame as a picture, to check for trees, roofs and cloud
+            m_aPic = new QLabel("no frame yet"); m_aPic->setAlignment(Qt::AlignCenter); m_aPic->setMinimumSize(360, 240); m_aPic->setStyleSheet("background:#000; color:#888");
+            static_cast<QFormLayout*>(grid->itemAtPosition(2, 0)->widget()->layout())->addRow(m_aPic);
+        }
         group("Supervisor", {{"last decision", &m_rLast}, {"decisions", &m_rCount}}, 2, 1);
-        m_aWhy->setWordWrap(true); m_rLast->setWordWrap(true); m_sCause->setWordWrap(true);
+        m_aWhy->setWordWrap(true); m_aSolve->setWordWrap(true); m_aPoint->setWordWrap(true); m_rLast->setWordWrap(true); m_sCause->setWordWrap(true);
         grid->setRowStretch(3, 1);
         return w;
     }
@@ -344,11 +348,11 @@ private:
         m_client->request({{"cmd", "mount_status"}}, [this](const QJsonObject& r) { if (r["ok"].toBool()) onMount(r["mount"].toObject()); });
         m_client->request({{"cmd", "focuser_status"}}, [this](const QJsonObject& r) { if (r["ok"].toBool()) m_fPos->setText(QString::number(r["focuser"].toObject()["Position"].toInt()) + (r["focuser"].toObject()["IsMoveToOver"].toBool(true) ? "" : "  (moving)")); });
         m_client->request({{"cmd", "sequence"}, {"action", "status"}}, [this](const QJsonObject& r) { if (r["ok"].toBool()) onSequence(r["status"].toObject()); });
-        m_client->request({{"cmd", "analysis"}}, [this](const QJsonObject& r) { if (r["ok"].toBool()) onAnalysis(r["last"].toObject()); });
+        m_client->request({{"cmd", "analysis"}}, [this](const QJsonObject& r) { if (r["ok"].toBool()) onAnalysis(r["last"].toObject(), r["solve"].toObject()); });
         m_client->request({{"cmd", "target"}}, [this](const QJsonObject& r) { if (r["ok"].toBool()) m_pTarget->setText(r["target"].toString() + (r["stack"].toObject().contains("frames") ? QString("  (stack %1 frames)").arg(r["stack"].toObject()["frames"].toInt()) : QString())); });
         m_client->request({{"cmd", "events"}, {"since", double(m_evSeq)}, {"limit", 200}}, [this](const QJsonObject& r) { if (r["ok"].toBool()) onEvents(r); });
     }
-    void clearNow() { for (QLabel* l : {m_tLink, m_tState, m_tMount, m_tBatt, m_pRaDec, m_pAltAz, m_pGoto, m_pTarget, m_fPos, m_cExp, m_cTemp, m_sState, m_sFrames, m_sLast, m_sCause, m_sFocus, m_sTiming, m_aVerdict, m_aWhy, m_aSky}) l->setText("-"); }
+    void clearNow() { for (QLabel* l : {m_tLink, m_tState, m_tMount, m_tBatt, m_pRaDec, m_pAltAz, m_pGoto, m_pTarget, m_fPos, m_cExp, m_cTemp, m_sState, m_sFrames, m_sLast, m_sCause, m_sFocus, m_sTiming, m_aVerdict, m_aWhy, m_aSky, m_aPoint, m_aSolve}) l->setText("-"); }
     void onStatus(const QJsonObject& r)
     {
         m_tLink->setText(r["connected"].toBool() ? "connected to " + r["host"].toString() : "NOT connected to the telescope");
@@ -381,13 +385,36 @@ private:
         if (!f.isEmpty()) m_sFocus->setText(f["baseline_px"].toDouble() > 0 ? QString("median %1 px vs baseline %2 px (drift events: %3)").arg(f["median_px"].toDouble(), 0, 'f', 2).arg(f["baseline_px"].toDouble(), 0, 'f', 2).arg(f["drifts"].toInt()) : "collecting a baseline");
         if (s.contains("avg_cycle_ms")) m_sTiming->setText(QString("cycle %1 s, duty %2%").arg(s["avg_cycle_ms"].toDouble() / 1000, 0, 'f', 1).arg(int(s["duty_cycle"].toDouble() * 100)));
     }
-    void onAnalysis(const QJsonObject& a)
+    void onAnalysis(const QJsonObject& a, const QJsonObject& solve)
     {
+        const QTimeZone zone("Europe/London");
+        // the latest plate-solve attempt (solved, skipped as hopeless by the frame statistics, or failed)
+        if (solve.isEmpty()) m_aSolve->setText("not attempted yet");
+        else {
+            const QDateTime t = QDateTime::fromString(solve["time"].toString(), Qt::ISODate); const int ago = int(t.secsTo(QDateTime::currentDateTimeUtc()) / 60);
+            const QString when = QString("%1 (%2 min ago)").arg(t.toTimeZone(zone).toString("HH:mm:ss")).arg(ago);
+            QString what;
+            if (solve["solved"].toBool()) what = QString("<b>solved</b>: %1").arg(solve["summary"].toString());
+            else if (solve["skipped"].toBool()) what = QString("skipped (%1): exposure %2 s, %3 stars, sky %4 ADU/s; next try %5 s").arg(solve["verdict"].toString()).arg(solve["exposure_s"].toDouble(), 0, 'g', 3).arg(solve["stars"].toInt())
+                                                           .arg(solve["sky_rate"].toDouble(), 0, 'g', 3).arg(solve["suggested_exposure_s"].toDouble(), 0, 'g', 3);
+            else what = "no solution: " + solve["error"].toString();
+            m_aSolve->setTextFormat(Qt::RichText); m_aSolve->setText(when + "  " + what);
+        }
         if (a.isEmpty()) return;
+        const QString src = a["pointing_source"].toString("mount");
+        m_aPoint->setText(src == "unknown" ? "unknown (mount not aligned, no plate solve): geometry, stack and obstruction checks are skipped"
+                                          : QString("%1: RA %2 h, Dec %3°, alt %4°, az %5°").arg(src == "plate_solve" ? "plate solve" : "mount").arg(a["ra_hours"].toDouble(), 0, 'f', 2).arg(a["dec_deg"].toDouble(), 0, 'f', 1)
+                                                .arg(a["alt_deg"].toDouble(), 0, 'f', 0).arg(a["az_deg"].toDouble(), 0, 'f', 0));
         m_aVerdict->setText(a["verdict"].toString());
         QStringList why; for (const auto& v : a["reasons"].toArray()) why << v.toString(); for (const auto& v : a["cause_reasons"].toArray()) why << v.toString();
         m_aWhy->setText(why.isEmpty() ? "-" : why.join("; "));
-        m_aSky->setText(QString("alt %1°, sky %2 ADU/s, moon %3%, sun %4°").arg(a["alt_deg"].toDouble(), 0, 'f', 0).arg(a["sky_rate"].toDouble(), 0, 'f', 0).arg(int(a["moon_illumination"].toDouble() * 100)).arg(a["sun_alt_deg"].toDouble(), 0, 'f', 0));
+        m_aSky->setText(QString("%1sky %2 ADU/s, moon %3%, sun %4°").arg(a.contains("alt_deg") ? QString("alt %1°, ").arg(a["alt_deg"].toDouble(), 0, 'f', 0) : QString()).arg(a["sky_rate"].toDouble(), 0, 'f', 0).arg(int(a["moon_illumination"].toDouble() * 100)).arg(a["sun_alt_deg"].toDouble(), 0, 'f', 0));
+        // the picture the daemon renders for the eye (at most every 15 s)
+        const QString pic = m_dir + "/previews/last_frame.png"; const QFileInfo fi(pic);
+        if (fi.exists() && fi.lastModified() != m_picStamp) {
+            QPixmap pm(pic); if (!pm.isNull()) { m_aPic->setPixmap(pm.scaledToWidth(std::max(360, m_aPic->width() - 4), Qt::SmoothTransformation)); m_picStamp = fi.lastModified();
+                m_aPic->setToolTip(QString("last frame, %1 (stretched; check for trees, roofs, cloud)").arg(fi.lastModified().toString("HH:mm:ss"))); }
+        }
     }
     void onEvents(const QJsonObject& r)
     {
@@ -430,9 +457,10 @@ private:
     }
 
     Client* m_client = nullptr; QString m_dir; int m_port; double m_lat, m_lon; QTimer m_poll, m_files, m_liveTimer, m_fcTimer;
+    QDateTime m_picStamp;
     QLabel *m_fcInfo = nullptr, *m_fcAcc = nullptr, *m_fcNow = nullptr, *m_fcSky = nullptr; QTableWidget* m_fcTable = nullptr; bool m_fcFresh = false;
     QLabel *m_conn, *m_tLink, *m_tState, *m_tMount, *m_tBatt, *m_pRaDec, *m_pAltAz, *m_pGoto, *m_pTarget, *m_fPos, *m_cExp, *m_cTemp, *m_sState, *m_sFrames, *m_sLast, *m_sCause, *m_sFocus, *m_sTiming,
-           *m_aVerdict, *m_aWhy, *m_aSky, *m_rLast, *m_rCount, *m_liveInfo, *m_stackInfo;
+           *m_aVerdict, *m_aWhy, *m_aSky, *m_aPoint, *m_aSolve, *m_aPic, *m_rLast, *m_rCount, *m_liveInfo, *m_stackInfo;
     QCheckBox *m_night, *m_showEv, *m_showRun, *m_follow, *m_auto; QPlainTextEdit* m_log; ImageView *m_live, *m_stackView; QListWidget* m_list;
     qint64 m_evSeq = 0, m_runPos = 0; int m_runCount = 0; QString m_runPath;
 };
