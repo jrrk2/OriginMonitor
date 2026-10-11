@@ -92,6 +92,7 @@ const QList<Cmd>& commands()
         pass("analysis", "state", "Latest per-frame sky analysis (verdict, transparency, stars), optionally history.", "analysis", {O("history", 'i', "also return the newest N records", "0")});
         pass("events", "state", "Event log since a timestamp.", "events", {O("since", 'd', "epoch ms; 0 = from the start", "0"), O("limit", 'i', "maximum events", "200")});
         pass("sky-map", "state", "Learned sky obstruction map.", "sky_map");
+        pass("preview", "state", "Render the live stack to <data dir>/previews/live_preview.png without saving the stack (read-only; used by OriginWatch).", "preview");
         pass("stack", "state", "Live-stack summary; saves state and preview.png and returns the preview path.", "stack");
         // --- configuration
         pass("manual", "config", "Camera to manual exposure mode.", "manual");
@@ -131,6 +132,13 @@ const QList<Cmd>& commands()
                             O("not-before", 's', "local HH:MM; refuse to slew earlier (the telescope is put out at 20:00)", "20:00")};
             v.append({"go", "planning", "Slew to a target that is observable now: set site and target, goto, wait for centring/autofocus, re-send exposure and ISO.", "", true, false, a + plannerArgs()});
         }
+        v.append({"run", "planning", "UNATTENDED night supervisor: follows the plan, goes to a backup target on obstruction or prolonged cloud, refocuses on drift, parks on a rain forecast or at dawn. Needs --unattended (it slews); --dry-run only prints the plan.", "", true, false,
+                  [] { QList<Arg> a = {O("unattended", 'b', "confirm that the supervisor may slew and run all night"), O("dry-run", 'b', "print the plan and backups, do nothing"),
+                                       O("iso", 'i', "ISO for the frames (falls back once to 200 if the first frames are all rejected on a clear forecast)", "800"),
+                                       O("max-exposure", 'd', "longest exposure, s (further limited by field rotation for each block)", "20"),
+                                       O("cloud-patience", 'd', "minutes of cloud before going to a backup target", "10"), O("give-up", 'd', "minutes of cloud on one block before moving to the next block", "60"),
+                                       O("not-before", 's', "local HH:MM; no slewing before this in the evening", "20:00"), O("connect", 's', "telescope host to reconnect to (default: the server's)")};
+                       return a + plannerArgs(); }()});
         v.append({"park", "planning", "Save the stack and slew to Polaris (safe park).", "", true, false, {}});
         v.append({"schedule", "planning", "Plan one night: observable windows against the local horizon, Sun and Moon, plus a greedy one-target-at-a-time plan.", "", false, true, plannerArgs()});
         v.append({"weather", "planning", "Hourly forecast for the site from Open-Meteo: cloud low/mid/high, rain chance, visibility, dew point, wind and a 0..1 imaging quality per hour (cached 1 h; --fresh bypasses).", "", false, true,
@@ -433,6 +441,199 @@ QJsonObject cmdFocusSweep(const Parsed& p, const Cmd& c)
     return {{"ok", good}, {"unit", "HFR in full-resolution sensor pixels, lower is better"}, {"start", start}, {"best", best}, {"applied", p.v.contains("apply") && good}, {"final", back}, {"results", results}};
 }
 
+// ---------------------------------------------------------------------------------------------------------------------------------------
+// run: the unattended supervisor. Follows the night plan block by block; reacts to what the server reports:
+//   obstruction (tree line, building)  -> leave at once for a backup target, waiting would not help
+//   cloud                               -> keep probing for --cloud-patience minutes, then go to a backup target far away in the sky, else keep waiting;
+//                                          after --give-up minutes of cloud on one block, move on to the next block
+//   focus drift                         -> narrow focus sweep (at most every 20 min), apply the best position, resume
+//   rain forecast within the hour       -> stop, park, end the night
+//   sequence/connection failure         -> reconnect and restart (3 tries), then park
+// Every decision is logged to stderr and to <data dir>/run_<date>.jsonl. The night ends parked on Polaris.
+// ---------------------------------------------------------------------------------------------------------------------------------------
+struct RunState {
+    Planner::Options o; QTimeZone zone; QDateTime darkEnd;
+    double maxExposure = 20; int iso = 800; double patienceMin = 10, giveUpMin = 60; QString host;
+    bool isoFallbackDone = false, rain = false;
+    QDateTime lastRefocus, lastForecast; QStringList tried;
+    int switches = 0, refocuses = 0, restarts = 0, blocksDone = 0;
+    QString logPath; QJsonArray decisions;
+};
+RunState g_run;
+
+void runLog(const QString& what, QJsonObject extra = {})
+{
+    extra["time"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate); extra["decision"] = what;
+    note(extra); g_run.decisions.append(extra);
+    QFile f(g_run.logPath);
+    if (f.open(QIODevice::Append)) f.write(QJsonDocument(extra).toJson(QJsonDocument::Compact) + "\n");
+}
+
+bool rainSoon()
+{
+    QVector<Weather::Hour> hrs;
+    if (!Weather::fetch(g_run.o.site.latDeg, g_run.o.site.lonDeg, 2, 20, originDataDir(), &hrs)["ok"].toBool()) return false;
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    for (const Weather::Hour& h : hrs)
+        if (h.utc >= now.addSecs(-1800) && h.utc <= now.addSecs(3600) && (h.precipProb >= 60 || h.precip >= 0.2)) return true;
+    return false;
+}
+
+double exposureFor(const QJsonObject& t, const QDateTime& from, const QDateTime& to)
+{
+    double lim = g_run.maxExposure;
+    const QDateTime mid = from.addSecs(from.secsTo(to) / 2);
+    for (const QDateTime& when : {from, mid, to}) {
+        const Planner::RotLimit r = Planner::maxExposure(t["ra_hours"].toDouble(), t["dec_deg"].toDouble(), g_run.o.site, when, 2.0);
+        if (std::isfinite(r.tMax)) lim = std::min(lim, r.tMax);
+    }
+    return std::max(1.0, std::floor(lim));
+}
+
+QJsonObject slewTo(const QJsonObject& t, double exposure, int iso)
+{
+    QJsonObject r;
+    if (!(r = call("monitor", {{"lat_deg", g_run.o.site.latDeg}, {"lon_deg", g_run.o.site.lonDeg}, {"auto_stack", true}}))["ok"].toBool()) return r;
+    if (!(r = call("target", {{"name", t["key"]}, {"ra_hours", t["ra_hours"]}, {"dec_deg", t["dec_deg"]}}))["ok"].toBool()) return r;     // resumes a saved stack of that name
+    if (!(r = call("goto", {{"ra_hours", t["ra_hours"]}, {"dec_deg", t["dec_deg"]}}, 240000))["ok"].toBool()) return r;
+    waitIdle(180);
+    return call("set", {{"exposure", exposure}, {"iso", iso}});
+}
+
+bool startSeq(double exposure, int iso, const QDateTime& endUtc, bool focusPause)
+{
+    const QJsonObject r = call("sequence", {{"action", "start"}, {"exposure", exposure}, {"iso", iso}, {"pipeline", false}, {"focus_pause", focusPause},
+                                            {"until_local", endUtc.toTimeZone(g_run.zone).toString("HH:mm")}});
+    return r["ok"].toBool() && r["status"].toObject()["active"].toBool();
+}
+
+enum class RunResult { Done, Failed, Rain };
+
+RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth)
+{
+    const QDateTime t0 = QDateTime::currentDateTimeUtc();
+    const double exposure = exposureFor(t, t0, endUtc);
+    int iso = g_run.iso;
+    runLog("start", {{"target", t["key"]}, {"exposure_s", exposure}, {"iso", iso}, {"until", endUtc.toTimeZone(g_run.zone).toString("HH:mm")}, {"backup", depth > 0}});
+    QJsonObject r = slewTo(t, exposure, iso);
+    if (!r["ok"].toBool()) { runLog("slew_failed", {{"target", t["key"]}, {"error", r["error"]}}); return RunResult::Failed; }
+    if (!startSeq(exposure, iso, endUtc, true)) { runLog("sequence_start_failed", {{"target", t["key"]}}); return RunResult::Failed; }
+    QDateTime cloudSince, blockCloudStart; double cloudMinTotal = 0; QDateTime lastTick = QDateTime::currentDateTimeUtc();
+    qint64 seq = call("events", {{"since", 1e12}})["next"].toDouble();            // only events from now on
+    bool obstructed = false; int failures = 0;
+    while (true) {
+        sleepMs(20000);
+        const QDateTime now = QDateTime::currentDateTimeUtc();
+        if (now >= endUtc.addSecs(300) || now >= g_run.darkEnd) { call("sequence", {{"action", "stop"}, {"reason", "block end"}}); runLog("block_end", {{"target", t["key"]}}); return RunResult::Done; }
+        if (!g_run.lastForecast.isValid() || g_run.lastForecast.secsTo(now) > 1200) {
+            g_run.lastForecast = now;
+            if (rainSoon()) { call("sequence", {{"action", "stop"}, {"reason", "rain forecast"}}); runLog("rain_forecast", {{"target", t["key"]}}); g_run.rain = true; return RunResult::Rain; }
+        }
+        const QJsonObject st = call("sequence", {{"action", "status"}}, 20000);
+        if (!st["ok"].toBool()) { if (++failures >= 3) { runLog("server_lost", {{"error", st["error"]}}); return RunResult::Failed; } continue; }
+        failures = 0;
+        const QJsonObject s = st["status"].toObject();
+        const QJsonObject ev = call("events", {{"since", double(seq)}}, 20000);
+        if (ev["ok"].toBool()) { seq = qint64(ev["next"].toDouble()); for (const QJsonValue& v : ev["events"].toArray()) if (v.toObject()["kind"].toString() == "sequence_obstructed") obstructed = true; }
+        if (!s["active"].toBool()) {
+            const QString why = s["stop_reason"].toString();
+            if (why == "end time reached" || why == "block end") return RunResult::Done;
+            if (why == "focus drift" && (!g_run.lastRefocus.isValid() || g_run.lastRefocus.secsTo(now) > 1200)) {
+                runLog("refocus", {{"target", t["key"]}, {"median_hfr_px", s["focus"].toObject()["median_px"]}, {"baseline_px", s["focus"].toObject()["baseline_px"]}});
+                const Cmd* fs = nullptr; for (const Cmd& c : commands()) if (c.name == "focus-sweep") fs = &c;
+                Parsed fp; fp.v["span"] = 300; fp.v["step"] = 60; fp.v["frames"] = 2; fp.v["apply"] = true;
+                const QJsonObject sw = cmdFocusSweep(fp, *fs);
+                runLog("refocus_done", {{"ok", sw["ok"]}, {"best", sw["best"]}}); ++g_run.refocuses; g_run.lastRefocus = QDateTime::currentDateTimeUtc();
+                r = call("set", {{"exposure", exposure}, {"iso", iso}});
+            } else {
+                runLog("sequence_stopped", {{"target", t["key"]}, {"reason", why}});
+                if (++g_run.restarts > 6) return RunResult::Failed;
+                const QJsonObject stt = call("status", {}, 20000);
+                if (!stt["connected"].toBool() && !g_run.host.isEmpty()) { call("connect", {{"host", g_run.host}}, 60000); sleepMs(30000); runLog("reconnect", {{"host", g_run.host}}); }
+            }
+            if (!startSeq(exposure, iso, endUtc, !(why == "focus drift"))) { runLog("sequence_restart_failed", {{"target", t["key"]}}); return RunResult::Failed; }
+            continue;
+        }
+        const bool probing = s["state"].toString() == "probing";
+        if (probing) { if (!cloudSince.isValid()) cloudSince = now; cloudMinTotal += lastTick.secsTo(now) / 60.0; } else cloudSince = QDateTime();
+        lastTick = now;
+        // a high ISO whose dark baseline was never learned reads as cloud on a clear forecast: fall back once to ISO 200
+        if (!g_run.isoFallbackDone && iso > 200 && s["frames"].toInt() >= 6 && s["good"].toInt() == 0 && !obstructed) {
+            QVector<Weather::Hour> hrs; Weather::fetch(g_run.o.site.latDeg, g_run.o.site.lonDeg, 2, 60, originDataDir(), &hrs);
+            const Weather::Hour* h = Weather::at(hrs, now);
+            if (!h || h->quality >= 0.8) {
+                g_run.isoFallbackDone = true; iso = 200;
+                call("sequence", {{"action", "stop"}, {"reason", "iso fallback"}});
+                runLog("iso_fallback", {{"from", g_run.iso}, {"to", 200}, {"why", "6 bad frames at the start while the forecast is clear"}});
+                call("set", {{"exposure", exposure}, {"iso", iso}});
+                startSeq(exposure, iso, endUtc, true); continue;
+            }
+        }
+        QString reason;
+        if (obstructed) reason = "obstruction";
+        else if (cloudSince.isValid() && cloudSince.secsTo(now) / 60.0 >= g_run.patienceMin) reason = QString("cloud for %1 min").arg(int(cloudSince.secsTo(now) / 60));
+        if (cloudMinTotal >= g_run.giveUpMin && reason.isEmpty()) { call("sequence", {{"action", "stop"}, {"reason", "cloud give-up"}}); runLog("give_up", {{"target", t["key"]}, {"cloud_min", cloudMinTotal}}); return RunResult::Done; }
+        if (reason.isEmpty()) continue;
+
+        // switch: pick a backup far from here in the sky
+        const QJsonObject mount = call("mount_status", {}, 15000)["mount"].toObject();
+        g_run.tried.append(t["key"].toString());
+        const QJsonObject bk = Planner::backupTargets(g_run.o, mount["Ra"].toDouble() * 12 / M_PI, mount["Dec"].toDouble() * 180 / M_PI, now, 40, 3, 45, g_run.tried);
+        const QJsonArray list = bk["backups"].toArray();
+        if (list.isEmpty()) {
+            runLog("no_backup", {{"target", t["key"]}, {"reason", reason}});
+            if (obstructed) { call("sequence", {{"action", "stop"}, {"reason", "obstructed, no backup"}}); return RunResult::Done; }
+            cloudSince = now; continue;                                                  // cloud: keep waiting
+        }
+        const QJsonObject next = list.first().toObject();
+        call("sequence", {{"action", "stop"}, {"reason", "switching target: " + reason}}); call("stack", {}, 60000);
+        runLog("switch", {{"from", t["key"]}, {"to", next["key"]}, {"reason", reason}, {"separation_deg", next["separation_deg"]}}); ++g_run.switches;
+        return runTarget(next, endUtc, depth + 1);
+    }
+}
+
+QJsonObject cmdRun(const Parsed& p, const Cmd& c)
+{
+    if (!p.v.contains("dry-run") && !p.v.contains("unattended")) return failure("run takes over the night and slews the telescope; add --unattended to confirm (or --dry-run to see the plan)");
+    Planner::Options o = plannerOptions(p, c); o.date = Planner::currentNightDate(o.timeZone);
+    const QJsonObject S = Planner::schedule(o);
+    if (!S["ok"].toBool()) return S;
+    if (p.v.contains("dry-run")) { QJsonObject d{{"ok", true}, {"dry_run", true}, {"plan", S["plan"]}, {"weather", S["weather"]}}; if (!g_wx.isEmpty()) d["forecast"] = g_wx; return d; }
+    if (S["plan"].toArray().isEmpty()) return failure("nothing observable tonight (see schedule); stay parked");
+    const QJsonObject pg = call("ping", {}, 5000);
+    if (!pg["ok"].toBool()) return pg;
+
+    g_run = RunState();
+    g_run.o = o; g_run.zone = QTimeZone(o.timeZone.toUtf8()); g_run.darkEnd = parseZ(S["dark_end"].toString());
+    g_run.maxExposure = num(p, c, "max-exposure"); g_run.iso = int(num(p, c, "iso")); g_run.patienceMin = num(p, c, "cloud-patience"); g_run.giveUpMin = num(p, c, "give-up");
+    g_run.host = p.v.contains("connect") ? str(p, "connect") : call("status", {}, 10000)["host"].toString();
+    g_run.logPath = originDataDir() + "/run_" + S["night"].toString().remove('-') + ".jsonl";
+    runLog("run_start", {{"night", S["night"]}, {"blocks", S["plan"].toArray().size()}, {"iso", g_run.iso}, {"max_exposure", g_run.maxExposure}});
+
+    const QStringList hm = str(p, "not-before", "20:00").split(':');
+    RunResult res = RunResult::Done;
+    for (const QJsonValue& bv : S["plan"].toArray()) {
+        const QJsonObject b = bv.toObject();
+        const QDateTime start = parseZ(b["start"].toString()), end = parseZ(b["end"].toString()).addSecs(300);
+        QDateTime now = QDateTime::currentDateTimeUtc();
+        if (now >= end) continue;
+        while (now < start && now < g_run.darkEnd) { sleepMs(30000); now = QDateTime::currentDateTimeUtc(); }
+        const QDateTime loc = QDateTime::currentDateTime();
+        const QDateTime nb(loc.date(), QTime(hm.value(0).toInt(), hm.value(1).toInt()));
+        if (loc < nb && loc.time().hour() >= 6) { runLog("too_early", {{"not_before", str(p, "not-before", "20:00")}}); while (QDateTime::currentDateTime() < nb) sleepMs(30000); }
+        if (now >= g_run.darkEnd) break;
+        g_run.tried = QStringList{b["key"].toString()};
+        res = runTarget(b, end, 0);
+        ++g_run.blocksDone;
+        if (res == RunResult::Rain || res == RunResult::Failed) break;
+        g_run.tried.clear();
+    }
+    const QJsonObject park = cmdPark();
+    runLog("parked", {{"ok", park["ok"]}, {"outcome", res == RunResult::Done ? "complete" : res == RunResult::Rain ? "rain" : "failed"}});
+    return {{"ok", res != RunResult::Failed}, {"outcome", res == RunResult::Done ? "complete" : res == RunResult::Rain ? "stopped: rain forecast" : "stopped: failure"}, {"blocks_run", g_run.blocksDone},
+            {"switches", g_run.switches}, {"refocuses", g_run.refocuses}, {"log", g_run.logPath}, {"parked", park["ok"]}};
+}
+
 // ---------------------------------------------------------------- server
 
 #ifdef Q_OS_UNIX
@@ -540,6 +741,7 @@ int main(int argc, char* argv[])
     else if (cmd->name == "schedule") out = cmdSchedule(p, *cmd);
     else if (cmd->name == "fieldrot") { Astro::Site s{num(p, *cmd, "lat"), num(p, *cmd, "lon")}; out = Planner::fieldRotation(num(p, *cmd, "ra-hours"), num(p, *cmd, "dec-deg"), s, num(p, *cmd, "tol"), num(p, *cmd, "hours")); }
     else if (cmd->name == "backup") out = cmdBackup(p, *cmd);
+    else if (cmd->name == "run") out = cmdRun(p, *cmd);
     else if (cmd->name == "now") out = cmdNow(p, *cmd);
     else if (cmd->name == "weather") out = cmdWeather(p, *cmd);
     else if (cmd->name == "go") out = cmdGo(p, *cmd);

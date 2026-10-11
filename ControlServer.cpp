@@ -285,11 +285,12 @@ QJsonObject ControlServer::handle(const QJsonObject& req)
     if (cmd == "commands" || cmd == "help")
         return QJsonObject{{"ok", true}, {"note", "server commands; the OriginHeadless CLI has a fuller catalogue: OriginHeadless commands"},
                            {"commands", QJsonArray{"ping", "connect", "status", "manual", "auto", "set", "snapshot", "mount_status", "goto", "focus_status", "analysis", "events", "target", "stack",
-                                                   "sky_map", "monitor", "focuser_status", "focuser_move", "focuser_settings", "initialize", "sequence", "send", "cache", "quit"}}};
+                                                   "sky_map", "preview", "monitor", "focuser_status", "focuser_move", "focuser_settings", "initialize", "sequence", "send", "cache", "quit"}}};
     int ttl = cacheTtlMs(cmd);
     if (cmd == "target" && req.contains("name")) ttl = 0;                       // that form changes the target
     if (!m_cacheOn || ttl == 0) {
-        if (cmd != "ping") m_cache.clear();                                      // anything that may change state invalidates what was cached
+        const bool readOnly = cmd == "ping" || cmd == "preview" || (cmd == "sequence" && req["action"].toString("status") == "status");
+        if (!readOnly) m_cache.clear();                                      // anything that may change state invalidates what was cached
         return handleUncached(req);
     }
     QJsonObject keyObj = req; keyObj.remove("fresh");
@@ -364,6 +365,17 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
         SkyMonitor& sky = m_backend->sky();
         QJsonObject r{{"ok", true}, {"stack", sky.stackSummary()}};
         if (sky.stacker().frames() > 0 && sky.saveStack()) r["preview"] = sky.stackDirectory() + "/preview.png";
+        return r;
+    }
+    if (cmd == "preview") {                           // render the live stack to a PNG without saving the stack state (read-only; for monitors)
+        SkyMonitor& sky = m_backend->sky();
+        QJsonObject r{{"ok", true}, {"stack", sky.stackSummary()}, {"target", sky.targetName()}};
+        const Image16 img = sky.stacker().preview();
+        if (img.isNull()) { r["note"] = "the live stack is empty"; return r; }
+        const QString dir = originDataDir() + "/previews"; QDir().mkpath(dir);
+        const QString path = dir + "/live_preview.png";
+        if (!img.savePng(path)) return fail("could not write " + path);
+        r["preview"] = path; r["rendered"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
         return r;
     }
     if (cmd == "sky_map") return m_backend->sky().obstructionMap();
