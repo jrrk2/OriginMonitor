@@ -11,5 +11,5 @@ INCLUDEPATH += .
 DESTDIR = build
 OBJECTS_DIR = build/obj
 MOC_DIR = build/moc
-SOURCES += WatchMain.cpp
-HEADERS += DataDir.hpp
+SOURCES += WatchMain.cpp Weather.cpp
+HEADERS += DataDir.hpp Weather.hpp

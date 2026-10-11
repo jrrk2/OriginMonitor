@@ -3,8 +3,10 @@
 //   Log      recent telescope/daemon events and the supervisor's decisions
 //   Live     the live stack, rendered on demand
 //   Stacks   every stack in the data directory, finished or not
+//   Forecast the blended multi-model weather forecast hour by hour (Open-Meteo, cached 1 h, same cache as OriginHeadless) and how accurate it has been
 // It talks to 127.0.0.1:<port> with a whitelist of read-only commands (see allowed()) and reads <data dir> files; it cannot move or change anything.
 #include "DataDir.hpp"
+#include "Weather.hpp"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -31,6 +33,9 @@
 #include <QSet>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QTableWidget>
+#include <QHeaderView>
+#include <QTimeZone>
 #include <QTabWidget>
 #include <QTcpSocket>
 #include <QTimer>
@@ -135,24 +140,76 @@ QString dms(double deg) { const QString sign = deg < 0 ? "-" : "+"; deg = std::f
 class Window : public QMainWindow {
     Q_OBJECT
 public:
-    Window(int port, const QString& dataDir) : m_dir(dataDir), m_port(port)
+    Window(int port, const QString& dataDir, double lat, double lon) : m_dir(dataDir), m_port(port), m_lat(lat), m_lon(lon)
     {
         m_client = new Client(port, this);
         setWindowTitle(QString("OriginWatch (read-only) - daemon port %1").arg(port));
         auto* tabs = new QTabWidget; setCentralWidget(tabs);
-        tabs->addTab(buildNow(), "Now"); tabs->addTab(buildLog(), "Log"); tabs->addTab(buildLive(), "Live stack"); tabs->addTab(buildStacks(), "Stacks");
+        tabs->addTab(buildNow(), "Now"); tabs->addTab(buildLog(), "Log"); tabs->addTab(buildLive(), "Live stack"); tabs->addTab(buildStacks(), "Stacks"); tabs->addTab(buildForecast(), "Forecast");
         m_night = new QCheckBox("Night (red) mode"); statusBar()->addPermanentWidget(m_night);
         connect(m_night, &QCheckBox::toggled, this, &Window::applyNight);
         m_conn = new QLabel("daemon: connecting..."); statusBar()->addWidget(m_conn);
         connect(m_client, &Client::state, this, [this](bool up) { m_conn->setText(up ? "daemon: connected" : QString("daemon: not reachable on port %1 (start it with OriginHeadless serve)").arg(m_port)); if (!up) clearNow(); });
         connect(&m_poll, &QTimer::timeout, this, &Window::poll); m_poll.start(2000);
         connect(&m_files, &QTimer::timeout, this, &Window::readRunLog); m_files.start(3000);
-        resize(1100, 760); poll(); readRunLog(); reloadStacks();
+        connect(&m_fcTimer, &QTimer::timeout, this, &Window::reloadForecast); m_fcTimer.start(30 * 60 * 1000);
+        resize(1100, 760); poll(); readRunLog(); reloadStacks(); QTimer::singleShot(200, this, &Window::reloadForecast);
     }
     void showTab(int i) { if (auto* t = findChild<QTabWidget*>()) t->setCurrentIndex(i); }
     void clickRender() { renderLive(); }
     void selectStack(int i) { if (i < m_list->count()) m_list->setCurrentRow(i); }
 private:
+    // ---------------------------------------------------------------- Forecast
+    QWidget* buildForecast()
+    {
+        auto* w = new QWidget; auto* v = new QVBoxLayout(w);
+        auto* top = new QHBoxLayout; auto* refresh = new QPushButton("Refresh now"); m_fcInfo = new QLabel("fetching..."); m_fcInfo->setWordWrap(true);
+        top->addWidget(m_fcInfo, 1); top->addWidget(refresh); v->addLayout(top);
+        m_fcTable = new QTableWidget(0, 15); m_fcTable->setEditTriggers(QAbstractItemView::NoEditTriggers); m_fcTable->setSelectionMode(QAbstractItemView::NoSelection);
+        m_fcTable->setHorizontalHeaderLabels({"Local", "Quality", "Range", "Cloud %", "Low", "Mid", "High", "Rain %", "Met Office", "ECMWF", "AIFS", "ICON", "GFS", "M-France", "KNMI"});
+        m_fcTable->verticalHeader()->hide(); m_fcTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+        v->addWidget(m_fcTable, 1);
+        m_fcAcc = new QLabel; m_fcAcc->setWordWrap(true); v->addWidget(m_fcAcc);
+        auto* legend = new QLabel("Quality 0..1 = how much of the hour is usable (low and mid cloud block, high cloud counts half, cut for rain, fog, dew and wind). It is the mean over 7 models; the models often disagree by 50 points, so look at the range as well. Green >= 0.5, amber 0.3-0.5, red below.");
+        legend->setWordWrap(true); v->addWidget(legend);
+        connect(refresh, &QPushButton::clicked, this, [this] { m_fcFresh = true; reloadForecast(); });
+        return w;
+    }
+    static QColor tint(double q) { return q >= 0.5 ? QColor(20, 110, 40) : q >= 0.3 ? QColor(150, 110, 20) : QColor(120, 30, 30); }
+    void reloadForecast()
+    {
+        m_fcInfo->setText("fetching..."); qApp->processEvents();
+        QVector<Weather::Hour> hrs; const QJsonObject r = Weather::fetch(m_lat, m_lon, 3, m_fcFresh ? 0 : 60, m_dir, &hrs); m_fcFresh = false;
+        if (!r["ok"].toBool()) { m_fcInfo->setText("forecast unavailable: " + r["error"].toString()); return; }
+        const QTimeZone zone("Europe/London"); const QDateTime now = QDateTime::currentDateTimeUtc();
+        m_fcInfo->setText(QString("%1, fetched %2 (local). %3 Site %4 N %5 E.").arg(r["source"].toString(), QDateTime::fromString(r["fetched"].toString(), Qt::ISODate).toTimeZone(zone).toString("ddd HH:mm"),
+                                                                                 r["note"].toString(), QString::number(m_lat, 'f', 2), QString::number(m_lon, 'f', 2)));
+        static const QStringList ids = {"ukmo_seamless", "ecmwf_ifs025", "ecmwf_aifs025_single", "icon_seamless", "gfs_seamless", "meteofrance_seamless", "knmi_seamless"};
+        m_fcTable->setRowCount(0);
+        int row = 0;
+        for (const Weather::Hour& h : hrs) {
+            if (h.utc < now.addSecs(-3600) || h.utc > now.addSecs(48 * 3600)) continue;
+            m_fcTable->insertRow(row);
+            auto put = [&](int c, const QString& t, const QColor& bg = QColor()) { auto* it = new QTableWidgetItem(t); it->setTextAlignment(Qt::AlignCenter); if (bg.isValid()) { it->setBackground(bg); it->setForeground(Qt::white); } m_fcTable->setItem(row, c, it); };
+            put(0, h.utc.toTimeZone(zone).toString("ddd HH:mm")); put(1, QString::number(h.quality, 'f', 2), tint(h.quality));
+            put(2, h.models.isEmpty() ? "-" : QString("%1 - %2").arg(h.qMin, 0, 'f', 2).arg(h.qMax, 0, 'f', 2));
+            put(3, QString::number(h.cloud, 'f', 0)); put(4, QString::number(h.low, 'f', 0)); put(5, QString::number(h.mid, 'f', 0)); put(6, QString::number(h.high, 'f', 0)); put(7, QString::number(h.precipProb, 'f', 0));
+            for (int i = 0; i < ids.size(); ++i) { if (h.models.contains(ids[i])) put(8 + i, QString::number(h.models[ids[i]], 'f', 2), tint(h.models[ids[i]])); else put(8 + i, "-"); }
+            ++row;
+        }
+        QFile af(m_dir + "/forecast_accuracy.json"); QString acc = "Forecast track record: none yet (the dusk forecast is archived each night and compared with the frames the telescope takes).";
+        if (af.open(QIODevice::ReadOnly)) {
+            const QJsonObject s = QJsonDocument::fromJson(af.readAll()).object()["summary"].toObject(); const int n = s["hours_compared"].toInt();
+            if (n >= 8) {
+                acc = QString("Forecast track record: %1 observed hours; the sky was on average %2 %3 than forecast (forecast %4, observed %5). Of %6 hours forecast poor, %7 were usable.")
+                          .arg(n).arg(std::abs(s["bias_pessimism"].toDouble()), 0, 'f', 2).arg(s["bias_pessimism"].toDouble() >= 0 ? "better" : "worse").arg(s["mean_forecast"].toDouble(), 0, 'f', 2).arg(s["mean_observed"].toDouble(), 0, 'f', 2)
+                          .arg(s["hours_forecast_poor"].toInt()).arg(s["poor_but_usable"].toInt());
+                const QJsonArray bm = s["by_model_best_first"].toArray(); if (!bm.isEmpty()) acc += QString(" Closest model so far: %1.").arg(bm[0].toObject()["model"].toString());
+            } else acc = QString("Forecast track record: only %1 observed hour(s) so far; too few to judge.").arg(n);
+        }
+        m_fcAcc->setText(acc);
+    }
+
     // ---------------------------------------------------------------- Now
     QWidget* buildNow()
     {
@@ -343,7 +400,8 @@ private:
         qApp->setStyleSheet(on ? "QWidget { background: #100000; color: #ff4040; } QGroupBox { border: 1px solid #601010; margin-top: 8px; } QPushButton, QTabBar::tab { background: #200000; border: 1px solid #601010; padding: 4px; } QListWidget::item:selected, QTabBar::tab:selected { background: #500000; }" : QString());
     }
 
-    Client* m_client = nullptr; QString m_dir; int m_port; QTimer m_poll, m_files, m_liveTimer;
+    Client* m_client = nullptr; QString m_dir; int m_port; double m_lat, m_lon; QTimer m_poll, m_files, m_liveTimer, m_fcTimer;
+    QLabel *m_fcInfo = nullptr, *m_fcAcc = nullptr; QTableWidget* m_fcTable = nullptr; bool m_fcFresh = false;
     QLabel *m_conn, *m_tLink, *m_tState, *m_tMount, *m_tBatt, *m_pRaDec, *m_pAltAz, *m_pGoto, *m_pTarget, *m_fPos, *m_cExp, *m_cTemp, *m_sState, *m_sFrames, *m_sLast, *m_sCause, *m_sFocus, *m_sTiming,
            *m_aVerdict, *m_aWhy, *m_aSky, *m_rLast, *m_rCount, *m_liveInfo, *m_stackInfo;
     QCheckBox *m_night, *m_showEv, *m_showRun, *m_follow, *m_auto; QPlainTextEdit* m_log; ImageView *m_live, *m_stackView; QListWidget* m_list;
@@ -359,7 +417,9 @@ int main(int argc, char* argv[])
     QApplication app(argc, argv);
     int port = qEnvironmentVariableIsSet("ORIGIN_CONTROL_PORT") ? qEnvironmentVariable("ORIGIN_CONTROL_PORT").toInt() : 8765;
     for (int i = 1; i + 1 < argc; ++i) if (QString(argv[i]) == "--port") port = QString(argv[i + 1]).toInt();
-    Window w(port, originDataDir());
+    double lat = 52.2054, lon = 0.1218;
+    for (int i = 1; i + 1 < argc; ++i) { if (QString(argv[i]) == "--lat") lat = QString(argv[i + 1]).toDouble(); if (QString(argv[i]) == "--lon") lon = QString(argv[i + 1]).toDouble(); }
+    Window w(port, originDataDir(), lat, lon);
     w.show();
     // --shot FILE [--tab N] [--stack N]: save a screenshot after a few seconds and exit (for documentation and testing)
     QString shot; int tab = 0, stack = 0;
