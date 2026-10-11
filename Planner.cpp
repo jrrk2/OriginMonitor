@@ -119,6 +119,12 @@ QString hhmmUtc(const QString& isoZ)       // shown in the planning time zone (t
     return t.toTimeZone(QTimeZone(g_textZone.toUtf8())).toString("HH:mm");
 }
 
+double azAltSepDeg(double alt1, double az1, double alt2, double az2)   // angle between two directions given as alt/az, degrees
+{
+    const double r = M_PI / 180, v = std::sin(alt1 * r) * std::sin(alt2 * r) + std::cos(alt1 * r) * std::cos(alt2 * r) * std::cos((az1 - az2) * r);
+    return std::acos(std::max(-1.0, std::min(1.0, v))) / r;
+}
+
 }   // namespace
 
 QString defaultHorizonFile()
@@ -211,8 +217,33 @@ QJsonObject schedule(const Options& o)
                            {"peak_az", std::round(r.az[r.peak])}, {"minutes", r.mins}};
     };
     QJsonArray planJ, targetsJ;
+    // backups for each block: other targets observable through most of it, in a different part of the sky (partial cloud over the primary should not cover them)
+    auto backupsFor = [&](const Slot& s) {
+        struct Cand { double v; int row; double sep, alt, az; int cov; };
+        const int len = s.e - s.s + 1, mid = (s.s + s.e) / 2;
+        QList<Cand> cs;
+        for (int k = 0; k < rows.size(); ++k) {
+            if (k == s.row) continue;
+            int cov = 0; for (int i = s.s; i <= s.e; ++i) cov += rows[k].ok[i] ? 1 : 0;
+            if (cov < 0.6 * len) continue;
+            const double sep = azAltSepDeg(rows[s.row].alt[mid], rows[s.row].az[mid], rows[k].alt[mid], rows[k].az[mid]);
+            if (sep < 25 || !rows[k].ok[mid]) continue;
+            cs.append({rows[k].t.prio * (0.5 + 0.5 * std::min(1.0, rows[k].alt[mid] / 60)) * std::min(1.0, sep / 50) * (double(cov) / len), k, sep, rows[k].alt[mid], rows[k].az[mid], cov});
+        }
+        std::stable_sort(cs.begin(), cs.end(), [](const Cand& a, const Cand& b) { return a.v > b.v; });
+        QJsonArray out;
+        for (int i = 0; i < cs.size() && i < 3; ++i) {
+            const Cand& k = cs[i]; const Row& r = rows[k.row];
+            const RotLimit lim = maxExposure(r.t.ra, r.t.dec, o.site, times[mid], 2.0);
+            QJsonObject b{{"key", r.t.key}, {"name", r.t.name}, {"ra_hours", r.t.ra}, {"dec_deg", r.t.dec}, {"priority", r.t.prio}, {"separation_deg", std::round(k.sep)},
+                          {"alt", std::round(k.alt)}, {"az", std::round(k.az)}, {"covered_minutes", k.cov * int(o.stepMin)}};
+            if (std::isfinite(lim.tMax)) b["t_max_s"] = std::round(lim.tMax * 10) / 10;
+            out.append(b);
+        }
+        return out;
+    };
     for (const Slot& s : plan) {
-        QJsonObject e = info(rows[s.row]); e["start"] = iso(times[s.s]); e["end"] = iso(times[s.e]);
+        QJsonObject e = info(rows[s.row]); e["backups"] = backupsFor(s); e["start"] = iso(times[s.s]); e["end"] = iso(times[s.e]);
         e["alt_start"] = std::round(rows[s.row].alt[s.s]); e["alt_end"] = std::round(rows[s.row].alt[s.e]);
         if (!o.weather.isEmpty()) { double m = 0; for (int j = s.s; j <= s.e; ++j) m += wq[j]; e["forecast_quality"] = std::round(m / (s.e - s.s + 1) * 100) / 100; }
         e["az_start"] = std::round(rows[s.row].az[s.s]); e["az_end"] = std::round(rows[s.row].az[s.e]); e["minutes"] = (s.e - s.s + 1) * o.stepMin;
@@ -270,9 +301,44 @@ QString scheduleText(const QJsonObject& s, int top)
         const QJsonObject r = v.toObject();
         out += QString("  %1-%2  %3 alt %4->%5, az %6->%7  (%8 min)\n").arg(hhmmUtc(r["start"].toString()), hhmmUtc(r["end"].toString())).arg(r["name"].toString().left(36), -36)
                    .arg(r["alt_start"].toInt()).arg(r["alt_end"].toInt()).arg(r["az_start"].toInt()).arg(r["az_end"].toInt()).arg(r["minutes"].toInt());
+        QStringList bs;
+        for (const QJsonValue& bv : r["backups"].toArray()) { const QJsonObject b = bv.toObject(); bs << QString("%1 (%2 deg away, alt %3%4)").arg(b["key"].toString()).arg(b["separation_deg"].toInt()).arg(b["alt"].toInt()).arg(b.contains("t_max_s") ? QString(", max %1 s").arg(b["t_max_s"].toDouble()) : QString()); }
+        if (!bs.isEmpty()) out += "            backups: " + bs.join("; ") + "\n";
     }
     if (s["plan"].toArray().isEmpty()) out += "  nothing observable for a useful block tonight\n";
     return out;
+}
+
+QJsonObject backupTargets(const Options& base, double raHours, double decDeg, const QDateTime& utc, double minSepDeg, int count, double minLeftMin, const QStringList& avoid)
+{
+    Options o = base; o.minBlockMin = 0;
+    const QJsonObject s = schedule(o);
+    if (!s["ok"].toBool()) return s;
+    const Astro::AltAz cur = Astro::altAz({raHours, decDeg}, o.site, utc);
+    struct Cand { double v; QJsonObject j; };
+    QList<Cand> cs;
+    for (const QJsonValue& tv : s["targets"].toArray()) {
+        const QJsonObject t = tv.toObject();
+        if (avoid.contains(t["key"].toString(), Qt::CaseInsensitive)) continue;
+        QDateTime w0 = QDateTime::fromString(t["window_start"].toString(), "yyyy-MM-ddTHH:mm:ssZ"), w1 = QDateTime::fromString(t["window_end"].toString(), "yyyy-MM-ddTHH:mm:ssZ");
+        w0.setTimeZone(QTimeZone::UTC); w1.setTimeZone(QTimeZone::UTC);
+        if (!(w0 <= utc && utc <= w1)) continue;
+        const double left = utc.secsTo(w1) / 60.0;
+        if (left < minLeftMin) continue;
+        const Astro::AltAz aa = Astro::altAz({t["ra_hours"].toDouble(), t["dec_deg"].toDouble()}, o.site, utc);
+        const double sep = azAltSepDeg(cur.alt, cur.az, aa.alt, aa.az);
+        if (sep < minSepDeg) continue;
+        const RotLimit lim = maxExposure(t["ra_hours"].toDouble(), t["dec_deg"].toDouble(), o.site, utc, 2.0);
+        QJsonObject j{{"key", t["key"]}, {"name", t["name"]}, {"ra_hours", t["ra_hours"]}, {"dec_deg", t["dec_deg"]}, {"priority", t["priority"]}, {"separation_deg", std::round(sep)},
+                      {"alt", std::round(aa.alt)}, {"az", std::round(aa.az)}, {"minutes_left", std::round(left)}};
+        if (std::isfinite(lim.tMax)) j["t_max_s"] = std::round(lim.tMax * 10) / 10;
+        cs.append({t["priority"].toDouble() * (0.5 + 0.5 * std::min(1.0, aa.alt / 60)) * std::min(1.0, sep / 50) * std::min(1.0, left / 90), j});
+    }
+    std::stable_sort(cs.begin(), cs.end(), [](const Cand& a, const Cand& b) { return a.v > b.v; });
+    QJsonArray out; for (int i = 0; i < cs.size() && i < count; ++i) out.append(cs[i].j);
+    QJsonObject r{{"ok", true}, {"from", QJsonObject{{"ra_hours", raHours}, {"dec_deg", decDeg}, {"alt", std::round(cur.alt)}, {"az", std::round(cur.az)}}}, {"backups", out}};
+    if (out.isEmpty()) r["note"] = "no other target is observable now, far enough away and for long enough; relax --min-sep or --min-left, or --weather off";
+    return r;
 }
 
 QJsonObject findTarget(const Options& base, const QString& name)

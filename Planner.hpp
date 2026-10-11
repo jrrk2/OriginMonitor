@@ -36,6 +36,10 @@ QString scheduleText(const QJsonObject& s, int top);
 QDate currentNightDate(const QString& timeZone);
 /// Look a target up by key ("M31") or name among those observable tonight (minBlockMin 0); returns the target object or {ok:false}.
 QJsonObject findTarget(const Options& o, const QString& name);
+/// Backup targets for "partial cloud covers what I am pointing at": targets observable at `utc` for at least minLeftMin more minutes, at least minSepDeg away
+/// (as seen in the sky, since clouds move with the sky's alt/az frame, not with the stars), ranked by priority, altitude, separation and time left; with each one's field-rotation exposure limit.
+/// {ok, from:{...}, backups:[{key, name, ra_hours, dec_deg, priority, separation_deg, alt, az, minutes_left, t_max_s}]}. `avoid` lists keys already tried.
+QJsonObject backupTargets(const Options& o, double raHours, double decDeg, const QDateTime& utc, double minSepDeg, int count, double minLeftMin, const QStringList& avoid);
 /// Locate tools/horizon.json: $ORIGIN_HORIZON, ./tools, then next to the executable.
 QString defaultHorizonFile();
 

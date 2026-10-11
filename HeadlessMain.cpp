@@ -135,6 +135,10 @@ const QList<Cmd>& commands()
         v.append({"schedule", "planning", "Plan one night: observable windows against the local horizon, Sun and Moon, plus a greedy one-target-at-a-time plan.", "", false, true, plannerArgs()});
         v.append({"weather", "planning", "Hourly forecast for the site from Open-Meteo: cloud low/mid/high, rain chance, visibility, dew point, wind and a 0..1 imaging quality per hour (cached 1 h; --fresh bypasses).", "", false, true,
                   {O("hours", 'i', "hours to list from now", "24"), O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218"), O("text", 'b', "one line per hour instead of JSON")}});
+        v.append({"backup", "planning", "Backup targets when cloud covers the current one: observable now, far from it in the sky, with the longest remaining window and the field-rotation exposure limit. Read-only; the supervisor decides whether to goto.", "", false, true,
+                  [] { QList<Arg> a = {O("name", 's', "current target key or name (default: the server's target, else the mount's pointing)"), O("min-sep", 'd', "minimum separation from the current pointing, deg", "40"),
+                                       O("count", 'i', "backups to return", "3"), O("min-left", 'd', "minimum minutes the backup stays observable", "45"), O("avoid", 's', "comma-separated target keys already tried")};
+                       return a + plannerArgs(); }()});
         v.append({"fieldrot", "planning", "Field-rotation limit on exposure time for an alt-az mount, for a target over the next hours.", "", false, true,
                   {P("ra-hours", 'd', "J2000 RA, hours", true, "ra_hours"), P("dec-deg", 'd', "J2000 Dec, degrees", true, "dec_deg"), O("tol", 'd', "allowed corner trail, px", "2"), O("hours", 'd', "hours to cover", "8"),
                    O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218")}});
@@ -291,6 +295,29 @@ QJsonObject cmdWeather(const Parsed& p, const Cmd& c)
     }
     r["hours"] = out;
     if (p.v.contains("text")) r["text"] = text;
+    return r;
+}
+
+QJsonObject cmdBackup(const Parsed& p, const Cmd& c)
+{
+    Planner::Options o = plannerOptions(p, c); o.date = Planner::currentNightDate(o.timeZone);
+    double ra = 0, dec = 0; QString from;
+    QString name = str(p, "name");
+    if (name.isEmpty()) { const QJsonObject tc = call("target", {}, 5000); if (tc["ok"].toBool()) name = tc["target"].toString(); }
+    if (!name.isEmpty()) {
+        Planner::Options all = o; all.weather.clear();                      // look the target up whatever the forecast says
+        const QJsonObject t = Planner::findTarget(all, name);
+        if (t["ok"].toBool()) { ra = t["ra_hours"].toDouble(); dec = t["dec_deg"].toDouble(); from = t["key"].toString(); }
+    }
+    if (from.isEmpty()) {
+        const QJsonObject m = call("mount_status", {}, 10000);
+        if (!m["ok"].toBool()) return failure("current target unknown: pass --name, or start the server so that the mount's pointing can be read");
+        ra = m["mount"].toObject()["Ra"].toDouble() * 12 / M_PI; dec = m["mount"].toObject()["Dec"].toDouble() * 180 / M_PI; from = "mount pointing";
+    }
+    const QStringList avoid = str(p, "avoid").split(',', Qt::SkipEmptyParts);
+    QJsonObject r = Planner::backupTargets(o, ra, dec, QDateTime::currentDateTimeUtc(), num(p, c, "min-sep"), int(num(p, c, "count")), num(p, c, "min-left"), avoid);
+    if (r["ok"].toBool()) r["current"] = from;
+    if (!g_wx.isEmpty()) r["forecast"] = g_wx;
     return r;
 }
 
@@ -512,6 +539,7 @@ int main(int argc, char* argv[])
     if (cmd->name == "commands") out = catalogue();
     else if (cmd->name == "schedule") out = cmdSchedule(p, *cmd);
     else if (cmd->name == "fieldrot") { Astro::Site s{num(p, *cmd, "lat"), num(p, *cmd, "lon")}; out = Planner::fieldRotation(num(p, *cmd, "ra-hours"), num(p, *cmd, "dec-deg"), s, num(p, *cmd, "tol"), num(p, *cmd, "hours")); }
+    else if (cmd->name == "backup") out = cmdBackup(p, *cmd);
     else if (cmd->name == "now") out = cmdNow(p, *cmd);
     else if (cmd->name == "weather") out = cmdWeather(p, *cmd);
     else if (cmd->name == "go") out = cmdGo(p, *cmd);
