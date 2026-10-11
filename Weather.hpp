@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDateTime>
+#include <array>
 #include <QJsonObject>
 #include <QMap>
 #include <QString>
@@ -21,6 +22,9 @@ struct Hour {
     double quality = 1;                           // 0 (hopeless) .. 1 (clear and dry), see quality(); with several models the mean of their qualities
     QMap<QString, double> models;                 // quality according to each forecast model (empty when only one was available)
     double qMin = 1, qMax = 1;                    // range of that spread
+    QMap<QString, std::array<double, 3>> layers;  // each model's low/mid/high cloud, %
+    double qModel = -1;                           // quality before the METAR nowcast was applied (-1: not adjusted)
+    double obsWeight = 0;                         // 0..1 how much the nearby airport observations shaped this hour (fades over a few hours)
 };
 
 /// Fraction of the hour usable for imaging: low and mid cloud block, high cloud counts half, then rain chance, fog (visibility < 3 km),
@@ -38,6 +42,11 @@ const Hour* at(const QVector<Hour>& hours, const QDateTime& utc);
 
 /// Precipitation (mm) per 15 minutes for the next `hours` hours (Open-Meteo minutely_15; covers the UK), never cached. Empty on failure.
 QVector<QPair<QDateTime, double>> nowcast(double latDeg, double lonDeg, int hours);
+
+/// METAR nowcast: the latest reports from airports within about 60 km give the actual low/mid cloud cover now. Models whose current low/mid cover
+/// is far from it are down-weighted, with the weight fading over about 3 hours, so the blend follows the models that are right today.
+/// Applied automatically inside fetch(); this returns the observation used ({ok, cover, stations:[...], obs_time}) for display.
+QJsonObject metarNowcast(double latDeg, double lonDeg, const QString& cacheDir, int maxAgeMin, QVector<Hour>* hours);
 
 QJsonObject toJson(const Hour& h);
 

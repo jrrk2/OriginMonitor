@@ -146,6 +146,8 @@ const QList<Cmd>& commands()
                        QList<Arg> pa = plannerArgs();
                        for (Arg& x : pa) if (x.name == "min-quality") x.help += " (run default 0.2: the forecast is a soft prior, the sky monitor decides)";
                        return a + pa; }()});
+        v.append({"sky-report", "planning", "Tell the forecast what the sky looks like now: percent of the sky covered by low/mid cloud (0 clear .. 100 overcast). Counts as an observation at the site (heavier than any airport METAR) for 90 minutes and steers the model blend; its influence fades over about 3 hours.", "", false, true,
+                  {O("cover", 'd', "cloud cover now, percent")}});
         v.append({"goto-altaz", "action", "Slew to a horizontal position by converting it to J2000 RA/Dec for the current time and using the ordinary goto (bounded by the mount's own limits). Needs an aligned (or fake-initialized) mount.", "", true, false,
                   {O("az", 'd', "azimuth, deg (0=N, 90=E, 180=S, 270=W)"), O("alt", 'd', "altitude, deg", "50"), O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218"), O("timeout", 'i', "seconds", "240")}});
         v.append({"forecast-accuracy", "planning", "How good the weather forecast has been: compares the archived dusk forecast of each night with the frames the sequencer took (usable fraction per hour). Writes forecast_accuracy.csv/.json in the data dir; reports bias (positive = the sky was better than forecast).", "", false, true, {}});
@@ -420,8 +422,8 @@ QJsonObject forecastAccuracy()
             const auto it = perHour.constFind(a.toSecsSinceEpoch()); if (it == perHour.constEnd()) continue;
             const double cov = it->first + it->second; if (cov < 900) continue;       // at least 15 minutes of evidence
             const double obs = it->first / cov;
-            rows.append(QJsonObject{{"night", night}, {"hour_utc", a.toString("HH:mm")}, {"forecast", h["quality"]}, {"observed", std::round(obs * 100) / 100}, {"covered_min", int(cov / 60)}, {"models", h["models"]}});
-            csv << QString("%1,%2,%3,%4,%5,%6,%7,%8").arg(night, a.toString(Qt::ISODate)).arg(h["quality"].toDouble()).arg(h["low"].toDouble()).arg(h["mid"].toDouble()).arg(h["high"].toDouble()).arg(obs, 0, 'f', 2).arg(int(cov / 60));
+            rows.append(QJsonObject{{"night", night}, {"hour_utc", a.toString("HH:mm")}, {"forecast", h.contains("q_model") ? h["q_model"] : h["quality"]}, {"observed", std::round(obs * 100) / 100}, {"covered_min", int(cov / 60)}, {"models", h["models"]}});
+            csv << QString("%1,%2,%3,%4,%5,%6,%7,%8").arg(night, a.toString(Qt::ISODate)).arg((h.contains("q_model") ? h["q_model"] : h["quality"]).toDouble()).arg(h["low"].toDouble()).arg(h["mid"].toDouble()).arg(h["high"].toDouble()).arg(obs, 0, 'f', 2).arg(int(cov / 60));
             ++used;
         }
         nights.append(QJsonObject{{"night", night}, {"hours_compared", used}});
@@ -1173,6 +1175,12 @@ int main(int argc, char* argv[])
     else if (cmd->name == "run") out = cmdRun(p, *cmd);
     else if (cmd->name == "autorun") out = cmdAutorun(p, *cmd);
     else if (cmd->name == "forecast-accuracy") out = forecastAccuracy();
+    else if (cmd->name == "sky-report") {
+        const double cv = std::max(0.0, std::min(100.0, num(p, *cmd, "cover")));
+        QFile f(originDataDir() + "/sky_report.json");
+        if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(QJsonObject{{"cover_pct", cv}, {"time", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}}).toJson());
+        out = QJsonObject{{"ok", true}, {"cover_pct", cv}, {"note", "used for 90 minutes; forecast hours near now now follow the models that agree with it"}};
+    }
     else if (cmd->name == "goto-altaz") out = cmdGotoAltAz(p, *cmd);
     else if (cmd->name == "now") out = cmdNow(p, *cmd);
     else if (cmd->name == "weather") out = cmdWeather(p, *cmd);
