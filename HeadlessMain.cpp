@@ -70,6 +70,7 @@ QList<Arg> plannerArgs()
             O("moon-sep", 'd', "minimum Moon separation, deg", "30"), O("min-block", 'd', "shortest useful block, minutes", "45"), O("max-block", 'd', "longest time on one target, minutes", "150"),
             O("step", 'd', "time step, minutes", "5"), O("sky-map", 'b', "also use the obstruction bins learned in <data dir>/sky_map.json"),
             O("lat", 'd', "site latitude, deg north", "52.2054"), O("lon", 'd', "site longitude, deg east", "0.1218"), O("top", 'i', "targets to list", "25"), O("text", 'b', "human-readable table instead of JSON"),
+            O("novelty", 'o', "on|off prefer targets not imaged before: a target with a saved stack in <data dir>/stacks loses priority (-4, or -5 within 3 days), a new one gains +4", "on"),
             O("weather", 'o', "on|off drop hours the Open-Meteo forecast calls cloudy, wet or foggy (cached 1 h in the data dir; ignored if the request fails)", "on"),
             O("min-quality", 'd', "forecast quality 0..1 below which an hour is unobservable", "0.5")};
 }
@@ -303,6 +304,7 @@ Planner::Options plannerOptions(const Parsed& p, const Cmd& c)
     if (p.v.contains("sky-map")) o.skyMapFile = originDataDir() + "/sky_map.json";
     o.minAlt = num(p, c, "min-alt"); o.sunAlt = num(p, c, "sun-alt"); o.moonSep = num(p, c, "moon-sep");
     o.minBlockMin = num(p, c, "min-block"); o.maxBlockMin = num(p, c, "max-block"); o.stepMin = num(p, c, "step"); o.top = int(num(p, c, "top"));
+    Planner::setStacksDir(str(p, "novelty", "on") == "off" ? QString() : originDataDir() + "/stacks");     // prefer targets not imaged before
     g_wx = QJsonObject();
     if (str(p, "weather", "on") != "off") {
         o.minQuality = num(p, c, "min-quality");
@@ -806,7 +808,7 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth)
     QJsonObject r = slewTo(t, exposure, iso);
     if (!r["ok"].toBool()) { runLog("slew_failed", {{"target", t["key"]}, {"error", r["error"]}}); return RunResult::Failed; }
     if (!startSeq(exposure, iso, endUtc, true)) { runLog("sequence_start_failed", {{"target", t["key"]}}); return RunResult::Failed; }
-    QDateTime cloudSince, blockCloudStart; double cloudMinTotal = 0; QDateTime lastTick = QDateTime::currentDateTimeUtc();
+    int trailedFrames = 0, regotos = 0; QDateTime cloudSince, blockCloudStart; double cloudMinTotal = 0; QDateTime lastTick = QDateTime::currentDateTimeUtc();
     qint64 seq = call("events", {{"since", 1e12}})["next"].toDouble();            // only events from now on
     bool obstructed = false; int failures = 0;
     while (true) {
@@ -842,7 +844,16 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth)
             if (!startSeq(exposure, iso, endUtc, !(why == "focus drift"))) { runLog("sequence_restart_failed", {{"target", t["key"]}}); return RunResult::Failed; }
             continue;
         }
-        const bool probing = s["state"].toString() == "probing";
+        // trailed stars are the mount's fault, not cloud: re-centre with a fresh goto (at most 3 times per block) instead of counting cloud time or leaving for a backup
+        if (s["last_verdict"].toString() == "trailed") {
+            if (++trailedFrames >= 2 && regotos < 3) {
+                call("sequence", {{"action", "stop"}, {"reason", "trailed stars: re-centring"}});
+                const QJsonObject g = call("goto", {{"ra_hours", t["ra_hours"]}, {"dec_deg", t["dec_deg"]}, {"timeout", 240}}, 300000);
+                runLog("regoto", {{"target", t["key"]}, {"why", "trailed stars (mount not tracking correctly)"}, {"ok", g["ok"]}, {"count", ++regotos}});
+                trailedFrames = 0; call("set", {{"exposure", exposure}, {"iso", iso}}); startSeq(exposure, iso, endUtc, true); lastTick = now; continue;
+            }
+        } else trailedFrames = 0;
+        const bool probing = s["state"].toString() == "probing" && s["last_verdict"].toString() != "trailed";
         if (probing) { if (!cloudSince.isValid()) cloudSince = now; cloudMinTotal += lastTick.secsTo(now) / 60.0; } else cloudSince = QDateTime();
         lastTick = now;
         // a high ISO whose dark baseline was never learned reads as cloud on a clear forecast: fall back once to ISO 200

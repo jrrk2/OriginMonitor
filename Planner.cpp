@@ -1,9 +1,12 @@
 #include "Planner.hpp"
+#include <QRegularExpression>
+#include <QHash>
 #include "Ephemeris.hpp"
 #include "MessierCatalog.hpp"
 
 #include <QCoreApplication>
 #include <QFile>
+#include <QDir>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -29,7 +32,38 @@ const QHash<QString, int>& priorities()
     return p;
 }
 
-struct Target { QString name, key, type; double ra = 0, dec = 0, size = 0; int prio = 3; };
+struct Target { QString name, key, type, seen; double ra = 0, dec = 0, size = 0; int prio = 3; };
+
+QString g_stacksDir;          // where the live stacks of earlier nights are kept; empty = no novelty preference
+
+// "M31", "NGC 6992 Eastern Veil", "NGC6992_Veil" -> the catalogue id ("M31", "NGC6992"); the Veil's two halves share one id
+QString catalogId(const QString& s)
+{
+    static const QRegularExpression re("^\\s*(M|NGC|IC|SH2|C|B|LDN|VDB|ARP|ABELL|MEL|COLLINDER)[ _-]*(\\d+)", QRegularExpression::CaseInsensitiveOption);
+    if (s.contains("veil", Qt::CaseInsensitive)) return "VEIL";
+    const QRegularExpressionMatch m = re.match(s);
+    return m.hasMatch() ? m.captured(1).toUpper() + m.captured(2) : QString();
+}
+
+// Novelty: the user prefers targets not imaged before. A target with a saved stack is worth less, the more recently it was imaged; a new one is worth more.
+//   never imaged: +4   imaged over 30 days ago: +0   within 30 days: -4   within 3 days: -5   (priority never below 1)
+void applyNovelty(QList<Target>& targets)
+{
+    if (g_stacksDir.isEmpty()) return;
+    QHash<QString, QDateTime> last;
+    for (const QFileInfo& d : QDir(g_stacksDir).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        const QString id = catalogId(d.fileName()); if (id.isEmpty()) continue;
+        if (!last.contains(id) || d.lastModified() > last[id]) last[id] = d.lastModified();
+    }
+    const QDateTime now = QDateTime::currentDateTime();
+    for (Target& t : targets) {
+        const QString id = catalogId(t.key.isEmpty() ? t.name : t.key);
+        if (id.isEmpty() || !last.contains(id)) { t.prio += 4; t.seen = "new"; continue; }
+        const double days = last[id].secsTo(now) / 86400.0;
+        t.seen = QString("imaged %1 days ago").arg(days, 0, 'f', days < 10 ? 1 : 0);
+        t.prio = std::max(1, t.prio + (days < 3 ? -5 : days < 30 ? -4 : 0));
+    }
+}
 
 QList<Target> loadTargets()
 {
@@ -54,6 +88,7 @@ QList<Target> loadTargets()
         {"NGC 2264 Cone/Christmas Tree", 6.68, 9.9, 60, 6}, {"Mel 20 Alpha Persei Cluster", 3.4, 49.0, 300, 4},
         {"IC 434 Horsehead / NGC 2024 Flame", 5.6833, -2.4, 90, 8}, {"NGC 1333", 3.4, 31.4, 10, 4}, {"NGC 7789 Caroline's Rose", 23.95, 56.7, 15, 4}};
     for (const E& e : extras) { Target t; t.name = t.key = e.n; t.ra = e.ra; t.dec = e.dec; t.size = e.size; t.prio = e.p; t.type = "EXTRA"; out.append(t); }
+    applyNovelty(out);
     return out;
 }
 
@@ -143,6 +178,8 @@ QDate currentNightDate(const QString& timeZone)
     return QDateTime::currentDateTimeUtc().toTimeZone(QTimeZone(timeZone.toUtf8())).addSecs(-12 * 3600).date();
 }
 
+void setStacksDir(const QString& dir) { g_stacksDir = dir; }
+
 QJsonObject schedule(const Options& o)
 {
     const QTimeZone zone(o.timeZone.toUtf8());
@@ -213,7 +250,7 @@ QJsonObject schedule(const Options& o)
     }
 
     auto info = [&](const Row& r) {
-        return QJsonObject{{"name", r.t.name}, {"key", r.t.key}, {"ra_hours", r.t.ra}, {"dec_deg", r.t.dec}, {"priority", r.t.prio}, {"size_arcmin", r.t.size},
+        return QJsonObject{{"name", r.t.name}, {"key", r.t.key}, {"ra_hours", r.t.ra}, {"dec_deg", r.t.dec}, {"priority", r.t.prio}, {"novelty", r.t.seen}, {"size_arcmin", r.t.size},
                            {"window_start", iso(times[r.i0])}, {"window_end", iso(times[r.i1])}, {"peak", iso(times[r.peak])}, {"peak_alt", std::round(r.alt[r.peak] * 10) / 10},
                            {"peak_az", std::round(r.az[r.peak])}, {"minutes", r.mins}};
     };

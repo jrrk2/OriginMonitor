@@ -218,6 +218,15 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     double excess = 0;
     if (m_darkRate.contains(isoKey) && m_darkRate[isoKey] > 0) { excess = bgRate / m_darkRate[isoKey] - 1.0; o["sky_excess_over_dark"] = excess; }
 
+    // --- trailed stars: many sources but almost none round (seen 2026-10-11: the mount tracked at about half the sidereal rate for 6 minutes after a goto and the frames read "cloudy").
+    // That is the mount, not the sky: say so, keep the frame out of the stack and the obstruction map, and let the supervisor re-centre instead of leaving for a backup target.
+    if (F.stars.size() >= 100 && focus.stars <= 5 && source != "unknown") {
+        o["verdict"] = "trailed"; o["cause"] = "mount";
+        o["reasons"] = QJsonArray{QString("%1 sources detected but only %2 round stars: the stars are trailed (mount not tracking correctly) or badly defocused").arg(F.stars.size()).arg(focus.stars)};
+        o["cause_reasons"] = QJsonArray{"trailed stars point at the mount or focus, not cloud"}; o["notes"] = QJsonArray(); o["stack"] = stackSummary();
+        return o;
+    }
+
     // --- no usable pointing (mount not aligned, no plate solve): nothing about the geometry, the stack or the obstruction map can be judged
     if (source == "unknown") {
         o["verdict"] = "no_pointing";

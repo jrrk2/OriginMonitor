@@ -29,6 +29,8 @@ struct Options {
 
 /// Whole-night plan as JSON: {ok, night, dark_start, dark_end, moon_illumination, horizon, plan[], targets[]} with ISO-8601 UTC times.
 /// With a forecast in Options::weather the result also has a "weather" block (hourly cloud/quality over the dark window, rain_from) and each plan entry a mean forecast quality.
+/// Directory of earlier nights' live stacks: targets with a stack there are demoted (the more recent, the more), unseen ones promoted. Empty = no preference.
+void setStacksDir(const QString& dir);
 QJsonObject schedule(const Options& o);
 /// Human-readable table of the same thing.
 QString scheduleText(const QJsonObject& s, int top);
