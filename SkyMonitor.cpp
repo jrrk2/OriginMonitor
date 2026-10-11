@@ -254,7 +254,14 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
         }
         reg["tile_coverage"] = cov; reg["tile_grid"] = QString("%1x%2 row-major from top-left of the stack frame").arg(LiveStacker::Report::kTilesX).arg(LiveStacker::Report::kTilesY);
         o["registration"] = reg;
-        if (rep.inliers == 0 || rep.reason == "no star-pattern match") {
+        // Many round, sharp stars that will not register to a SMALL stack mean the reference is bad (seen 2026-10-11: a half-trailed first frame became the reference and every later
+        // good frame read "cloudy"), not that the sky is cloudy. After 3 such frames the small stack is dropped and the next frame seeds a new one.
+        const bool sharpSky = focus.valid && focus.stars >= 40 && focus.hfrPx > 0 && focus.hfrPx < 4.5;
+        if ((rep.inliers == 0 || rep.reason == "no star-pattern match") && sharpSky && m_stack.frames() <= 10) {
+            if (++m_regFailRun >= 3) { m_stack.reset(); m_regFailRun = 0; verdict = "unknown"; reasons << QString("the stack reference was bad (%1 sharp stars would not register): replaced, the next frame starts a new one").arg(focus.stars); }
+            else { verdict = "unknown"; reasons << QString("%1 sharp stars but no match to the stack reference (%2 of 3 before it is replaced)").arg(focus.stars).arg(m_regFailRun); }
+        } else if (rep.inliers == 0 || rep.reason == "no star-pattern match") {
+            m_regFailRun = 0;
             verdict = "cloudy"; reasons << QString("cannot register: %1 stars detected").arg(F.stars.size());
         } else if (rep.rawTransparency > 0) {
             if (rep.transparency < 0.5) { verdict = "cloudy"; reasons << QString("transparency %1").arg(rep.transparency, 0, 'f', 2); }
@@ -264,7 +271,12 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     } else if (!haveStack && pointingOk) {
         // First frame of a target: becomes the reference if it has enough stars and the sky is not lit by cloud. A reference seeded
         // in cloud makes every later clear frame fail to register and read as cloudy (seen 2026-10-09).
-        if (excess > 2.0) {
+        const bool goodRef = focus.valid && focus.stars >= 25 && focus.hfrPx > 0 && focus.hfrPx < 4.0;
+        if (!goodRef) {
+            // a reference must be a sharp, round-star frame: a trailed or defocused one would make every later good frame fail to register
+            o["registration"] = QJsonObject{{"reference_frame", false}, {"stacked", false}, {"frames_in_stack", 0}};
+            verdict = "unknown"; reasons << QString("not a good reference frame (%1 round stars, HFR %2 px)").arg(focus.stars).arg(focus.hfrPx, 0, 'f', 1);
+        } else if (excess > 2.0) {
             o["registration"] = QJsonObject{{"reference_frame", false}, {"stacked", false}, {"frames_in_stack", 0}};
             verdict = "cloudy"; reasons << QString("sky %1% above the dark baseline: not used as the stack reference").arg(int(excess * 100));
         } else {

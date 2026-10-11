@@ -68,6 +68,7 @@ private:
     double m_minTransparency = 0.5;
     bool m_mountAligned = true;
     double m_fixRa = 0, m_fixDec = 0; QDateTime m_fixAt;   // latest plate-solved pointing
+    int m_regFailRun = 0;                                   // consecutive frames with many round stars that could not register to a small stack
     qint64 m_pictureMs = 0;                                 // last time the picture of the sky was written
     QString m_target = "auto";
     bool m_targetKnown = false;
