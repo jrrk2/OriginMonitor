@@ -158,6 +158,9 @@ QJsonObject schedule(const Options& o)
     const Horizon hz(!o.horizonFile.isEmpty() && QFileInfo::exists(o.horizonFile) ? o.horizonFile : QString(), o.minAlt, o.skyMapFile);
     const QString src = hz.hasFile() ? "horizon file " + o.horizonFile : QString("flat %1 deg PLACEHOLDER (no horizon file)").arg(o.minAlt);
 
+    QVector<double> wq(n, 1.0);                                                 // forecast quality of each step
+    if (!o.weather.isEmpty()) for (int i = 0; i < n; ++i) { const Weather::Hour* h = Weather::at(o.weather, times[i]); wq[i] = h ? h->quality : 1.0; }
+
     QList<Row> rows;
     for (const Target& tg : loadTargets()) {
         Row r; r.t = tg; r.ok.resize(n); r.alt.resize(n); r.az.resize(n);
@@ -166,7 +169,7 @@ QJsonObject schedule(const Options& o)
             const Astro::AltAz aa = Astro::altAz({tg.ra, tg.dec}, o.site, times[i]);
             r.alt[i] = aa.alt; r.az[i] = aa.az;
             const double sep = Astro::separationDeg({tg.ra, tg.dec}, moonEq[i]);
-            r.ok[i] = dark[i] && aa.alt > hz.minAlt(aa.az) && (sep > o.moonSep || moonAlt[i] < -2);
+            r.ok[i] = dark[i] && aa.alt > hz.minAlt(aa.az) && (sep > o.moonSep || moonAlt[i] < -2) && wq[i] >= o.minQuality;
             any |= r.ok[i];
         }
         if (!any) continue;
@@ -211,13 +214,30 @@ QJsonObject schedule(const Options& o)
     for (const Slot& s : plan) {
         QJsonObject e = info(rows[s.row]); e["start"] = iso(times[s.s]); e["end"] = iso(times[s.e]);
         e["alt_start"] = std::round(rows[s.row].alt[s.s]); e["alt_end"] = std::round(rows[s.row].alt[s.e]);
+        if (!o.weather.isEmpty()) { double m = 0; for (int j = s.s; j <= s.e; ++j) m += wq[j]; e["forecast_quality"] = std::round(m / (s.e - s.s + 1) * 100) / 100; }
         e["az_start"] = std::round(rows[s.row].az[s.s]); e["az_end"] = std::round(rows[s.row].az[s.e]); e["minutes"] = (s.e - s.s + 1) * o.stepMin;
         planJ.append(e);
     }
     for (const Row& r : rows) targetsJ.append(info(r));
-    return QJsonObject{{"ok", true}, {"night", day.toString(Qt::ISODate)}, {"site", QJsonObject{{"lat_deg", o.site.latDeg}, {"lon_deg", o.site.lonDeg}}},
+    QJsonObject wx;
+    if (!o.weather.isEmpty()) {
+        QJsonArray hrs; QString rainFrom; int usable = 0, total = 0;
+        QDateTime lastHour;
+        for (int i = d.first(); i <= d.last(); ++i) {
+            const Weather::Hour* h = Weather::at(o.weather, times[i]); if (!h) continue;
+            ++total; if (wq[i] >= o.minQuality) ++usable;
+            if (rainFrom.isEmpty() && (h->precipProb >= 50 || h->precip >= 0.2)) rainFrom = iso(h->utc);
+            if (h->utc != lastHour) { hrs.append(Weather::toJson(*h)); lastHour = h->utc; }
+        }
+        wx = {{"min_quality", o.minQuality}, {"usable_minutes", usable * int(o.stepMin)}, {"dark_minutes", total * int(o.stepMin)}, {"hours", hrs}};
+        if (!rainFrom.isEmpty()) wx["rain_from"] = rainFrom;
+        if (rows.isEmpty() && total > 0) wx["note"] = "the forecast leaves no observable window; rerun with --weather off to plan without it";
+    }
+    QJsonObject result{{"ok", true}, {"night", day.toString(Qt::ISODate)}, {"site", QJsonObject{{"lat_deg", o.site.latDeg}, {"lon_deg", o.site.lonDeg}}},
                        {"dark_start", iso(times[d.first()])}, {"dark_end", iso(times[d.last()])}, {"moon_illumination", std::round(illum[d.first()] * 100) / 100},
                        {"horizon", src + (hz.learnedBins() ? QString(" + %1 learned bins").arg(hz.learnedBins()) : QString())}, {"plan", planJ}, {"targets", targetsJ}};
+    if (!wx.isEmpty()) result["weather"] = wx;
+    return result;
 }
 
 QString scheduleText(const QJsonObject& s, int top)
@@ -232,6 +252,18 @@ QString scheduleText(const QJsonObject& s, int top)
         const QJsonObject r = v.toObject();
         out += QString("%1 %2 %3-%4 %5 %6 %7 %8 %9\n").arg(r["name"].toString().left(38), -38).arg(r["priority"].toInt(), 3).arg(hhmmUtc(r["window_start"].toString()), hhmmUtc(r["window_end"].toString()))
                    .arg(r["minutes"].toDouble(), 5, 'f', 0).arg(hhmmUtc(r["peak"].toString()), 6).arg(r["peak_alt"].toDouble(), 4, 'f', 0).arg(r["peak_az"].toDouble(), 4, 'f', 0).arg(cardinal(r["peak_az"].toDouble()), 3);
+    }
+    const QJsonObject wx = s["weather"].toObject();
+    if (!wx.isEmpty()) {
+        out += QString("\nForecast (Open-Meteo): %1 of %2 dark minutes usable (quality >= %3)").arg(int(wx["usable_minutes"].toDouble())).arg(int(wx["dark_minutes"].toDouble())).arg(wx["min_quality"].toDouble());
+        if (wx.contains("rain_from")) out += "; rain from " + hhmmUtc(wx["rain_from"].toString()) + " local";
+        out += "\n  hour  cloud(low/mid/high)  rain  quality\n";
+        for (const QJsonValue& v : wx["hours"].toArray()) {
+            const QJsonObject h = v.toObject();
+            out += QString("  %1  %2% (%3/%4/%5)  %6%  %7\n").arg(hhmmUtc(h["utc"].toString())).arg(h["cloud"].toDouble(), 3, 'f', 0).arg(h["low"].toDouble(), 0, 'f', 0).arg(h["mid"].toDouble(), 0, 'f', 0)
+                       .arg(h["high"].toDouble(), 0, 'f', 0).arg(h["precip_prob"].toDouble(), 0, 'f', 0).arg(h["quality"].toDouble(), 0, 'f', 2);
+        }
+        if (wx.contains("note")) out += "  " + wx["note"].toString() + "\n";
     }
     out += "\nPlan:\n";
     for (const QJsonValue& v : s["plan"].toArray()) {

@@ -17,6 +17,7 @@ MOC_DIR = build/moc
 SOURCES += \
     HeadlessMain.cpp \
     Planner.cpp \
+    Weather.cpp \
     CoordinateUtils.cpp \
     TelescopeDataProcessor.cpp \
     OriginBackend.cpp \

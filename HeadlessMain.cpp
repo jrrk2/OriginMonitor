@@ -10,6 +10,7 @@
 #include "FocusAnalyzer.hpp"
 #include "OriginBackend.hpp"
 #include "Planner.hpp"
+#include "Weather.hpp"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -62,7 +63,9 @@ QList<Arg> plannerArgs()
             O("min-alt", 'd', "flat horizon floor when there is no file, deg", "20"), O("sun-alt", 'd', "Sun altitude below which it is dark, deg", "-18"),
             O("moon-sep", 'd', "minimum Moon separation, deg", "30"), O("min-block", 'd', "shortest useful block, minutes", "45"), O("max-block", 'd', "longest time on one target, minutes", "150"),
             O("step", 'd', "time step, minutes", "5"), O("sky-map", 'b', "also use the obstruction bins learned in <data dir>/sky_map.json"),
-            O("lat", 'd', "site latitude, deg north", "52.2054"), O("lon", 'd', "site longitude, deg east", "0.1218"), O("top", 'i', "targets to list", "25"), O("text", 'b', "human-readable table instead of JSON")};
+            O("lat", 'd', "site latitude, deg north", "52.2054"), O("lon", 'd', "site longitude, deg east", "0.1218"), O("top", 'i', "targets to list", "25"), O("text", 'b', "human-readable table instead of JSON"),
+            O("weather", 'o', "on|off drop hours the Open-Meteo forecast calls cloudy, wet or foggy (cached 1 h in the data dir; ignored if the request fails)", "on"),
+            O("min-quality", 'd', "forecast quality 0..1 below which an hour is unobservable", "0.5")};
 }
 
 const QList<Cmd>& commands()
@@ -130,6 +133,8 @@ const QList<Cmd>& commands()
         }
         v.append({"park", "planning", "Save the stack and slew to Polaris (safe park).", "", true, false, {}});
         v.append({"schedule", "planning", "Plan one night: observable windows against the local horizon, Sun and Moon, plus a greedy one-target-at-a-time plan.", "", false, true, plannerArgs()});
+        v.append({"weather", "planning", "Hourly forecast for the site from Open-Meteo: cloud low/mid/high, rain chance, visibility, dew point, wind and a 0..1 imaging quality per hour (cached 1 h; --fresh bypasses).", "", false, true,
+                  {O("hours", 'i', "hours to list from now", "24"), O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218"), O("text", 'b', "one line per hour instead of JSON")}});
         v.append({"fieldrot", "planning", "Field-rotation limit on exposure time for an alt-az mount, for a target over the next hours.", "", false, true,
                   {P("ra-hours", 'd', "J2000 RA, hours", true, "ra_hours"), P("dec-deg", 'd', "J2000 Dec, degrees", true, "dec_deg"), O("tol", 'd', "allowed corner trail, px", "2"), O("hours", 'd', "hours to cover", "8"),
                    O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218")}});
@@ -235,6 +240,7 @@ void note(const QJsonObject& o) { std::fprintf(stderr, "%s\n", QJsonDocument(o).
 void sleepMs(int ms) { QThread::msleep(ms); }
 QJsonObject failure(const QString& m) { return {{"ok", false}, {"error", m}}; }
 
+QJsonObject g_wx;                                   // forecast source/age/errors of the last plannerOptions() call
 Planner::Options plannerOptions(const Parsed& p, const Cmd& c)
 {
     Planner::Options o;
@@ -244,6 +250,13 @@ Planner::Options plannerOptions(const Parsed& p, const Cmd& c)
     if (p.v.contains("sky-map")) o.skyMapFile = originDataDir() + "/sky_map.json";
     o.minAlt = num(p, c, "min-alt"); o.sunAlt = num(p, c, "sun-alt"); o.moonSep = num(p, c, "moon-sep");
     o.minBlockMin = num(p, c, "min-block"); o.maxBlockMin = num(p, c, "max-block"); o.stepMin = num(p, c, "step"); o.top = int(num(p, c, "top"));
+    g_wx = QJsonObject();
+    if (str(p, "weather", "on") != "off") {
+        o.minQuality = num(p, c, "min-quality");
+        QJsonObject r = Weather::fetch(o.site.latDeg, o.site.lonDeg, 3, g_fresh ? 0 : 60, originDataDir(), &o.weather);
+        r.remove("hours"); g_wx = r;                                           // keep the planner usable when the forecast cannot be had
+        if (!r["ok"].toBool()) o.weather.clear();
+    }
     return o;
 }
 QDateTime parseZ(const QString& s)
@@ -256,9 +269,29 @@ QDateTime parseZ(const QString& s)
 QJsonObject cmdSchedule(const Parsed& p, const Cmd& c)
 {
     QJsonObject s = Planner::schedule(plannerOptions(p, c));
+    if (!g_wx.isEmpty()) s["forecast"] = g_wx;
     if (p.v.contains("text")) s["text"] = Planner::scheduleText(s, int(num(p, c, "top")));
     else { QJsonArray t = s["targets"].toArray(), cut; for (int i = 0; i < t.size() && i < int(num(p, c, "top")); ++i) cut.append(t[i]); s["targets"] = cut; }
     return s;
+}
+
+QJsonObject cmdWeather(const Parsed& p, const Cmd& c)
+{
+    QVector<Weather::Hour> hrs;
+    QJsonObject r = Weather::fetch(num(p, c, "lat"), num(p, c, "lon"), 3, g_fresh ? 0 : 60, originDataDir(), &hrs);
+    if (!r["ok"].toBool()) return r;
+    const QDateTime from = QDateTime::currentDateTimeUtc().addSecs(-1800), to = from.addSecs(3600 * int(num(p, c, "hours")));
+    QJsonArray out; QString text;
+    for (const Weather::Hour& h : hrs) {
+        if (h.utc < from || h.utc > to) continue;
+        out.append(Weather::toJson(h));
+        text += QString("%1Z  cloud %2% (low %3 mid %4 high %5)  rain %6% %7mm  vis %8 km  T %9 dew %10  wind %11 m/s  quality %12\n").arg(h.utc.toString("MM-dd HH:mm")).arg(h.cloud, 3, 'f', 0)
+                    .arg(h.low, 3, 'f', 0).arg(h.mid, 3, 'f', 0).arg(h.high, 3, 'f', 0).arg(h.precipProb, 3, 'f', 0).arg(h.precip, 0, 'f', 1).arg(h.visibilityM / 1000, 0, 'f', 0)
+                    .arg(h.temp, 0, 'f', 1).arg(h.dew, 0, 'f', 1).arg(h.wind, 0, 'f', 1).arg(h.quality, 0, 'f', 2);
+    }
+    r["hours"] = out;
+    if (p.v.contains("text")) r["text"] = text;
+    return r;
 }
 
 QJsonObject cmdNow(const Parsed& p, const Cmd& c)
@@ -282,6 +315,14 @@ QJsonObject cmdNow(const Parsed& p, const Cmd& c)
                   {"minutes_to_dark", now < ds ? std::round(now.secsTo(ds) / 60.0) : 0}, {"minutes_to_dawn", now < de ? std::round(now.secsTo(de) / 60.0) : 0},
                   {"moon_illumination", S["moon_illumination"]}, {"current_target", cur.isEmpty() ? QJsonValue() : QJsonValue(cur)}, {"observable_now", obs}};
     if (!tc["ok"].toBool()) r["server_note"] = tc["error"];
+    if (!g_wx.isEmpty()) r["forecast"] = g_wx;
+    const QJsonObject wx = S["weather"].toObject();
+    if (!wx.isEmpty()) {
+        QVector<Weather::Hour> hrs; QJsonObject w{{"usable_dark_minutes", wx["usable_minutes"]}, {"dark_minutes", wx["dark_minutes"]}};
+        if (wx.contains("rain_from")) w["rain_from"] = wx["rain_from"];
+        for (const QJsonValue& v : wx["hours"].toArray()) { const QJsonObject h = v.toObject(); const QDateTime t = parseZ(h["utc"].toString().left(19) + "Z"); if (t <= now && now < t.addSecs(3600)) { w["now"] = h; break; } }
+        r["weather"] = w;
+    }
     return r;
 }
 
@@ -305,6 +346,7 @@ QJsonObject cmdGo(const Parsed& p, const Cmd& c)
     const QDateTime start(loc.date(), QTime(hm.value(0).toInt(), hm.value(1).toInt()));
     if (loc < start && loc.time().hour() >= 6) return failure(QString("too early: not before %1 local (%2 min to go); refusing to slew").arg(str(p, "not-before", "20:00")).arg(loc.secsTo(start) / 60));
     Planner::Options o = plannerOptions(p, c); o.date = Planner::currentNightDate(o.timeZone);
+    o.weather.clear();                              // the forecast guides planning; at the telescope the sky monitor decides
     const QJsonObject t = Planner::findTarget(o, str(p, "name"));
     if (!t["ok"].toBool()) return t;
     const QDateTime now = QDateTime::currentDateTimeUtc();
@@ -471,6 +513,7 @@ int main(int argc, char* argv[])
     else if (cmd->name == "schedule") out = cmdSchedule(p, *cmd);
     else if (cmd->name == "fieldrot") { Astro::Site s{num(p, *cmd, "lat"), num(p, *cmd, "lon")}; out = Planner::fieldRotation(num(p, *cmd, "ra-hours"), num(p, *cmd, "dec-deg"), s, num(p, *cmd, "tol"), num(p, *cmd, "hours")); }
     else if (cmd->name == "now") out = cmdNow(p, *cmd);
+    else if (cmd->name == "weather") out = cmdWeather(p, *cmd);
     else if (cmd->name == "go") out = cmdGo(p, *cmd);
     else if (cmd->name == "park") out = cmdPark();
     else if (cmd->name == "focus-sweep") out = cmdFocusSweep(p, *cmd);

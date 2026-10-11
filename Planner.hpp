@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Astro.hpp"
+#include "Weather.hpp"
 
 #include <QDate>
 #include <QDateTime>
@@ -22,9 +23,12 @@ struct Options {
     double minAlt = 20, sunAlt = -18, moonSep = 30, minBlockMin = 45, maxBlockMin = 150, stepMin = 5;
     int top = 25;
     QString timeZone = "Europe/London";
+    QVector<Weather::Hour> weather;               // hourly forecast; empty = ignore the weather
+    double minQuality = 0.5;                      // hours forecast below this (see Weather::quality) are treated as unobservable
 };
 
 /// Whole-night plan as JSON: {ok, night, dark_start, dark_end, moon_illumination, horizon, plan[], targets[]} with ISO-8601 UTC times.
+/// With a forecast in Options::weather the result also has a "weather" block (hourly cloud/quality over the dark window, rain_from) and each plan entry a mean forecast quality.
 QJsonObject schedule(const Options& o);
 /// Human-readable table of the same thing.
 QString scheduleText(const QJsonObject& s, int top);
