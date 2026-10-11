@@ -286,7 +286,7 @@ QJsonObject ControlServer::handle(const QJsonObject& req)
     if (cmd == "commands" || cmd == "help")
         return QJsonObject{{"ok", true}, {"note", "server commands; the OriginHeadless CLI has a fuller catalogue: OriginHeadless commands"},
                            {"commands", QJsonArray{"ping", "connect", "status", "manual", "auto", "set", "snapshot", "mount_status", "goto", "focus_status", "analysis", "events", "target", "stack",
-                                                   "sky_map", "preview", "monitor", "focuser_status", "focuser_move", "focuser_settings", "initialize", "slew_rate", "sequence", "send", "cache", "quit"}}};
+                                                   "sky_map", "preview", "monitor", "focuser_status", "focuser_move", "focuser_settings", "initialize", "sequence", "send", "cache", "quit"}}};
     int ttl = cacheTtlMs(cmd);
     if (cmd == "target" && req.contains("name")) ttl = 0;                       // that form changes the target
     if (!m_cacheOn || ttl == 0) {
@@ -400,22 +400,13 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
         return r.isEmpty() ? fail("no response") : QJsonObject{{"ok", true}, {"mount", r}};
     }
     // the sequencer owns the camera and the mount while it runs
-    if (m_seq->active() && (cmd == "snapshot" || cmd == "goto" || cmd == "focuser_move" || cmd == "initialize" || cmd == "slew_rate" || cmd == "set"))
+    if (m_seq->active() && (cmd == "snapshot" || cmd == "goto" || cmd == "focuser_move" || cmd == "initialize" || cmd == "set"))
         return fail("a sequence is running; stop it first ({\"cmd\":\"sequence\",\"action\":\"stop\"})");
     if (cmd == "sequence") {                          // action start|stop|status; see Sequencer.hpp
         const QString action = req["action"].toString("status");
         if (action == "start") return m_seq->start(req);
         if (action == "stop") return m_seq->stop(req["reason"].toString("stopped by supervisor"));
         return QJsonObject{{"ok", true}, {"status", m_seq->status()}};
-    }
-    if (cmd == "slew_rate") {                         // the GUI's alt/az arrows: Mount Slew with signed rates (-9..9); 0/0 stops. Works before alignment.
-        if (!m_backend->isConnected()) return fail("not connected");
-        const int alt = std::clamp(req["alt_rate"].toInt(0), -9, 9), azm = std::clamp(req["azm_rate"].toInt(0), -9, 9);
-        m_backend->sendCommand("Slew", "Mount", QJsonObject{{"AltRate", alt}, {"AzmRate", azm}});
-        const QJsonObject ack = waitResponse(m_backend->lastSequenceId(), 5000);
-        if (ack.isEmpty()) return fail("no acknowledgement from Slew");
-        if (ack["ErrorCode"].toInt() != 0) return fail("Slew rejected: " + ack["ErrorMessage"].toString());
-        return QJsonObject{{"ok", true}, {"alt_rate", alt}, {"azm_rate", azm}};
     }
     if (cmd == "goto") return doGoto(req);
     if (cmd == "initialize") return doInitialize(req);
