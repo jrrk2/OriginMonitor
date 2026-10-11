@@ -232,7 +232,7 @@ void OriginBackend::stopContinuousSnapshots()
   emit continuousSnapshotsChanged(false);
 }
 
-bool OriginBackend::takeSnapshot(double exposure, int iso, int binning)
+bool OriginBackend::takeSnapshot(double exposure, int iso, int binning, bool forceBitDepth)
 {
     qDebug() << "Taking snapshot: Exposure =" << exposure << "ISO =" << iso;
     if (!isConnected()) {
@@ -253,7 +253,7 @@ bool OriginBackend::takeSnapshot(double exposure, int iso, int binning)
     // Snapshots are always the raw 16-bit Bayer frame (FITS). Ask for that explicitly: older firmware defaulted to a
     // debayered TIFF when "Debayer" was absent (logs Oct 2025 - Jan 2026), current firmware (Origin 1.5.6240) defaults
     // to raw FITS, so relying on the default would change the file type after a firmware update.
-    if (m_requestedBitDepth != 16)
+    if (m_requestedBitDepth != 16 || forceBitDepth)
         setCameraBitDepth(16);
     params["Debayer"] = false;
     

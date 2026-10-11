@@ -406,7 +406,7 @@ QJsonObject ControlServer::doSnapshot(const QJsonObject& req)
     connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
     timer.start(timeoutMs);
     // explicit values go straight into the capture request; takeSingleSnapshot uses the last values the camera has confirmed, which lag a request behind
-    const bool sent = req.contains("exposure") ? m_backend->takeSnapshot(req["exposure"].toDouble(), req["iso"].toInt(800), req["binning"].toInt(1)) : m_backend->takeSingleSnapshot();
+    const bool sent = req.contains("exposure") ? m_backend->takeSnapshot(req["exposure"].toDouble(), req["iso"].toInt(800), req["binning"].toInt(1), !m_seq->active()) : m_backend->takeSingleSnapshot();
     if (!sent) { disconnect(conn); return fail("snapshot request failed"); }
     loop.exec();
     disconnect(conn);

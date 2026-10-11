@@ -107,7 +107,7 @@ public:
 #endif
     void sendCommand(const QString& command, const QString& destination, 
                     const QJsonObject& params = QJsonObject());
-    bool takeSnapshot(double exposure, int iso, int binning);
+    bool takeSnapshot(double exposure, int iso, int binning, bool forceBitDepth = false);   // forceBitDepth: send BitDepth 16 even if it was sent before (the telescope drops it after a slew and the frame comes back as a PNG)
     bool setManualMode();
     bool setAutoMode();
     bool getCameraMode();
