@@ -157,7 +157,7 @@ const QList<Cmd>& commands()
                   {O("az", 'd', "azimuth, deg (0=N, 90=E, 180=S, 270=W)"), O("alt", 'd', "altitude, deg", "50"), O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218"), O("timeout", 'i', "seconds", "240")}});
         v.append({"forecast-accuracy", "planning", "How good the weather forecast has been: compares the archived dusk forecast of each night with the frames the sequencer took (usable fraction per hour). Writes forecast_accuracy.csv/.json in the data dir; reports bias (positive = the sky was better than forecast).", "", false, true, {}});
         v.append({"autorun", "planning", "Dusk launcher for cron (every 5 minutes): once per night, if the telescope is out and reachable, starts the daemon, connects, initializes the mount if needed and starts 'run --unattended --mail' in the background. Does nothing (quietly) when the telescope does not answer, when nothing is observable, when rain is forecast, or when ~/.config/origin/autorun.off exists. Slews the telescope: only schedule it if that is wanted.", "", true, false,
-                  [] { QList<Arg> a = {O("telescope", 's', "telescope host", "192.168.1.195"), O("start-after", 's', "\"dusk\" (Sun below -12 deg at the site) or a local HH:MM; never act before this", "dusk"), O("stop-before-dawn", 'd', "minutes before the end of darkness after which no run is started", "60"),
+                  [] { QList<Arg> a = {O("telescope", 's', "telescope host", "192.168.1.195"), O("start-after", 's', "\"dusk\" (autorun begins when the Sun is below --probe-sun-alt; the run itself waits for -12 deg) or a local HH:MM; never act before this", "dusk"), O("probe-sun-alt", 'd', "Sun altitude below which autorun starts: raises the tube, probes with plate solves (exposure scaled to the sky brightness) and initializes; the run still waits for -12", "-7"), O("stop-before-dawn", 'd', "minutes before the end of darkness after which no run is started", "60"),
                                        O("dry-run", 'b', "say what would be done, do nothing"), O("init-fallback", 'o', "off | fake-init: after a failed initialize, fake-initialize, goto sky on the other side of the meridian and retry (UNTESTED on the real mount; off by default)", "off"), O("ignore-time", 'b', "skip the evening/dawn time gates (testing)"), O("no-mail", 'b', "send no e-mails (testing)"), O("iso", 'i', "ISO for the run", "800"), O("max-exposure", 'd', "longest exposure for the run, s", "20")};
                        return a + plannerArgs(); }()});
         v.append({"park", "planning", "Save the stack and slew to Polaris (safe park).", "", true, false, {}});
@@ -992,7 +992,12 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
     const QString night = S["night"].toString();
     const QDateTime now = QDateTime::currentDateTimeUtc(), darkStart = parseZ(S["dark_start"].toString()), darkEnd = parseZ(S["dark_end"].toString());
     auto idle = [&](const QString& why) { return QJsonObject{{"ok", true}, {"acted", false}, {"night", night}, {"note", why}}; };
-    if (!p.v.contains("ignore-time") && !tooEarlyToSlew(str(p, "start-after", "dusk"), o.site).isEmpty()) return idle("too early for tonight: " + tooEarlyToSlew(str(p, "start-after", "dusk"), o.site));
+    const double sunNow = Astro::altAz(Astro::sunPosition(now), o.site, now).alt, probeAlt = num(p, c, "probe-sun-alt");
+    {   // autorun starts at --probe-sun-alt (default -7): a plate solve of the twilight sky decides whether stars can be seen, instead of a fixed -12 deg cutoff
+        const QString spec = str(p, "start-after", "dusk");
+        const QString early = spec == "dusk" ? (sunNow > probeAlt ? QString("the Sun is at %1 deg (autorun starts below %2)").arg(sunNow, 0, 'f', 1).arg(probeAlt, 0, 'f', 0) : QString()) : tooEarlyToSlew(spec, o.site);
+        if (!p.v.contains("ignore-time") && !early.isEmpty()) return idle("too early for tonight: " + early);
+    }
     if (!p.v.contains("ignore-time") && now >= darkEnd.addSecs(-int(num(p, c, "stop-before-dawn")) * 60)) return idle("too late to start tonight");
 
     const QString statePath = originDataDir() + "/autorun_state.json";
@@ -1044,14 +1049,21 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
                 note({{"autorun", "unpark"}, {"result", u}});
                 if (!u["ok"].toBool()) return idle("unpark: " + u["error"].toString());
             }
-            call("set", {{"exposure", 3.0}, {"iso", 800}, {"binning", 1}}, 15000);
+            // Rayleigh-scattered twilight brightens by roughly 1 magnitude per degree of Sun depression, so the exposure scales as 10^(0.4 (depression - 12)) from 3 s at -12 deg,
+            // and widens by 3x after each failed solve (cloud or too short). Every probe is appended to solve_probes.jsonl so the real limit can be read off later.
+            const double depr = std::max(0.0, -sunNow), fails = st["solve_fails"].toInt();
+            const double expo = std::clamp(3.0 * std::pow(10.0, 0.4 * (depr - 12.0)) * std::pow(3.0, std::min(fails, 3.0)), 0.02, 6.0);
+            call("set", {{"exposure", expo}, {"iso", 800}, {"binning", 1}}, 15000);
             const QJsonObject sv = call("solve", {{"lat_deg", o.site.latDeg}, {"lon_deg", o.site.lonDeg}, {"cpulimit", 40}}, 200000);
-            note({{"autorun", "plate solve before init"}, {"result", sv}});
+            note({{"autorun", "plate solve before init"}, {"sun_alt", sunNow}, {"exposure_s", expo}, {"result", sv}});
+            { QFile pf(originDataDir() + "/solve_probes.jsonl"); if (pf.open(QIODevice::Append)) pf.write(QJsonDocument(QJsonObject{{"utc", now.toString(Qt::ISODate)}, {"sun_alt", sunNow}, {"exposure_s", expo}, {"solved", sv["solved"].toBool()},
+                {"summary", sv["summary"]}, {"error", sv["error"]}}).toJson(QJsonDocument::Compact) + "\n"); }
             if (sv["solved"].toBool()) { st["solve_fails"] = 0; st["last_solve"] = sv["summary"]; save(); }
             else {
                 st["solve_fails"] = st["solve_fails"].toInt() + 1; st["last_solve_error"] = sv["error"]; save();
-                if (st["solve_fails"].toInt() < 2) return idle("no plate solution yet (" + sv["error"].toString() + "); will retry next tick");
-                note({{"autorun", "no plate solution twice; initializing anyway"}});
+                // before nautical dark a failed solve just means the sky is still too bright (or cloudy): wait. From -12 deg on, two failures and the initialize is tried anyway.
+                if (sunNow > -12.0 || st["solve_fails"].toInt() < 2) return idle(QString("no plate solution yet (%1; Sun %2 deg, %3 s); will retry next tick").arg(sv["error"].toString()).arg(sunNow, 0, 'f', 1).arg(expo, 0, 'f', 2));
+                note({{"autorun", "no plate solution twice in the dark; initializing anyway"}});
             }
         }
         st["init_attempts"] = st["init_attempts"].toInt() + 1; save();
