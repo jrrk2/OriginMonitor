@@ -31,6 +31,7 @@ SOURCES += \
     Registration.cpp \
     LiveStacker.cpp \
     Image16.cpp \
+    FlatAnalyzer.cpp \
     SkyMonitor.cpp \
     Astro.cpp
 

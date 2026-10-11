@@ -11,6 +11,7 @@
 #include "OriginBackend.hpp"
 #include "Planner.hpp"
 #include "Weather.hpp"
+#include "FlatAnalyzer.hpp"
 #include "Mail.hpp"
 #include "Ephemeris.hpp"
 
@@ -122,7 +123,7 @@ const QList<Cmd>& commands()
              {O("file", 's', "solve this FITS file instead of taking a snapshot"), O("lat", 'd', "site latitude", "52.2054", "lat_deg"), O("lon", 'd', "site longitude", "0.1218", "lon_deg"),
               O("cpulimit", 'i', "seconds the solver may use", "60"), O("force", 'b', "run solve-field even if the frame statistics say it is hopeless"), O("exposure", 'd', "seconds for the snapshot (default: the camera's current setting)"), O("iso", 'i', "ISO for the snapshot"), O("binning", 'i', "binning for the snapshot"), O("index-dir", 's', "astrometry.net index files (default $ORIGIN_INDEX_DIR or ~/astrometry_indices)", QString(), "index_dir"), O("downsample", 'i', "solve-field -z", "2")}, true);
         pass("frame-stats", "analysis", "Statistics of one raw frame (a fresh snapshot, or --file): percentiles, histogram, saturated fraction, background, noise, star count, the sky rate in ADU/s above black (twilight brightness), a verdict (ok, too_bright, too_short, few_stars) and the exposure that would put the sky about 6000 ADU above black. Used by solve to skip hopeless frames.", "frame_stats",
-             {O("file", 's', "analyse this FITS file instead of taking a snapshot"), O("exposure", 'd', "seconds for the snapshot"), O("iso", 'i', "ISO", "800"), O("binning", 'i', "binning", "1"), O("bins", 'i', "histogram bins (2-256)", "16"), O("max-exposure", 'd', "longest exposure to suggest, s", "6", "max_exposure")}, true);
+             {O("file", 's', "analyse this FITS file instead of taking a snapshot"), O("exposure", 'd', "seconds for the snapshot"), O("iso", 'i', "ISO", "800"), O("binning", 'i', "binning", "1"), O("bins", 'i', "histogram bins (2-256)", "16"), O("max-exposure", 'd', "longest exposure to suggest, s", "6", "max_exposure"), O("target-adu", 'd', "sky level above black the suggested exposure should give, ADU", "6000", "target_adu")}, true);
         pass("focuser-move", "action", "Move the focuser to an absolute position (within travel limits and --max-step of the current one).", "focuser_move",
              {P("position", 'i', "absolute focuser position"), O("max-step", 'i', "largest allowed move", "3000"), O("timeout", 'i', "seconds", "60")}, true);
         pass("sequence", "action", "Unattended exposure loop inside the server: start, stop or status.", "sequence",
@@ -159,6 +160,10 @@ const QList<Cmd>& commands()
         v.append({"survey", "action", "Twilight obstruction survey: while waiting for darkness, point at a sample of the places the night's plan will use (places the obstruction map has never seen first, then random) (block start, middle, end, backups), take a very short frame at each, and judge whether the view is blocked (trees, roofs) from the sky level and the spread of the frame. Needs an aligned mount and the Sun below --sun-limit. Records evidence in the learned obstruction map, writes survey_<night>.json and a picture per sample.",
                   "", true, false, [] { QList<Arg> a = {O("samples", 'i', "places to sample", "8"), O("seed", 'i', "random seed for the order within equally-visited places (default: the night's date)"), O("sun-limit", 'd', "Sun altitude it must be below, deg", "-7"), O("max-minutes", 'd', "stop after this long", "35"),
                                                    O("dry-run", 'b', "list the sample points, do nothing"), O("iso", 'i', "ISO", "800")}; return a + plannerArgs(); }()});
+        v.append({"flats", "action", "Take flat frames of a uniformly lit sky (an overcast deck, or twilight near the zenith) at the pointing the tube has now and analyse them: vignetting, dust shadows, colour, gradient, noise. Adapts the exposure to put the sky --target-adu above black, writes master_flat_<tag>.fits and two pictures to <data dir>/flats/. Does not move the telescope.",
+                  "", true, false, {O("frames", 'i', "frames to take", "16"), O("iso", 'i', "ISO (use the ISO of the lights)", "800"), O("target-adu", 'd', "sky level above black to aim for, ADU", "20000"), O("max-exposure", 'd', "longest exposure, s", "2"), O("tag", 's', "name for the outputs (default: iso and time)"), O("no-keep", 'b', "delete the raw frames after the analysis")}});
+        v.append({"flat-analyze", "analysis", "Analyse existing raw flat frames (see flats): --dir with snapshot_*.fits, or --files a.fits,b.fits.", "", false, true,
+                  {O("dir", 's', "directory of raw FITS flat frames"), O("files", 's', "comma-separated FITS files"), O("tag", 's', "name for the outputs", "analysis")}});
         v.append({"goto-altaz", "action", "Slew to a horizontal position by converting it to J2000 RA/Dec for the current time and using the ordinary goto (bounded by the mount's own limits). Needs an aligned (or fake-initialized) mount.", "", true, false,
                   {O("az", 'd', "azimuth, deg (0=N, 90=E, 180=S, 270=W)"), O("alt", 'd', "altitude, deg", "50"), O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218"), O("timeout", 'i', "seconds", "240")}});
         v.append({"forecast-accuracy", "planning", "How good the weather forecast has been: compares the archived dusk forecast of each night with the frames the sequencer took (usable fraction per hour). Writes forecast_accuracy.csv/.json in the data dir; reports bias (positive = the sky was better than forecast).", "", false, true, {}});
@@ -976,6 +981,53 @@ QJsonObject cmdGotoAltAz(const Parsed& p, const Cmd& c)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------
+// flats: frames of a uniformly lit sky at the current pointing, exposure adapted to a fixed signal level, then analysed (FlatAnalyzer). No motion.
+// ---------------------------------------------------------------------------------------------------------------------------------------
+QJsonObject cmdFlats(const Parsed& p, const Cmd& c)
+{
+    if (!call("status", {}, 10000)["connected"].toBool()) return failure("the daemon is not connected to the telescope");
+    if (call("sequence", {{"action", "status"}}, 10000)["status"].toObject()["active"].toBool()) return failure("a sequence is running");
+    const int n = std::max(2, int(num(p, c, "frames"))), iso = int(num(p, c, "iso")); const double target = num(p, c, "target-adu"), maxExp = num(p, c, "max-exposure");
+    const QString tag = p.v.contains("tag") ? str(p, "tag") : QString("iso%1_%2").arg(iso).arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmm"));
+    const QString outDir = originDataDir() + "/flats", rawDir = outDir + "/raw_" + tag; QDir().mkpath(rawDir);
+    call("manual", {}, 15000);
+    double expo = 0.001; QJsonObject fs;
+    for (int k = 0; k < 8; ++k) {                                       // find the exposure that puts the sky about `target` ADU above black
+        fs = call("frame_stats", {{"exposure", expo}, {"iso", iso}, {"binning", 1}, {"target_adu", target}, {"max_exposure", maxExp}, {"dir", rawDir}}, 90000);
+        if (!fs["ok"].toBool()) return failure("frame statistics failed: " + fs["error"].toString());
+        const double next = fs["suggested_exposure_s"].toDouble(expo);
+        note({{"flats", "finding the exposure"}, {"exposure_s", expo}, {"median_adu", fs["median_adu"]}, {"next_s", next}});
+        if (std::abs(std::log10(next / expo)) < 0.08) break;
+        if (fs["median_adu"].toDouble() - 4985 < 200 && expo >= maxExp * 0.99) return failure(QString("too dark for flats even at %1 s (median %2 ADU)").arg(expo).arg(fs["median_adu"].toDouble()));
+        expo = next;
+    }
+    QStringList files; QJsonArray log;
+    for (int i = 0; i < n; ++i) {
+        const QJsonObject s = call("snapshot", {{"dir", rawDir}, {"exposure", expo}, {"iso", iso}, {"binning", 1}, {"timeout", 40}}, 90000);
+        if (!s["ok"].toBool()) { note({{"flats", "snapshot failed"}, {"error", s["error"]}}); continue; }
+        files << s["path"].toString();
+        const QJsonObject st = call("frame_stats", {{"file", s["path"]}, {"exposure", expo}, {"target_adu", target}, {"max_exposure", maxExp}}, 30000);
+        log.append(QJsonObject{{"file", QFileInfo(s["path"].toString()).fileName()}, {"exposure_s", expo}, {"median_adu", st["median_adu"]}, {"saturated", st["saturated_fraction"]}});
+        const double next = st["suggested_exposure_s"].toDouble(expo);
+        if (std::abs(std::log10(next / expo)) > 0.1) expo = next;        // the cloud brightness drifts: follow it (the analysis normalises each frame)
+    }
+    QJsonObject r = analyseFlats(files, outDir, tag);
+    r["tag"] = tag; r["raw_dir"] = rawDir; r["frame_log"] = log; r["iso"] = iso;
+    if (p.v.contains("no-keep")) for (const QString& f : files) QFile::remove(f);
+    QFile jf(outDir + "/flats_" + tag + ".json"); if (jf.open(QIODevice::WriteOnly | QIODevice::Truncate)) jf.write(QJsonDocument(r).toJson());
+    return r;
+}
+
+QJsonObject cmdFlatAnalyze(const Parsed& p, const Cmd&)
+{
+    QStringList files;
+    if (p.v.contains("files")) files = str(p, "files").split(',', Qt::SkipEmptyParts);
+    else if (p.v.contains("dir")) for (const QString& f : QDir(str(p, "dir")).entryList({"*.fits"}, QDir::Files, QDir::Name)) files << str(p, "dir") + "/" + f;
+    if (files.size() < 2) return failure("give --dir (with at least 2 FITS files) or --files");
+    return analyseFlats(files, originDataDir() + "/flats", str(p, "tag", "analysis"));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------
 // survey: while waiting for darkness, sample the places the night's plan will use and judge each view. A tree line or roof in the frame shows as a dark silhouette against
 // the bright twilight sky: either the whole frame is much darker than the other samples (blocked) or the frame is far from uniform (partly blocked). Evidence goes to the
 // learned obstruction map (which the planner already uses once a bin has been bad on two nights), to survey_<night>.json, and as one picture per sample.
@@ -1326,6 +1378,8 @@ int main(int argc, char* argv[])
     else if (cmd->name == "run") out = cmdRun(p, *cmd);
     else if (cmd->name == "autorun") out = cmdAutorun(p, *cmd);
     else if (cmd->name == "survey") out = cmdSurvey(p, *cmd);
+    else if (cmd->name == "flats") out = cmdFlats(p, *cmd);
+    else if (cmd->name == "flat-analyze") out = cmdFlatAnalyze(p, *cmd);
     else if (cmd->name == "forecast-accuracy") out = forecastAccuracy();
     else if (cmd->name == "sky-report") {
         const double cv = std::max(0.0, std::min(100.0, num(p, *cmd, "cover")));

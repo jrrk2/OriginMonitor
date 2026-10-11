@@ -209,7 +209,7 @@ QJsonObject ControlServer::doInitialize(const QJsonObject& req)
 // luminance (ADU, 16-bit), the saturated fraction, background and noise, the stars the finder sees, and the sky rate (ADU/s above the black level: the
 // twilight brightness, which is what the exposure has to follow). "verdict": ok | too_bright | too_short | few_stars | unreadable, with a suggested exposure that puts the
 // sky about 6000 ADU above black (never more than maxExposureS).
-QJsonObject ControlServer::frameStats(const QString& path, double exposureS, int bins, double maxExposureS)
+QJsonObject ControlServer::frameStats(const QString& path, double exposureS, int bins, double maxExposureS, double targetAdu)
 {
     QFile f(path); if (!f.open(QIODevice::ReadOnly)) return QJsonObject{{"ok", false}, {"verdict", "unreadable"}, {"error", "cannot open " + path}};
     const SkyFrame F = analyseFrame(f.readAll());
@@ -222,7 +222,7 @@ QJsonObject ControlServer::frameStats(const QString& path, double exposureS, int
     QJsonArray hist; { const int n = std::max(2, std::min(bins, 256)); std::vector<int> h(n, 0); for (float x : v) ++h[std::min(n - 1, int(x / fs * n))]; for (int c : h) hist.append(double(c) / v.size()); }
     int strong = 0; for (const SkyStar& s : F.stars) if (s.sigma >= 10) ++strong;
     const double skyRate = std::max(0.0, F.background - black) / std::max(exposureS, 1e-6);
-    const double suggest = std::clamp(skyRate > 0 ? 6000.0 / skyRate : maxExposureS, 1e-5, maxExposureS);
+    const double suggest = std::clamp(skyRate > 0 ? targetAdu / skyRate : maxExposureS, 1e-5, maxExposureS);
     QString verdict = "ok", why;
     double suggestOut = suggest;
     if (satFrac > 0.02 || F.background > 0.7 * fs) {
@@ -247,11 +247,12 @@ QJsonObject ControlServer::doFrameStats(const QJsonObject& req)
     if (file.isEmpty()) {
         if (!m_backend->isConnected()) return fail("not connected");
         QJsonObject sreq{{"timeout", req["snapshot_timeout"].toInt(30)}};
+        if (req.contains("dir")) sreq["dir"] = req["dir"];
         if (req.contains("exposure")) { sreq["exposure"] = req["exposure"]; sreq["iso"] = req["iso"].toInt(800); sreq["binning"] = req["binning"].toInt(1); }
         snap = doSnapshot(sreq); if (!snap["ok"].toBool()) return snap;
         file = snap["path"].toString(); expo = snap["exposure"].toDouble(expo);
     }
-    QJsonObject r = frameStats(file, expo, req["bins"].toInt(16), req["max_exposure"].toDouble(6.0)); r["file"] = file;
+    QJsonObject r = frameStats(file, expo, req["bins"].toInt(16), req["max_exposure"].toDouble(6.0), req["target_adu"].toDouble(6000.0)); r["file"] = file;
     if (!snap.isEmpty()) r["snapshot"] = snap;
     return r;
 }

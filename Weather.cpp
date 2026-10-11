@@ -173,10 +173,21 @@ bool decodeGray(const QByteArray& data, int* w, int* h, std::vector<unsigned cha
 }
 }
 
+// Low-precision solar altitude (degrees), enough to tell day from twilight from night for the all-sky camera's trust.
+static double sunAltitudeDeg(double latDeg, double lonDeg, const QDateTime& utc)
+{
+    const double kPi = 3.14159265358979323846, n = utc.toMSecsSinceEpoch() / 86400000.0 + 2440587.5 - 2451545.0;
+    auto wrap = [](double d) { d = std::fmod(d, 360.0); return d < 0 ? d + 360.0 : d; };
+    const double L = wrap(280.460 + 0.9856474 * n), g = wrap(357.528 + 0.9856003 * n) * kPi / 180.0, lam = (L + 1.915 * std::sin(g) + 0.020 * std::sin(2 * g)) * kPi / 180.0, eps = (23.439 - 0.0000004 * n) * kPi / 180.0;
+    const double ra = std::atan2(std::cos(eps) * std::sin(lam), std::cos(lam)), dec = std::asin(std::sin(eps) * std::sin(lam));
+    const double gmst = wrap(280.46061837 + 360.98564736629 * n), ha = (gmst + lonDeg) * kPi / 180.0 - ra, lat = latDeg * kPi / 180.0;
+    return std::asin(std::sin(dec) * std::sin(lat) + std::cos(dec) * std::cos(lat) * std::cos(ha)) * 180.0 / kPi;
+}
+
 /// Cloud fraction (0..1) over the central 75% of the fisheye radius (zenith angle up to about 65 deg, which clears the dome, wall and trees at the edge), from the latest frame.
 /// Daytime/twilight method calibrated on one frame: pixels more than 25 grey levels above the 20th percentile (clear sky, capped at 90) count as cloud.
 /// Returns ok=false when the frame is stale or too dark for that method (night frames are archived under allsky/ for calibrating a night method).
-static QJsonObject allSkyCover(const QString& dir, double* cover, QDateTime* when)
+static QJsonObject allSkyCover(const QString& dir, double* cover, QDateTime* when, double sunAlt)
 {
     const QString img = dir + "/allsky_latest.jpg", meta = dir + "/allsky_latest.json";
     QJsonObject m; { QFile f(meta); if (f.open(QIODevice::ReadOnly)) m = QJsonDocument::fromJson(f.readAll()).object(); }
@@ -212,9 +223,12 @@ static QJsonObject allSkyCover(const QString& dir, double* cover, QDateTime* whe
     std::vector<unsigned char> sorted = v; std::sort(sorted.begin(), sorted.end());
     const double p20 = sorted[sorted.size() / 5], med = sorted[sorted.size() / 2];
     if (med < 45) return {{"ok", false}, {"error", "all-sky image too dark for the daytime method"}, {"median", med}};
-    const double thr = std::min(p20, 90.0) + 25; size_t n = 0; for (unsigned char c : v) if (c > thr) ++n;
+    // The camera auto-exposes and cloud contrast falls as the light does, so the margin over clear sky shrinks in twilight: 25 grey levels by day, down to ~9 at the Sun -5 deg
+    // (provisional, fitted to two labelled frames: 16:23 BST about 30% cloud and 18:44 BST overcast, 2026-10-11).
+    const double margin = 25.0 * std::clamp((sunAlt + 8.0) / 8.0, 0.35, 1.0);
+    const double thr = std::min(p20, 90.0) + margin; size_t n = 0; for (unsigned char c : v) if (c > thr) ++n;
     *cover = double(n) / v.size(); *when = mod;
-    return {{"ok", true}, {"cover", *cover}, {"median", med}, {"p20", p20}, {"image_time", mod.toString(Qt::ISODate)}};
+    return {{"ok", true}, {"cover", *cover}, {"median", med}, {"p20", p20}, {"margin", margin}, {"sun_alt", sunAlt}, {"image_time", mod.toString(Qt::ISODate)}};
 }
 
 QJsonObject metarNowcast(double lat, double lon, const QString& cacheDir, int maxAgeMin, QVector<Hour>* hours)
@@ -268,8 +282,11 @@ QJsonObject metarNowcast(double lat, double lon, const QString& cacheDir, int ma
             st.append(QJsonObject{{"id", "observer"}, {"km", 0}, {"cover", r["cover_pct"].toDouble() / 100}, {"raw", "sky-report"}});
         }
     }
-    { double ac = 0; QDateTime at; const QJsonObject a = allSkyCover(cacheDir, &ac, &at);
-      if (a["ok"].toBool()) { sw += 0.1; sc += 0.1 * ac; if (!newest.isValid() || at > newest) newest = at; st.append(QJsonObject{{"id", "allsky"}, {"km", 0}, {"cover", ac}, {"raw", "IoA all-sky camera, " + at.toString(Qt::ISODate)}}); }
+    { double ac = 0; QDateTime at; const double sunAlt = sunAltitudeDeg(lat, lon, QDateTime::currentDateTimeUtc());
+      const QJsonObject a = allSkyCover(cacheDir, &ac, &at, sunAlt);
+      // the camera is trusted fully by day; in twilight its auto-exposed picture is a weaker guide, so its weight falls to 15% by the Sun -6 deg (the airports and models count for more)
+      const double wCam = 0.1 * std::clamp((sunAlt + 6.0) / 6.0, 0.15, 1.0);
+      if (a["ok"].toBool()) { sw += wCam; sc += wCam * ac; if (!newest.isValid() || at > newest) newest = at; st.append(QJsonObject{{"id", "allsky"}, {"km", 0}, {"cover", ac}, {"raw", "IoA all-sky camera, " + at.toString(Qt::ISODate)}}); }
       else st.append(QJsonObject{{"id", "allsky"}, {"error", a["error"]}}); }
     if (sw <= 0) return {{"ok", false}, {"error", "no recent METAR within 60 km"}};
     const double obs = sc / sw * 100;   // % low/mid cover now
