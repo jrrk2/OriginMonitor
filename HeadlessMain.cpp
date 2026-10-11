@@ -302,7 +302,8 @@ Planner::Options plannerOptions(const Parsed& p, const Cmd& c)
     if (p.v.contains("date")) o.date = QDate::fromString(str(p, "date"), Qt::ISODate);
     o.site.latDeg = num(p, c, "lat"); o.site.lonDeg = num(p, c, "lon");
     o.horizonFile = p.v.contains("horizon") ? str(p, "horizon") : Planner::defaultHorizonFile();
-    if (p.v.contains("sky-map")) o.skyMapFile = originDataDir() + "/sky_map.json";
+    // the learned obstruction and glare bins are always used by the unattended commands (run, autorun, survey); for the others they are opt-in
+    if (p.v.contains("sky-map") || c.name == "run" || c.name == "autorun" || c.name == "survey") o.skyMapFile = originDataDir() + "/sky_map.json";
     o.minAlt = num(p, c, "min-alt"); o.sunAlt = num(p, c, "sun-alt"); o.moonSep = num(p, c, "moon-sep");
     o.minBlockMin = num(p, c, "min-block"); o.maxBlockMin = num(p, c, "max-block"); o.stepMin = num(p, c, "step"); o.top = int(num(p, c, "top"));
     Planner::setStacksDir(str(p, "novelty", "on") == "off" ? QString() : originDataDir() + "/stacks");     // prefer targets not imaged before
