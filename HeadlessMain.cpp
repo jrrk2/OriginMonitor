@@ -30,6 +30,7 @@
 #include <QTimer>
 
 #include <algorithm>
+#include <random>
 #include <cstdio>
 #include <functional>
 
@@ -155,6 +156,9 @@ const QList<Cmd>& commands()
                        return a + pa; }()});
         v.append({"sky-report", "planning", "Tell the forecast what the sky looks like now: percent of the sky covered by low/mid cloud (0 clear .. 100 overcast). Counts as an observation at the site (heavier than any airport METAR) for 90 minutes and steers the model blend; its influence fades over about 3 hours.", "", false, true,
                   {O("cover", 'd', "cloud cover now, percent")}});
+        v.append({"survey", "action", "Twilight obstruction survey: while waiting for darkness, point at a random sample of the places the night's plan will use (block start, middle, end, backups), take a very short frame at each, and judge whether the view is blocked (trees, roofs) from the sky level and the spread of the frame. Needs an aligned mount and the Sun below --sun-limit. Records evidence in the learned obstruction map, writes survey_<night>.json and a picture per sample.",
+                  "", true, false, [] { QList<Arg> a = {O("samples", 'i', "places to sample", "8"), O("seed", 'i', "random seed (default: the night's date)"), O("sun-limit", 'd', "Sun altitude it must be below, deg", "-7"), O("max-minutes", 'd', "stop after this long", "35"),
+                                                   O("dry-run", 'b', "list the sample points, do nothing"), O("iso", 'i', "ISO", "800")}; return a + plannerArgs(); }()});
         v.append({"goto-altaz", "action", "Slew to a horizontal position by converting it to J2000 RA/Dec for the current time and using the ordinary goto (bounded by the mount's own limits). Needs an aligned (or fake-initialized) mount.", "", true, false,
                   {O("az", 'd', "azimuth, deg (0=N, 90=E, 180=S, 270=W)"), O("alt", 'd', "altitude, deg", "50"), O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218"), O("timeout", 'i', "seconds", "240")}});
         v.append({"forecast-accuracy", "planning", "How good the weather forecast has been: compares the archived dusk forecast of each night with the frames the sequencer took (usable fraction per hour). Writes forecast_accuracy.csv/.json in the data dir; reports bias (positive = the sky was better than forecast).", "", false, true, {}});
@@ -972,6 +976,95 @@ QJsonObject cmdGotoAltAz(const Parsed& p, const Cmd& c)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------
+// survey: while waiting for darkness, sample the places the night's plan will use and judge each view. A tree line or roof in the frame shows as a dark silhouette against
+// the bright twilight sky: either the whole frame is much darker than the other samples (blocked) or the frame is far from uniform (partly blocked). Evidence goes to the
+// learned obstruction map (which the planner already uses once a bin has been bad on two nights), to survey_<night>.json, and as one picture per sample.
+// ---------------------------------------------------------------------------------------------------------------------------------------
+QJsonObject cmdSurvey(const Parsed& p, const Cmd& c)
+{
+    Planner::Options o = plannerOptions(p, c); o.date = Planner::currentNightDate(o.timeZone);
+    o.minQuality = p.v.contains("min-quality") ? o.minQuality : 0.2;
+    const QJsonObject S = Planner::schedule(o);
+    if (!S["ok"].toBool()) return S;
+    const QString night = S["night"].toString();
+    // candidate places: block start, middle and end, and the first two backups of each block
+    struct Pt { double az, alt; QString what; };
+    QList<Pt> cand;
+    for (const QJsonValue& bv : S["plan"].toArray()) {
+        const QJsonObject b = bv.toObject(); const QString name = b["name"].toString(b["key"].toString());
+        const double a0 = b["az_start"].toDouble(), a1 = b["az_end"].toDouble(), h0 = b["alt_start"].toDouble(), h1 = b["alt_end"].toDouble();
+        const double dAz = std::remainder(a1 - a0, 360.0);
+        cand.append({a0, h0, name + " (start)"}); cand.append({std::fmod(a0 + dAz / 2 + 360.0, 360.0), (h0 + h1) / 2, name + " (middle)"}); cand.append({a1, h1, name + " (end)"});
+        int nb = 0; for (const QJsonValue& kv : b["backups"].toArray()) { if (nb++ >= 2) break; const QJsonObject k = kv.toObject(); cand.append({k["az"].toDouble(), k["alt"].toDouble(), k["name"].toString() + " (backup)"}); }
+    }
+    QList<Pt> uniq;
+    for (const Pt& q : cand) {
+        if (q.alt < 22 || q.alt > 85) continue;
+        bool dup = false; for (const Pt& u : uniq) if (std::abs(std::remainder(u.az - q.az, 360.0)) < 8 && std::abs(u.alt - q.alt) < 8) dup = true;
+        if (!dup) uniq.append(q);
+    }
+    if (uniq.isEmpty()) return failure("the plan has nothing to sample");
+    std::mt19937 rng(p.v.contains("seed") ? uint32_t(str(p, "seed").toInt()) : uint32_t(QDate::fromString(night, Qt::ISODate).toJulianDay()));
+    std::shuffle(uniq.begin(), uniq.end(), rng);
+    uniq = uniq.mid(0, std::max(1, int(num(p, c, "samples"))));
+    std::sort(uniq.begin(), uniq.end(), [](const Pt& a, const Pt& b) { return a.az < b.az; });       // sweep in azimuth: least slewing
+    QJsonArray plan; for (const Pt& q : uniq) plan.append(QJsonObject{{"az", std::round(q.az)}, {"alt", std::round(q.alt)}, {"for", q.what}});
+    if (p.v.contains("dry-run")) return {{"ok", true}, {"dry_run", true}, {"night", night}, {"samples", plan}};
+
+    const QDateTime t0 = QDateTime::currentDateTimeUtc();
+    const double sunNow = Astro::altAz(Astro::sunPosition(t0), o.site, t0).alt;
+    if (sunNow > num(p, c, "sun-limit")) return failure(QString("too early: the Sun is at %1 deg (the survey needs it below %2)").arg(sunNow, 0, 'f', 1).arg(num(p, c, "sun-limit"), 0, 'f', 0));
+    { QProcess pg; pg.start("pgrep", {"-x", "CelestronOrigin"}); pg.waitForFinished(3000); if (pg.exitCode() == 0) return failure("the GUI app is running; it holds the telescope"); }
+    if (!call("status", {}, 10000)["connected"].toBool()) return failure("the daemon is not connected to the telescope");
+    if (!call("mount_status", {}, 15000)["mount"].toObject()["IsAligned"].toBool()) return failure("the mount is not aligned; initialize first");
+    if (call("sequence", {{"action", "status"}}, 10000)["status"].toObject()["active"].toBool()) return failure("a sequence is running");
+
+    const QString dir = originDataDir() + "/survey/" + night; QDir().mkpath(dir);
+    QJsonArray results; QList<double> rates;
+    call("manual", {}, 15000);
+    for (const Pt& q : uniq) {
+        if (t0.secsTo(QDateTime::currentDateTimeUtc()) > num(p, c, "max-minutes") * 60) { note({{"survey", "out of time; stopping"}}); break; }
+        const QJsonObject g = gotoAltAz(q.alt, q.az, o.site, 240);
+        QJsonObject r{{"az", std::round(q.az)}, {"alt", std::round(q.alt)}, {"for", q.what}};
+        if (!g["ok"].toBool()) { r["error"] = "goto failed: " + g["error"].toString(); results.append(r); note({{"survey", "goto failed"}, {"at", r}}); continue; }
+        const QDateTime now = QDateTime::currentDateTimeUtc(); const double depr = std::max(0.0, -Astro::altAz(Astro::sunPosition(now), o.site, now).alt);
+        double expo = std::clamp(3.0 * std::pow(10.0, 0.4 * (depr - 12.0)), 1e-5, 6.0); QJsonObject fs;
+        for (int k = 0; k < 4; ++k) {                                       // find an exposure that neither saturates nor starves the frame
+            if (k == 3) sleepMs(16000);                                     // the picture of a frame is written at most every 15 s: make sure the last one is
+            fs = call("frame_stats", {{"exposure", expo}, {"iso", int(num(p, c, "iso"))}, {"binning", 1}}, 90000);
+            const QString v = fs["verdict"].toString();
+            if ((v == "too_bright" || v == "too_short") && std::abs(std::log10(fs["suggested_exposure_s"].toDouble(expo) / expo)) > 0.15) { expo = fs["suggested_exposure_s"].toDouble(expo); continue; }
+            if (k < 2) { sleepMs(16000); fs = call("frame_stats", {{"exposure", expo}, {"iso", int(num(p, c, "iso"))}, {"binning", 1}}, 90000); }
+            break;
+        }
+        if (!fs["ok"].toBool()) { r["error"] = fs["error"]; results.append(r); continue; }
+        const QJsonObject pc = fs["percentiles"].toObject(); const double black = fs["black_level"].toDouble(4985), p50 = std::max(1.0, pc["p50"].toDouble() - black);
+        r["exposure_s"] = expo; r["median_adu"] = fs["median_adu"]; r["sky_rate"] = fs["sky_rate_adu_per_s"]; r["saturated"] = fs["saturated_fraction"];
+        r["spread"] = std::round((pc["p95"].toDouble() - pc["p5"].toDouble()) / p50 * 100) / 100; r["stars"] = fs["stars"]; r["verdict_frame"] = fs["verdict"];
+        rates.append(fs["sky_rate_adu_per_s"].toDouble());
+        const QString pic = dir + QString("/az%1_alt%2.png").arg(int(std::round(q.az)), 3, 10, QChar('0')).arg(int(std::round(q.alt)), 2, 10, QChar('0'));
+        QFile::remove(pic); if (QFile::copy(originDataDir() + "/previews/last_frame.png", pic)) r["picture"] = pic;
+        results.append(r); note({{"survey", "sampled"}, {"at", r}});
+    }
+    // judge: much darker than the other samples, or far from uniform
+    std::sort(rates.begin(), rates.end()); const double ref = rates.size() >= 4 ? rates[rates.size() / 2] : 0;
+    int blocked = 0; QJsonArray out;
+    for (const QJsonValue& rv : results) {
+        QJsonObject r = rv.toObject();
+        if (r.contains("sky_rate")) {
+            const double ratio = ref > 0 ? r["sky_rate"].toDouble() / ref : 1.0; r["ratio_to_median"] = std::round(ratio * 100) / 100;
+            QString why; if (ratio < 0.35) why = "much darker than the other samples"; else if (r["spread"].toDouble() > 0.6) why = "frame far from uniform (silhouette)";
+            r["obstructed"] = !why.isEmpty(); if (!why.isEmpty()) { r["why"] = why; ++blocked; }
+            call("sky_note", {{"az", r["az"]}, {"alt", r["alt"]}, {"obstructed", !why.isEmpty()}}, 10000);
+        }
+        out.append(r);
+    }
+    QJsonObject res{{"ok", true}, {"night", night}, {"sun_alt_start", sunNow}, {"sampled", int(rates.size())}, {"obstructed", blocked}, {"median_sky_rate", ref}, {"samples", out}, {"pictures", dir}};
+    QFile f(originDataDir() + "/survey_" + QString(night).remove('-') + ".json"); if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) f.write(QJsonDocument(res).toJson());
+    return res;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------
 // autorun: the dusk launcher, meant for cron every 5 minutes. Each tick does the next missing step and returns; once 'run' is started for a night
 // it is left alone (it logs, reconnects and e-mails itself), and is relaunched only if its process died before parking, at most 3 times.
 // ---------------------------------------------------------------------------------------------------------------------------------------
@@ -1225,6 +1318,7 @@ int main(int argc, char* argv[])
     else if (cmd->name == "backup") out = cmdBackup(p, *cmd);
     else if (cmd->name == "run") out = cmdRun(p, *cmd);
     else if (cmd->name == "autorun") out = cmdAutorun(p, *cmd);
+    else if (cmd->name == "survey") out = cmdSurvey(p, *cmd);
     else if (cmd->name == "forecast-accuracy") out = forecastAccuracy();
     else if (cmd->name == "sky-report") {
         const double cv = std::max(0.0, std::min(100.0, num(p, *cmd, "cover")));

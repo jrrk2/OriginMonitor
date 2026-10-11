@@ -457,7 +457,7 @@ QJsonObject ControlServer::handle(const QJsonObject& req)
     if (cmd == "commands" || cmd == "help")
         return QJsonObject{{"ok", true}, {"note", "server commands; the OriginHeadless CLI has a fuller catalogue: OriginHeadless commands"},
                            {"commands", QJsonArray{"ping", "connect", "status", "manual", "auto", "set", "snapshot", "mount_status", "goto", "focus_status", "analysis", "events", "target", "stack",
-                                                   "sky_map", "preview", "monitor", "focuser_status", "focuser_move", "focuser_settings", "initialize", "unpark", "solve", "frame_stats", "sequence", "send", "cache", "quit"}}};
+                                                   "sky_map", "preview", "monitor", "focuser_status", "focuser_move", "focuser_settings", "initialize", "unpark", "solve", "frame_stats", "sky_note", "sequence", "send", "cache", "quit"}}};
     int ttl = cacheTtlMs(cmd);
     if (cmd == "target" && req.contains("name")) ttl = 0;                       // that form changes the target
     if (!m_cacheOn || ttl == 0) {
@@ -587,6 +587,11 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
     if (cmd == "unpark") return doUnpark(req);
     if (cmd == "solve") { const QJsonObject r = doSolve(req); recordSolve(r); return r; }
     if (cmd == "frame_stats") return doFrameStats(req);
+    if (cmd == "sky_note") {                          // {"az","alt","obstructed"}: evidence from a twilight survey for the learned obstruction map
+        if (!req.contains("az") || !req.contains("alt")) return fail("need 'az' and 'alt'");
+        m_backend->sky().noteSurvey(req["az"].toDouble(), req["alt"].toDouble(), req["obstructed"].toBool(), QDateTime::currentDateTimeUtc());
+        return QJsonObject{{"ok", true}};
+    }
 
     if (cmd == "focuser_status") {
         if (!m_backend->isConnected()) return fail("not connected");
