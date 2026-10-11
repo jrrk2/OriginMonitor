@@ -64,6 +64,7 @@ private:
     bool m_allowRaw;
     QTcpServer m_server;
     QHash<QTcpSocket*, QByteArray> m_buffers;
+    QSet<QTcpSocket*> m_closing;                    // busy sockets whose client has hung up; deleted when their handler returns
     QSet<QTcpSocket*> m_busy;                       // sockets with a command in progress (handle() runs nested event loops)
     QHash<QString, QJsonObject> m_last;         // "Source/Command" -> last message seen
     QHash<int, QJsonObject> m_responses;        // SequenceID -> response

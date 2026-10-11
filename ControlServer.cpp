@@ -48,7 +48,9 @@ void ControlServer::onNewConnection()
 {
     while (QTcpSocket* s = m_server.nextPendingConnection()) {
         connect(s, &QTcpSocket::readyRead, this, &ControlServer::onReadyRead);
-        connect(s, &QTcpSocket::disconnected, this, [this, s]() { m_buffers.remove(s); m_busy.remove(s); s->deleteLater(); });
+        // A client can hang up while a command runs in a nested event loop inside onReadyRead (this socket's readyRead emission is still on the stack). Deleting the socket then
+        // crashes Qt when the emission unwinds (SIGSEGV in QIODevice::channelReadyRead, seen 2026-10-11), so a busy socket is only marked and deleted when its handler is done.
+        connect(s, &QTcpSocket::disconnected, this, [this, s]() { m_buffers.remove(s); if (m_busy.contains(s)) { m_closing.insert(s); return; } s->deleteLater(); });
     }
 }
 
@@ -73,6 +75,7 @@ void ControlServer::onReadyRead()
         s->write(QJsonDocument(reply).toJson(QJsonDocument::Compact) + "\n");
     }
     m_busy.remove(key);
+    if (m_closing.remove(key) && s) s->deleteLater();       // the client left meanwhile: now it is safe
 }
 
 void ControlServer::shutdown()
