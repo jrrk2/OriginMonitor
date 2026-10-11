@@ -160,7 +160,7 @@ const QList<Cmd>& commands()
         v.append({"sky-report", "planning", "Tell the forecast what the sky looks like now: percent of the sky covered by low/mid cloud (0 clear .. 100 overcast). Counts as an observation at the site (heavier than any airport METAR) for 90 minutes and steers the model blend; its influence fades over about 3 hours.", "", false, true,
                   {O("cover", 'd', "cloud cover now, percent")}});
         v.append({"survey", "action", "Twilight obstruction survey: while waiting for darkness, point at a sample of the places the night's plan will use (places the obstruction map has never seen first, then random) (block start, middle, end, backups), take a very short frame at each, and judge whether the view is blocked (trees, roofs) from the sky level and the spread of the frame. Needs an aligned mount and the Sun below --sun-limit. Records evidence in the learned obstruction map, writes survey_<night>.json and a picture per sample.",
-                  "", true, false, [] { QList<Arg> a = {O("samples", 'i', "places to sample", "8"), O("seed", 'i', "random seed for the order within equally-visited places (default: the night's date)"), O("sun-limit", 'd', "Sun altitude it must be below, deg", "-7"), O("max-minutes", 'd', "stop after this long", "35"),
+                  "", true, false, [] { QList<Arg> a = {O("samples", 'i', "places to sample", "8"), O("target", 's', "instead of random places, sample this target's own track across its window tonight (e.g. M1)"), O("seed", 'i', "random seed for the order within equally-visited places (default: the night's date)"), O("sun-limit", 'd', "Sun altitude it must be below, deg", "-7"), O("max-minutes", 'd', "stop after this long", "35"),
                                                    O("dry-run", 'b', "list the sample points, do nothing"), O("iso", 'i', "ISO", "800")}; return a + plannerArgs(); }()});
         v.append({"flats", "action", "Take flat frames of a uniformly lit sky (an overcast deck, or twilight near the zenith) at the pointing the tube has now and analyse them: vignetting, dust shadows, colour, gradient, noise. Adapts the exposure to put the sky --target-adu above black, writes master_flat_<tag>.fits and two pictures to <data dir>/flats/. Does not move the telescope.",
                   "", true, false, {O("frames", 'i', "frames to take", "16"), O("iso", 'i', "ISO (use the ISO of the lights)", "800"), O("target-adu", 'd', "sky level above black to aim for, ADU", "20000"), O("max-exposure", 'd', "longest exposure, s", "2"), O("tag", 's', "name for the outputs (default: iso and time)"), O("no-keep", 'b', "delete the raw frames after the analysis")}});
@@ -1062,7 +1062,21 @@ QJsonObject cmdSurvey(const Parsed& p, const Cmd& c)
     // candidate places: block start, middle and end, and the first two backups of each block
     struct Pt { double az, alt; QString what; int visits = 0; };
     QList<Pt> cand;
-    for (const QJsonValue& bv : S["plan"].toArray()) {
+    const QString arcTarget = str(p, "target", "");
+    if (!arcTarget.isEmpty()) {
+        // the target's own track: its alt/az at times spread across its window for tonight (dense at the start, where it is low and the house is), nothing random
+        const QJsonObject tg = Planner::findTarget(o, arcTarget);
+        if (!tg["ok"].toBool(true) || !tg.contains("ra_hours")) return failure("target not observable tonight: " + arcTarget);
+        const QDateTime w0 = parseZ(tg["window_start"].toString()), w1 = parseZ(tg["window_end"].toString());
+        const double span = w0.secsTo(w1) / 60.0;
+        for (double m : {0.0, 8.0, 16.0, 30.0, 50.0, 80.0, 120.0, 180.0, 240.0, span}) {
+            if (m > span) continue;
+            const QDateTime t = w0.addSecs(qint64(m * 60)); const Astro::AltAz aa = Astro::altAz({tg["ra_hours"].toDouble(), tg["dec_deg"].toDouble()}, o.site, t);
+            cand.append({aa.az, aa.alt, QString("%1 at %2 UTC").arg(tg["key"].toString(), t.toString("HH:mm"))});
+            if (m == 0.0) { cand.append({aa.az, aa.alt - 5, "edge check: 5 deg below the track's start"}); cand.append({aa.az, aa.alt + 4, "edge check: 4 deg above the track's start"}); }
+        }
+    }
+    else for (const QJsonValue& bv : S["plan"].toArray()) {
         const QJsonObject b = bv.toObject(); const QString name = b["name"].toString(b["key"].toString());
         const double a0 = b["az_start"].toDouble(), a1 = b["az_end"].toDouble(), h0 = b["alt_start"].toDouble(), h1 = b["alt_end"].toDouble();
         const double dAz = std::remainder(a1 - a0, 360.0);
@@ -1072,7 +1086,7 @@ QJsonObject cmdSurvey(const Parsed& p, const Cmd& c)
     QList<Pt> uniq;
     for (const Pt& q : cand) {
         if (q.alt < 22 || q.alt > 85) continue;
-        bool dup = false; for (const Pt& u : uniq) if (std::abs(std::remainder(u.az - q.az, 360.0)) < 8 && std::abs(u.alt - q.alt) < 8) dup = true;
+        bool dup = false; for (const Pt& u : uniq) if (std::abs(std::remainder(u.az - q.az, 360.0)) < (arcTarget.isEmpty() ? 8 : 2.5) && std::abs(u.alt - q.alt) < (arcTarget.isEmpty() ? 8 : 2.5)) dup = true;
         if (!dup) uniq.append(q);
     }
     if (uniq.isEmpty()) return failure("the plan has nothing to sample");
@@ -1082,11 +1096,13 @@ QJsonObject cmdSurvey(const Parsed& p, const Cmd& c)
         const QJsonObject b = bins[QString("%1_%2").arg(int(std::floor(q.az / 10.0)) * 10).arg(int(std::floor(q.alt / 5.0)) * 5)].toObject();
         q.visits = b["good"].toInt() + b["bad"].toInt() + b["cloud"].toInt() + b["unk"].toInt();
     }
+    if (arcTarget.isEmpty()) {
     std::mt19937 rng(p.v.contains("seed") ? uint32_t(str(p, "seed").toInt()) : uint32_t(QDate::fromString(night, Qt::ISODate).toJulianDay()));
     std::shuffle(uniq.begin(), uniq.end(), rng);
     std::stable_sort(uniq.begin(), uniq.end(), [](const Pt& a, const Pt& b) { return a.visits < b.visits; });
     uniq = uniq.mid(0, std::max(1, int(num(p, c, "samples"))));
     std::sort(uniq.begin(), uniq.end(), [](const Pt& a, const Pt& b) { return a.az < b.az; });       // sweep in azimuth: least slewing
+    }
     QJsonArray plan; for (const Pt& q : uniq) plan.append(QJsonObject{{"az", std::round(q.az)}, {"alt", std::round(q.alt)}, {"for", q.what}, {"bin_visits", q.visits}});
     if (p.v.contains("dry-run")) return {{"ok", true}, {"dry_run", true}, {"night", night}, {"samples", plan}};
 
