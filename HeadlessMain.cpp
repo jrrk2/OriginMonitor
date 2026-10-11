@@ -146,6 +146,8 @@ const QList<Cmd>& commands()
                        QList<Arg> pa = plannerArgs();
                        for (Arg& x : pa) if (x.name == "min-quality") x.help += " (run default 0.2: the forecast is a soft prior, the sky monitor decides)";
                        return a + pa; }()});
+        v.append({"slew-altaz", "action", "Move the mount in altitude and/or azimuth with the slow-slew rates the GUI arrows use, closed loop on the mount's own Alt/Azm, then stop. Works before the mount is aligned (e.g. to find clear sky on the other side of the meridian before 'initialize'). The rate sign is checked during the first seconds and flipped if the axis moves the wrong way.", "", true, false,
+                  {O("az", 'd', "target azimuth, deg (0=N, 90=E, 180=S, 270=W)"), O("alt", 'd', "target altitude, deg"), O("tolerance", 'd', "stop within this many degrees", "3"), O("timeout", 'i', "seconds per axis", "120")}});
         v.append({"autorun", "planning", "Dusk launcher for cron (every 5 minutes): once per night, if the telescope is out and reachable, starts the daemon, connects, initializes the mount if needed and starts 'run --unattended --mail' in the background. Does nothing (quietly) when the telescope does not answer, when nothing is observable, when rain is forecast, or when ~/.config/origin/autorun.off exists. Slews the telescope: only schedule it if that is wanted.", "", true, false,
                   [] { QList<Arg> a = {O("telescope", 's', "telescope host", "192.168.1.195"), O("start-after", 's', "\"dusk\" (Sun below -12 deg at the site) or a local HH:MM; never act before this", "dusk"), O("stop-before-dawn", 'd', "minutes before the end of darkness after which no run is started", "60"),
                                        O("dry-run", 'b', "say what would be done, do nothing"), O("ignore-time", 'b', "skip the evening/dawn time gates (testing)"), O("no-mail", 'b', "send no e-mails (testing)"), O("iso", 'i', "ISO for the run", "800"), O("max-exposure", 'd', "longest exposure for the run, s", "20")};
@@ -823,6 +825,59 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------
+// slew-altaz: closed-loop move of one axis with the GUI's rate slews. The mount reports Alt/Azm in radians; the rate unit is the GUI's (-9..9) and its
+// sign convention is not documented, so the first seconds of motion are used to find the sign. Always ends by sending 0/0.
+// ---------------------------------------------------------------------------------------------------------------------------------------
+bool readAltAz(double* altDeg, double* azDeg)
+{
+    const QJsonObject m = call("mount_status", {{"fresh", true}}, 15000);
+    if (!m["ok"].toBool()) return false;
+    *altDeg = m["mount"].toObject()["Alt"].toDouble() * 180.0 / M_PI; *azDeg = m["mount"].toObject()["Azm"].toDouble() * 180.0 / M_PI;
+    return true;
+}
+double azDiff(double target, double cur) { double d = std::fmod(target - cur, 360.0); if (d > 180) d -= 360; if (d < -180) d += 360; return d; }
+
+QJsonObject moveAxis(bool isAlt, double target, double tol, int timeoutS)
+{
+    double alt, az;
+    if (!readAltAz(&alt, &az)) return failure("cannot read the mount's Alt/Azm");
+    auto err = [&](double a, double z) { return isAlt ? target - a : azDiff(target, z); };
+    const double start = err(alt, az);
+    if (std::abs(start) <= tol) return {{"ok", true}, {"moved", false}};
+    int dir = start > 0 ? 1 : -1; bool flipped = false, checked = false;
+    QElapsedTimer t; t.start(); QJsonObject last;
+    auto rates = [&](int r) { return call("slew_rate", {{"alt_rate", isAlt ? r : 0}, {"azm_rate", isAlt ? 0 : r}}, 10000); };
+    QJsonObject r = rates(dir * 5);
+    if (!r["ok"].toBool()) return r;
+    while (t.elapsed() < timeoutS * 1000) {
+        sleepMs(1000);
+        if (!readAltAz(&alt, &az)) continue;
+        const double now = err(alt, az);
+        if (std::abs(now) <= tol || (now * start < 0 && std::abs(now) < 20)) { break; }       // arrived, or passed it
+        if (!checked && t.elapsed() > 4000) {
+            checked = true;
+            if (std::abs(now) > std::abs(start) + 0.5) { dir = -dir; flipped = true; rates(dir * 5); note({{"slew_altaz", "wrong direction; reversed"}}); }
+            else if (std::abs(start) - std::abs(now) < 0.2) { rates(0); return {{"ok", false}, {"error", "the axis did not move at rate 5"}, {"alt_deg", alt}, {"az_deg", az}}; }
+        }
+        const int want = std::abs(now) > 25 ? 9 : std::abs(now) > 8 ? 5 : 2;                              // slow down on approach
+        if (checked) rates(dir * want);
+    }
+    rates(0);
+    readAltAz(&alt, &az);
+    return {{"ok", std::abs(err(alt, az)) <= tol * 2}, {"axis", isAlt ? "alt" : "az"}, {"target_deg", target}, {"alt_deg", alt}, {"az_deg", az}, {"error_deg", err(alt, az)}, {"reversed", flipped}, {"seconds", int(t.elapsed() / 1000)}};
+}
+
+QJsonObject cmdSlewAltAz(const Parsed& p, const Cmd& c)
+{
+    if (!p.v.contains("az") && !p.v.contains("alt")) return failure("give --az and/or --alt");
+    QJsonObject out{{"ok", true}};
+    if (p.v.contains("alt")) { out["alt"] = moveAxis(true, num(p, c, "alt"), num(p, c, "tolerance"), int(num(p, c, "timeout"))); if (!out["alt"].toObject()["ok"].toBool()) out["ok"] = false; }
+    if (out["ok"].toBool() && p.v.contains("az")) { out["az"] = moveAxis(false, num(p, c, "az"), num(p, c, "tolerance"), int(num(p, c, "timeout"))); if (!out["az"].toObject()["ok"].toBool()) out["ok"] = false; }
+    double a, z; if (readAltAz(&a, &z)) { out["alt_deg"] = a; out["az_deg"] = z; }
+    return out;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------
 // autorun: the dusk launcher, meant for cron every 5 minutes. Each tick does the next missing step and returns; once 'run' is started for a night
 // it is left alone (it logs, reconnects and e-mails itself), and is relaunched only if its process died before parking, at most 3 times.
 // ---------------------------------------------------------------------------------------------------------------------------------------
@@ -887,8 +942,19 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
         if (st["init_attempts"].toInt() >= 3) return idle("mount will not align (3 attempts); needs a look");
         st["init_attempts"] = st["init_attempts"].toInt() + 1; save();
         note({{"autorun", "initializing the mount"}});
-        const QJsonObject r = call("initialize", {{"lat_deg", o.site.latDeg}, {"lon_deg", o.site.lonDeg}, {"timezone", o.timeZone}, {"wait", true}, {"timeout", 300}}, 360000);
-        if (!r["ok"].toBool() || r["outcome"].toString().toLower() == "failed") return idle("initialize failed: " + r["error"].toString() + r["summary"].toString());
+        QJsonObject r = call("initialize", {{"lat_deg", o.site.latDeg}, {"lon_deg", o.site.lonDeg}, {"timezone", o.timeZone}, {"wait", true}, {"timeout", 300}}, 360000);
+        if (!r["ok"].toBool() || r["outcome"].toString().toLower() == "failed") {
+            // patchy cloud makes the star alignment fail: look for sky on the other side of the meridian and try again on the next tick
+            double alt = 0, az = 0;
+            if (readAltAz(&alt, &az)) {
+                const double newAz = std::fmod(360.0 - az + 360.0, 360.0), newAlt = std::clamp(alt, 40.0, 65.0);
+                note({{"autorun", "initialize failed; moving to the other side of the meridian"}, {"from_az", az}, {"to_az", newAz}, {"to_alt", newAlt}, {"why", r["summary"]}});
+                const QJsonObject m1 = moveAxis(true, newAlt, 3, 90), m2 = moveAxis(false, newAz, 3, 150);
+                st["moves"] = st["moves"].toInt() + 1; st["last_init_error"] = r["summary"]; save();
+                return idle(QString("initialize failed (%1); moved to az %2 alt %3 (%4) to find clearer sky, will retry").arg(r["summary"].toString()).arg(newAz, 0, 'f', 0).arg(newAlt, 0, 'f', 0).arg(m1["ok"].toBool() && m2["ok"].toBool() ? "ok" : "move incomplete"));
+            }
+            return idle("initialize failed: " + r["error"].toString() + r["summary"].toString());
+        }
     }
 
     // launch the supervisor, detached, logging to its own file
@@ -1020,6 +1086,7 @@ int main(int argc, char* argv[])
     else if (cmd->name == "backup") out = cmdBackup(p, *cmd);
     else if (cmd->name == "run") out = cmdRun(p, *cmd);
     else if (cmd->name == "autorun") out = cmdAutorun(p, *cmd);
+    else if (cmd->name == "slew-altaz") out = cmdSlewAltAz(p, *cmd);
     else if (cmd->name == "now") out = cmdNow(p, *cmd);
     else if (cmd->name == "weather") out = cmdWeather(p, *cmd);
     else if (cmd->name == "go") out = cmdGo(p, *cmd);
