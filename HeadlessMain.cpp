@@ -133,7 +133,7 @@ const QList<Cmd>& commands()
         v.append({"now", "planning", "Time, darkness, current target, minutes each candidate stays observable, and the planner's suggestion. Read-only.", "", false, false, plannerArgs()});
         {
             QList<Arg> a = {P("name", 's', "target key or name, e.g. M31"), O("exposure", 'd', "seconds to set after the slew", "10"), O("iso", 'i', "ISO to set after the slew", "800"),
-                            O("not-before", 's', "local HH:MM; refuse to slew earlier (the telescope is put out at 20:00)", "20:00")};
+                            O("not-before", 's', "\"dusk\" (Sun below -12 deg at the site) or a local HH:MM; refuse to slew earlier", "dusk")};
             v.append({"go", "planning", "Slew to a target that is observable now: set site and target, goto, wait for centring/autofocus, re-send exposure and ISO.", "", true, false, a + plannerArgs()});
         }
         v.append({"run", "planning", "UNATTENDED night supervisor: follows the plan, goes to a backup target on obstruction or prolonged cloud, refocuses on drift, parks on a rain forecast or at dawn. Needs --unattended (it slews); --dry-run only prints the plan.", "", true, false,
@@ -141,13 +141,13 @@ const QList<Cmd>& commands()
                                        O("iso", 'i', "ISO for the frames (falls back once to 200 if the first frames are all rejected on a clear forecast)", "800"),
                                        O("max-exposure", 'd', "longest exposure, s (further limited by field rotation for each block)", "20"),
                                        O("cloud-patience", 'd', "minutes of cloud before going to a backup target", "10"), O("give-up", 'd', "minutes of cloud on one block before moving to the next block", "60"),
-                                       O("not-before", 's', "local HH:MM; no slewing before this in the evening", "20:00"), O("connect", 's', "telescope host to reconnect to (default: the server's)"),
+                                       O("not-before", 's', "\"dusk\" (Sun below -12 deg at the site) or a local HH:MM; no slewing before this", "dusk"), O("connect", 's', "telescope host to reconnect to (default: the server's)"),
                                        O("mail", 'b', "e-mail a summary of the night when the run ends")};
                        QList<Arg> pa = plannerArgs();
                        for (Arg& x : pa) if (x.name == "min-quality") x.help += " (run default 0.2: the forecast is a soft prior, the sky monitor decides)";
                        return a + pa; }()});
         v.append({"autorun", "planning", "Dusk launcher for cron (every 5 minutes): once per night, if the telescope is out and reachable, starts the daemon, connects, initializes the mount if needed and starts 'run --unattended --mail' in the background. Does nothing (quietly) when the telescope does not answer, when nothing is observable, when rain is forecast, or when ~/.config/origin/autorun.off exists. Slews the telescope: only schedule it if that is wanted.", "", true, false,
-                  [] { QList<Arg> a = {O("telescope", 's', "telescope host", "192.168.1.195"), O("start-after", 's', "local HH:MM; never act before this in the evening", "20:00"), O("stop-before-dawn", 'd', "minutes before the end of darkness after which no run is started", "60"),
+                  [] { QList<Arg> a = {O("telescope", 's', "telescope host", "192.168.1.195"), O("start-after", 's', "\"dusk\" (Sun below -12 deg at the site) or a local HH:MM; never act before this", "dusk"), O("stop-before-dawn", 'd', "minutes before the end of darkness after which no run is started", "60"),
                                        O("dry-run", 'b', "say what would be done, do nothing"), O("ignore-time", 'b', "skip the evening/dawn time gates (testing)"), O("no-mail", 'b', "send no e-mails (testing)"), O("iso", 'i', "ISO for the run", "800"), O("max-exposure", 'd', "longest exposure for the run, s", "20")};
                        return a + plannerArgs(); }()});
         v.append({"park", "planning", "Save the stack and slew to Polaris (safe park).", "", true, false, {}});
@@ -534,12 +534,22 @@ bool waitIdle(int timeoutS)
     return false;
 }
 
+// The "not before" guard for slewing. "dusk" (the default) means the Sun is below --slew-sun-alt (-12 deg, nautical twilight) at the site, which follows the
+// seasons; HH:MM keeps a fixed local clock time for the evening. Returns the reason when it is too early, else an empty string.
+QString tooEarlyToSlew(const QString& spec, const Astro::Site& site)
+{
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    if (spec.contains(':')) {
+        const QStringList hm = spec.split(':'); const QDateTime loc = QDateTime::currentDateTime(), nb(loc.date(), QTime(hm.value(0).toInt(), hm.value(1).toInt()));
+        return (loc < nb && loc.time().hour() >= 6) ? QString("before %1 local").arg(spec) : QString();
+    }
+    const double alt = Astro::altAz(Astro::sunPosition(now), site, now).alt;
+    return alt > -12.0 ? QString("the Sun is at %1 deg (slewing waits for -12 deg)").arg(alt, 0, 'f', 1) : QString();
+}
+
 QJsonObject cmdGo(const Parsed& p, const Cmd& c)
 {
-    const QStringList hm = str(p, "not-before", "20:00").split(':');
-    const QDateTime loc = QDateTime::currentDateTime();
-    const QDateTime start(loc.date(), QTime(hm.value(0).toInt(), hm.value(1).toInt()));
-    if (loc < start && loc.time().hour() >= 6) return failure(QString("too early: not before %1 local (%2 min to go); refusing to slew").arg(str(p, "not-before", "20:00")).arg(loc.secsTo(start) / 60));
+    { const QString early = tooEarlyToSlew(str(p, "not-before", "dusk"), Astro::Site{num(p, c, "lat"), num(p, c, "lon")}); if (!early.isEmpty()) return failure("too early: " + early + "; refusing to slew"); }
     Planner::Options o = plannerOptions(p, c); o.date = Planner::currentNightDate(o.timeZone);
     o.weather.clear();                              // the forecast guides planning; at the telescope the sky monitor decides
     const QJsonObject t = Planner::findTarget(o, str(p, "name"));
@@ -789,7 +799,6 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
     g_run.logPath = originDataDir() + "/run_" + S["night"].toString().remove('-') + ".jsonl";
     runLog("run_start", {{"night", S["night"]}, {"blocks", S["plan"].toArray().size()}, {"iso", g_run.iso}, {"max_exposure", g_run.maxExposure}});
 
-    const QStringList hm = str(p, "not-before", "20:00").split(':');
     RunResult res = RunResult::Done;
     for (const QJsonValue& bv : S["plan"].toArray()) {
         const QJsonObject b = bv.toObject();
@@ -797,9 +806,8 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
         QDateTime now = QDateTime::currentDateTimeUtc();
         if (now >= end) continue;
         while (now < start && now < g_run.darkEnd) { sleepMs(30000); now = QDateTime::currentDateTimeUtc(); }
-        const QDateTime loc = QDateTime::currentDateTime();
-        const QDateTime nb(loc.date(), QTime(hm.value(0).toInt(), hm.value(1).toInt()));
-        if (loc < nb && loc.time().hour() >= 6) { runLog("too_early", {{"not_before", str(p, "not-before", "20:00")}}); while (QDateTime::currentDateTime() < nb) sleepMs(30000); }
+        { const QString early = tooEarlyToSlew(str(p, "not-before", "dusk"), g_run.o.site);
+          if (!early.isEmpty()) { runLog("too_early", {{"why", early}}); while (!tooEarlyToSlew(str(p, "not-before", "dusk"), g_run.o.site).isEmpty() && QDateTime::currentDateTimeUtc() < g_run.darkEnd) sleepMs(30000); now = QDateTime::currentDateTimeUtc(); } }
         if (now >= g_run.darkEnd) break;
         g_run.tried = QStringList{b["key"].toString()};
         res = runTarget(b, end, 0);
@@ -836,10 +844,8 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
     if (!S["ok"].toBool()) return S;
     const QString night = S["night"].toString();
     const QDateTime now = QDateTime::currentDateTimeUtc(), darkStart = parseZ(S["dark_start"].toString()), darkEnd = parseZ(S["dark_end"].toString());
-    const QStringList hm = str(p, "start-after", "20:00").split(':');
-    const QDateTime loc = QDateTime::currentDateTime(), after(loc.date(), QTime(hm.value(0).toInt(), hm.value(1).toInt()));
     auto idle = [&](const QString& why) { return QJsonObject{{"ok", true}, {"acted", false}, {"night", night}, {"note", why}}; };
-    if (!p.v.contains("ignore-time") && (now < darkStart.addSecs(-1800) || (loc < after && loc.time().hour() >= 6))) return idle("too early for tonight");
+    if (!p.v.contains("ignore-time") && !tooEarlyToSlew(str(p, "start-after", "dusk"), o.site).isEmpty()) return idle("too early for tonight: " + tooEarlyToSlew(str(p, "start-after", "dusk"), o.site));
     if (!p.v.contains("ignore-time") && now >= darkEnd.addSecs(-int(num(p, c, "stop-before-dawn")) * 60)) return idle("too late to start tonight");
 
     const QString statePath = originDataDir() + "/autorun_state.json";
@@ -887,7 +893,7 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
 
     // launch the supervisor, detached, logging to its own file
     QProcess run; run.setProgram(QCoreApplication::applicationFilePath());
-    run.setArguments({"run", "--unattended", "--iso", str(p, "iso", "800"), "--max-exposure", str(p, "max-exposure", "20"), "--not-before", str(p, "start-after", "20:00"), "--port", QString::number(g_port)});
+    run.setArguments({"run", "--unattended", "--iso", str(p, "iso", "800"), "--max-exposure", str(p, "max-exposure", "20"), "--not-before", str(p, "start-after", "dusk"), "--port", QString::number(g_port)});
     if (!p.v.contains("no-mail")) run.setArguments(run.arguments() << "--mail");
     run.setStandardOutputFile(originDataDir() + "/autorun_" + QString(night).remove('-') + ".log", QIODevice::Append);
     run.setStandardErrorFile(originDataDir() + "/autorun_" + QString(night).remove('-') + ".log", QIODevice::Append);
