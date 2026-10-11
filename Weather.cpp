@@ -72,7 +72,8 @@ static bool parse(const QJsonObject& d, const QJsonObject& multi, QVector<Hour>*
         } else x.qMin = x.qMax = x.quality;
         for (const QString& m : x.models.keys()) {
             const QJsonArray al = multi["hourly"].toObject()["cloud_cover_low_" + m].toArray(), am = multi["hourly"].toObject()["cloud_cover_mid_" + m].toArray(), ah = multi["hourly"].toObject()["cloud_cover_high_" + m].toArray();
-            x.layers[m] = {al[i].toDouble(), am[i].toDouble(), ah[i].toDouble()};
+            const QJsonArray ac = multi["hourly"].toObject()["cloud_cover_" + m].toArray();
+            x.layers[m] = {al[i].toDouble(), am[i].toDouble(), ah[i].toDouble(), i < ac.size() && !ac[i].isNull() ? ac[i].toDouble() : al[i].toDouble()};
         }
         if (x.utc.isValid()) out->append(x);
     }
@@ -285,14 +286,22 @@ QJsonObject metarNowcast(double lat, double lon, const QString& cacheDir, int ma
             const double lead = std::max(0.0, (h.utc.addSecs(1800).toSecsSinceEpoch() - newest.toSecsSinceEpoch()) / 3600.0);
             const double fade = std::exp(-lead / 3.0);
             if (fade < 0.05 || h.layers.isEmpty()) continue;
-            double sw2 = 0, q = 0, lo = 0, mi = 0, hi = 0;
+            double sw2 = 0, q = 0, lo = 0, mi = 0, hi = 0, tc = 0;
             for (auto it = h.layers.constBegin(); it != h.layers.constEnd(); ++it) {
                 const double w = fade * g.value(it.key(), 1.0) + (1 - fade);
                 Hour y = h; y.low = it.value()[0]; y.mid = it.value()[1]; y.high = it.value()[2];
-                sw2 += w; q += w * quality(y); lo += w * y.low; mi += w * y.mid; hi += w * y.high;
+                sw2 += w; q += w * quality(y); lo += w * y.low; mi += w * y.mid; hi += w * y.high; tc += w * it.value()[3];
             }
             if (sw2 <= 0) continue;
-            h.qModel = h.quality; h.quality = q / sw2; h.low = lo / sw2; h.mid = mi / sw2; h.high = hi / sw2; h.obsWeight = fade;
+            h.qModel = h.quality;
+            // persistence: the models' re-weighted low+mid cover is also pulled towards what is observed now (80% at lead 0, fading over ~3 h), since a cloud field
+            // seen overhead now is a better guide to the next hour or two than any model; the layers are scaled and the quality follows
+            Hour a = h; a.low = lo / sw2; a.mid = mi / sw2; a.high = hi / sw2;
+            const double mc = 100 * (1 - (1 - a.low / 100) * (1 - a.mid / 100)), mc2 = mc + 0.8 * fade * (obs - mc), k = mc > 0.5 ? std::max(0.0, mc2) / mc : 1.0;
+            Hour b = a; b.low = std::min(100.0, a.low * k); b.mid = std::min(100.0, a.mid * k);
+            const double qa = quality(a), qb = quality(b);
+            h.quality = std::max(0.0, std::min(1.0, qa > 0.01 ? (q / sw2) * qb / qa : qb));
+            h.low = b.low; h.mid = b.mid; h.high = b.high; h.cloud = std::max(0.0, tc / sw2 + (mc2 - mc)); h.obsWeight = fade;
         }
     }
     return {{"ok", true}, {"cover_pct", std::round(obs)}, {"obs_time", newest.toString(Qt::ISODate)}, {"stations", st}};

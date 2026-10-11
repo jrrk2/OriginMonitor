@@ -22,7 +22,7 @@ struct Hour {
     double quality = 1;                           // 0 (hopeless) .. 1 (clear and dry), see quality(); with several models the mean of their qualities
     QMap<QString, double> models;                 // quality according to each forecast model (empty when only one was available)
     double qMin = 1, qMax = 1;                    // range of that spread
-    QMap<QString, std::array<double, 3>> layers;  // each model's low/mid/high cloud, %
+    QMap<QString, std::array<double, 4>> layers;  // each model's low/mid/high/total cloud, %
     double qModel = -1;                           // quality before the METAR nowcast was applied (-1: not adjusted)
     double obsWeight = 0;                         // 0..1 how much the nearby airport observations shaped this hour (fades over a few hours)
 };
