@@ -154,6 +154,6 @@ The exposure lesson came next: Jupiter at ISO 800 saturates in a millisecond. Th
 | Targets imaged | M31, Veil, Flaming Star, Monkey Head | Double Cluster, M1, M13 |
 | Run control | in-app sequencer, supervised live | unattended supervisor; 17 run starts logged, most to deploy fixes |
 
-The software is at github.com/jrrk2/OriginMonitor. The README has a longer account of both nights and a full list of the errors made, mine and the assistant's. Observations and code are free to use. If you have an Origin and a spare network port, I would be glad to compare notes at a meeting.
+The software is at github.com/jrrk2/OriginMonitor. The README has a longer account of both nights and a full list of the errors made, mine and the assistant's. The code is released under the GNU General Public Licence (version 3 or later), the same licence as Gene Hunter's Origin Live View, from which some of the telescope-control functions were taken. If you have an Origin and a spare network port, I would be glad to compare notes at a meeting.
 
 *Equipment: Celestron Origin (152 mm f/2.2 RASA, 3056 × 2048 colour sensor), Cambridge, UK. Frames are raw FITS; stacks are live-stacked by the software with no further processing. Ephemerides: JPL DE440 through NAIF CSPICE. Weather: Open-Meteo forecast models and aviationweather.gov airport observations.*
