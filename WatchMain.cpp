@@ -20,7 +20,11 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QKeyEvent>
 #include <QLabel>
+#include <QMouseEvent>
+#include <QWheelEvent>
+#include <algorithm>
 #include <QRegularExpression>
 #include <QPixmap>
 #include <QListWidget>
@@ -117,22 +121,70 @@ private:
     int m_port; QTcpSocket m_sock; QByteArray m_buf; QQueue<Item> m_queue; Item m_inflight; bool m_up = false, m_busy = false; QTimer m_timeout;
 };
 
-// Image scaled to fit the widget, keeping the aspect ratio.
+// Image shown scaled to fit the widget (aspect kept). Mouse wheel zooms about the cursor, left-drag pans, double-click or "0" returns to fit.
 class ImageView : public QWidget {
 public:
-    explicit ImageView(QWidget* parent = nullptr) : QWidget(parent) { setMinimumSize(320, 240); setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding); }
-    void setImage(const QImage& im, const QString& caption) { m_img = im; m_caption = caption; update(); }
+    explicit ImageView(QWidget* parent = nullptr) : QWidget(parent)
+    {
+        setMinimumSize(320, 240); setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding); setFocusPolicy(Qt::ClickFocus);
+        setToolTip("wheel: zoom   drag: pan   double-click: fit");
+    }
+    void setImage(const QImage& im, const QString& caption)
+    {
+        if (im.size() != m_img.size()) resetView();                          // a refresh of the same size keeps the view
+        m_img = im; m_caption = caption; update();
+    }
+    void resetView() { m_zoom = 1.0; m_cx = m_cy = 0.5; update(); }
 protected:
     void paintEvent(QPaintEvent*) override
     {
         QPainter p(this); p.fillRect(rect(), palette().window());
         if (m_img.isNull()) { p.setPen(palette().text().color()); p.drawText(rect(), Qt::AlignCenter, m_caption.isEmpty() ? "no image" : m_caption); return; }
-        const QImage s = m_img.scaled(size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
-        p.drawImage((width() - s.width()) / 2, (height() - s.height()) / 2, s);
-        p.setPen(Qt::white); p.drawText(8, height() - 8, m_caption);
+        const double s = scale();
+        const QPointF o = origin(s);                                         // widget position of image pixel (0,0)
+        const QRectF src = QRectF(QPointF(-o.x() / s, -o.y() / s), QSizeF(width() / s, height() / s)).intersected(QRectF(QPointF(0, 0), QSizeF(m_img.size())));
+        if (src.isEmpty()) return;
+        const QRectF dst(o.x() + src.x() * s, o.y() + src.y() * s, src.width() * s, src.height() * s);
+        p.setRenderHint(QPainter::SmoothPixmapTransform, s < 1.5);          // show real pixels once magnified
+        p.drawImage(dst, m_img, src);
+        p.setPen(Qt::white); p.drawText(8, height() - 8, QString("%1   %2%").arg(m_caption).arg(int(std::lround(s * 100))));
+    }
+    void wheelEvent(QWheelEvent* e) override
+    {
+        if (m_img.isNull()) return;
+        const double s0 = scale();
+        const QPointF pos = e->position(), ip = (pos - origin(s0)) / s0;     // image point under the cursor
+        m_zoom = std::clamp(m_zoom * std::pow(1.0015, e->angleDelta().y()), 1.0, 40.0);
+        const double s = scale();
+        m_cx = ip.x() / m_img.width() + (width() / 2.0 - pos.x()) / (s * m_img.width());   // keep that point under the cursor
+        m_cy = ip.y() / m_img.height() + (height() / 2.0 - pos.y()) / (s * m_img.height());
+        clampCentre(); update(); e->accept();
+    }
+    void mousePressEvent(QMouseEvent* e) override { if (e->button() == Qt::LeftButton) { m_drag = e->position(); setCursor(Qt::ClosedHandCursor); } }
+    void mouseMoveEvent(QMouseEvent* e) override
+    {
+        if (!(e->buttons() & Qt::LeftButton) || m_img.isNull()) return;
+        const double s = scale(); const QPointF d = e->position() - m_drag; m_drag = e->position();
+        m_cx -= d.x() / (s * m_img.width()); m_cy -= d.y() / (s * m_img.height()); clampCentre(); update();
+    }
+    void mouseReleaseEvent(QMouseEvent*) override { unsetCursor(); }
+    void mouseDoubleClickEvent(QMouseEvent*) override { resetView(); }
+    void keyPressEvent(QKeyEvent* e) override
+    {
+        if (e->key() == Qt::Key_0) resetView();
+        else if (e->key() == Qt::Key_Plus || e->key() == Qt::Key_Equal) { m_zoom = std::min(40.0, m_zoom * 1.5); clampCentre(); update(); }
+        else if (e->key() == Qt::Key_Minus) { m_zoom = std::max(1.0, m_zoom / 1.5); clampCentre(); update(); }
+        else QWidget::keyPressEvent(e);
     }
 private:
-    QImage m_img; QString m_caption;
+    double scale() const { return std::min(double(width()) / m_img.width(), double(height()) / m_img.height()) * m_zoom; }
+    QPointF origin(double s) const { return QPointF(width() / 2.0 - m_cx * m_img.width() * s, height() / 2.0 - m_cy * m_img.height() * s); }
+    void clampCentre()                                                       // never pan past the image edge; an image smaller than the widget stays centred
+    {
+        const double s = scale(), hx = std::max(0.0, 0.5 - width() / (2 * s * m_img.width())), hy = std::max(0.0, 0.5 - height() / (2 * s * m_img.height()));
+        m_cx = std::clamp(m_cx, 0.5 - hx, 0.5 + hx); m_cy = std::clamp(m_cy, 0.5 - hy, 0.5 + hy);
+    }
+    QImage m_img; QString m_caption; double m_zoom = 1.0, m_cx = 0.5, m_cy = 0.5; QPointF m_drag;
 };
 
 QLabel* value() { auto* l = new QLabel("-"); l->setTextInteractionFlags(Qt::TextSelectableByMouse); return l; }
