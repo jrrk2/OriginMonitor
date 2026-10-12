@@ -54,6 +54,11 @@ void applyNovelty(QList<Target>& targets)
     if (g_stacksDir.isEmpty()) { for (Target& t : targets) { const QString id = catalogId(t.key.isEmpty() ? t.name : t.key); if (g_boost.contains(id)) t.prio += g_boost[id]; } return; }
     for (const QFileInfo& d : QDir(g_stacksDir).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
         const QString id = catalogId(d.fileName()); if (id.isEmpty()) continue;
+        // only a real stack counts as "imaged": at least 10 minutes of exposure (state.bin: magic, width, height, frames as 32-bit ints, then the total exposure as a double).
+        // A directory with a few frames (a pointing test, a probe on the way past) must not demote a target.
+        QFile sf(d.absoluteFilePath() + "/state.bin"); double exposureS = 0;
+        if (sf.open(QIODevice::ReadOnly)) { const QByteArray h = sf.read(24); if (h.size() == 24) memcpy(&exposureS, h.constData() + 16, 8); }
+        if (!(exposureS >= 600.0)) continue;
         if (!last.contains(id) || d.lastModified() > last[id]) last[id] = d.lastModified();
     }
     const QDateTime now = QDateTime::currentDateTime();
