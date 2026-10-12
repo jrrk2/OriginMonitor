@@ -202,12 +202,12 @@ static QJsonObject allSkyCover(const QString& dir, double* cover, QDateTime* whe
                 QFile f(img); if (f.open(QIODevice::WriteOnly)) { f.write(body); f.close(); }
                 m = QJsonObject{{"fetched_ms", double(nowMs)}, {"modified", lm.isValid() ? lm.toString(Qt::ISODate) : QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}};
                 QFile mf(meta); if (mf.open(QIODevice::WriteOnly)) mf.write(QJsonDocument(m).toJson(QJsonDocument::Compact));
-                // archive a frame every 10 minutes (3 days kept) so night frames can be used to calibrate a night method
+                // archive a frame every 10 minutes (about 80 KB each, kept for 400 days) so tools/sky_history.py can line them up with the telescope's frames, the forecast and the labels
                 QDir ad(dir + "/allsky"); ad.mkpath(".");
                 const QString stamp = QDateTime::currentDateTimeUtc().toString("yyyyMMdd_HHmm");
                 const QStringList have = ad.entryList({"*.jpg"}, QDir::Files, QDir::Name);
                 if (have.isEmpty() || QDateTime::fromString(have.last().left(13), "yyyyMMdd_HHmm").secsTo(QDateTime::currentDateTimeUtc()) >= 600) QFile::copy(img, ad.filePath(stamp + ".jpg"));
-                for (const QString& n : have) if (QDateTime::fromString(n.left(13), "yyyyMMdd_HHmm").secsTo(QDateTime::currentDateTimeUtc()) > 3 * 86400) ad.remove(n);
+                for (const QString& n : have) if (QDateTime::fromString(n.left(13), "yyyyMMdd_HHmm").secsTo(QDateTime::currentDateTimeUtc()) > 400 * 86400LL) ad.remove(n);
             }
         } else rep->abort();
         rep->deleteLater();
@@ -248,6 +248,7 @@ QJsonObject metarNowcast(double lat, double lon, const QString& cacheDir, int ma
         if (err.isEmpty() && !fresh.isEmpty()) {
             reports = fresh; fetchedMs = nowMs;
             QFile f(path); if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(QJsonObject{{"fetched_ms", double(nowMs)}, {"reports", reports}}).toJson(QJsonDocument::Compact));
+            QFile hf(cacheDir + "/metar_history.jsonl"); if (hf.open(QIODevice::Append)) hf.write(QJsonDocument(QJsonObject{{"fetched_ms", double(nowMs)}, {"reports", reports}}).toJson(QJsonDocument::Compact) + "\n");   // every fetch is kept: observed cover history to set against the forecast
         }
     }
     if (reports.isEmpty() || nowMs - fetchedMs > 3 * 3600 * 1000LL) return {{"ok", false}, {"error", "no METAR reports"}};
