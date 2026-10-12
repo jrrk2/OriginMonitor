@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <QHash>
 #include <QMutex>
 #include <QMutexLocker>
 #include <cmath>
@@ -80,6 +81,36 @@ bool sunMoon(const QDateTime& utc, SunMoon* out)
     return true;
 #else
     Q_UNUSED(utc) Q_UNUSED(out)
+    return false;
+#endif
+}
+
+QStringList bodyNames() { return {"sun", "moon", "mercury", "venus", "mars", "jupiter", "saturn", "uranus", "neptune", "pluto"}; }
+
+bool body(const QString& name, const QDateTime& utc, Body* out)
+{
+#ifdef ORIGIN_SPICE
+    static const QHash<QString, QByteArray> id = {{"sun", "SUN"}, {"moon", "MOON"}, {"mercury", "MERCURY"}, {"venus", "VENUS"}, {"mars", "MARS BARYCENTER"}, {"jupiter", "JUPITER BARYCENTER"},
+                                                  {"saturn", "SATURN BARYCENTER"}, {"uranus", "URANUS BARYCENTER"}, {"neptune", "NEPTUNE BARYCENTER"}, {"pluto", "PLUTO BARYCENTER"}};
+    const QString key = name.trimmed().toLower();
+    if (!id.contains(key) || !available()) return false;
+    QMutexLocker lock(&g_mutex);
+    SpiceDouble et = 0, p[3], s[3], lt = 0;
+    str2et_c(utc.toUTC().toString("yyyy-MM-ddTHH:mm:ss.zzz").toUtf8().constData(), &et);
+    spkpos_c(id[key].constData(), et, "J2000", "LT+S", "EARTH", p, &lt);
+    spkpos_c("SUN", et, "J2000", "LT+S", "EARTH", s, &lt);
+    if (failed_c()) { reset_c(); return false; }
+    SpiceDouble r, ra, dec;
+    recrad_c(p, &r, &ra, &dec);
+    out->distKm = r; out->raHours = ra * 12.0 / M_PI; out->decDeg = dec * 180.0 / M_PI; out->xKm = p[0]; out->yKm = p[1]; out->zKm = p[2];
+    out->elongationDeg = vsep_c(p, s) * 180.0 / M_PI;
+    double toSun[3], toEarth[3];
+    for (int i = 0; i < 3; ++i) { toSun[i] = s[i] - p[i]; toEarth[i] = -p[i]; }
+    const double phase = vsep_c(toSun, toEarth);
+    out->phaseAngleDeg = phase * 180.0 / M_PI; out->illumination = (1.0 + std::cos(phase)) / 2.0;
+    return true;
+#else
+    Q_UNUSED(name) Q_UNUSED(utc) Q_UNUSED(out)
     return false;
 #endif
 }

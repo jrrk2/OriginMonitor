@@ -168,6 +168,11 @@ const QList<Cmd>& commands()
                   {O("dir", 's', "directory of raw FITS flat frames"), O("files", 's', "comma-separated FITS files"), O("tag", 's', "name for the outputs", "analysis")}});
         v.append({"goto-altaz", "action", "Slew to a horizontal position by converting it to J2000 RA/Dec for the current time and using the ordinary goto (bounded by the mount's own limits). Needs an aligned (or fake-initialized) mount.", "", true, false,
                   {O("az", 'd', "azimuth, deg (0=N, 90=E, 180=S, 270=W)"), O("alt", 'd', "altitude, deg", "50"), O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218"), O("timeout", 'i', "seconds", "240")}});
+        v.append({"body", "planning", "Where the Sun, Moon or a planet is: topocentric J2000 RA/Dec (what goto wants), altitude/azimuth, distance, elongation, phase, from JPL DE440 via CSPICE (there is no fallback for planets). With --hours, also altitude every --step minutes. This is the reference for planet coordinates.", "", false, true,
+                  {P("name", 's', "sun, moon, mercury, venus, mars, jupiter, saturn, uranus, neptune or pluto (default: all)", false), O("hours", 'd', "also list altitude/azimuth over this many hours from now", "0"), O("step", 'i', "minutes between rows", "30"),
+                   O("lat", 'd', "site latitude, deg north", "52.2054"), O("lon", 'd', "site longitude, deg east", "0.1218"), O("text", 'b', "one line per body instead of JSON")}});
+        v.append({"goto-body", "action", "Slew to the Sun-free position of a Moon or planet now (topocentric J2000 from CSPICE) and report where it was aimed. Refuses below 20 deg altitude and the Sun (never point the telescope at the Sun).", "", true, false,
+                  {P("name", 's', "moon, mercury, venus, mars, jupiter, saturn, uranus, neptune or pluto"), O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218"), O("timeout", 'i', "seconds", "240")}});
         v.append({"forecast-accuracy", "planning", "How good the weather forecast has been: compares the archived dusk forecast of each night with the frames the sequencer took (usable fraction per hour). Writes forecast_accuracy.csv/.json in the data dir; reports bias (positive = the sky was better than forecast).", "", false, true, {}});
         v.append({"autorun", "planning", "Dusk launcher for cron (every 5 minutes): once per night, if the telescope is out and reachable, starts the daemon, connects, initializes the mount if needed and starts 'run --unattended --mail' in the background. Does nothing (quietly) when the telescope does not answer, when nothing is observable, when rain is forecast, or when ~/.config/origin/autorun.off exists. Slews the telescope: only schedule it if that is wanted.", "", true, false,
                   [] { QList<Arg> a = {O("telescope", 's', "telescope host", "192.168.1.195"), O("start-after", 's', "\"dusk\" (autorun begins when the Sun is below --probe-sun-alt; the run itself waits for -12 deg) or a local HH:MM; never act before this", "dusk"), O("probe-sun-alt", 'd', "Sun altitude below which autorun starts: raises the tube, probes with plate solves (exposure scaled to the sky brightness) and initializes; the run still waits for -12", "-7"), O("stop-before-dawn", 'd', "minutes before the end of darkness after which no run is started", "60"),
@@ -1016,6 +1021,60 @@ QJsonObject cmdGotoAltAz(const Parsed& p, const Cmd& c)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------
+// body / goto-body: planets, Sun and Moon from JPL DE440 (CSPICE). The reference for planet coordinates.
+// ---------------------------------------------------------------------------------------------------------------------------------------
+QJsonObject bodyJson(const QString& name, const Astro::Site& site, const QDateTime& t)
+{
+    Astro::BodyView b;
+    if (!Astro::bodyPosition(name, site, t, &b)) return {{"name", name}, {"ok", false}};
+    const Astro::AltAz aa = Astro::altAz(b.eq, site, t);
+    return {{"name", name}, {"ok", true}, {"ra_hours", b.eq.raHours}, {"dec_deg", b.eq.decDeg}, {"alt_deg", aa.alt}, {"az_deg", aa.az}, {"distance_au", b.distKm / 149597870.7},
+            {"elongation_deg", b.elongationDeg}, {"phase_angle_deg", b.phaseAngleDeg}, {"illumination", b.illumination}};
+}
+
+QJsonObject cmdBody(const Parsed& p, const Cmd& c)
+{
+    if (!Ephemeris::available()) return failure("SPICE is not active: " + Ephemeris::description());
+    const Astro::Site site{num(p, c, "lat"), num(p, c, "lon")}; const QDateTime now = QDateTime::currentDateTimeUtc();
+    const QStringList names = p.v.contains("name") ? QStringList{str(p, "name").toLower()} : Ephemeris::bodyNames();
+    const double hours = num(p, c, "hours"); const int step = std::max(1, int(num(p, c, "step")));
+    QJsonArray out; QString text;
+    for (const QString& n : names) {
+        QJsonObject b = bodyJson(n, site, now);
+        if (!b["ok"].toBool()) return failure("unknown body " + n + " (try: " + Ephemeris::bodyNames().join(", ") + ")");
+        if (hours > 0) {
+            QJsonArray rows;
+            for (int m = 0; m <= int(hours * 60); m += step) { const QDateTime t = now.addSecs(m * 60); const QJsonObject r = bodyJson(n, site, t); rows.append(QJsonObject{{"utc", t.toString(Qt::ISODate)}, {"alt_deg", r["alt_deg"]}, {"az_deg", r["az_deg"]}}); }
+            b["track"] = rows;
+        }
+        text += QString("%1  RA %2 h  Dec %3  alt %4  az %5  %6 AU  elong %7  illum %8%\n").arg(n, -8).arg(b["ra_hours"].toDouble(), 0, 'f', 5).arg(b["dec_deg"].toDouble(), 0, 'f', 4).arg(b["alt_deg"].toDouble(), 0, 'f', 1)
+                    .arg(b["az_deg"].toDouble(), 0, 'f', 1).arg(b["distance_au"].toDouble(), 0, 'f', 3).arg(b["elongation_deg"].toDouble(), 0, 'f', 1).arg(b["illumination"].toDouble() * 100, 0, 'f', 0);
+        out.append(b);
+    }
+    QJsonObject r{{"ok", true}, {"time_utc", now.toString(Qt::ISODate)}, {"ephemeris", Ephemeris::description()}, {"bodies", out}};
+    if (p.v.contains("text")) r["text"] = text;
+    return r;
+}
+
+QJsonObject cmdGotoBody(const Parsed& p, const Cmd& c)
+{
+    const QString name = str(p, "name").toLower();
+    if (name == "sun") return failure("refusing to point the telescope at the Sun");
+    if (!Ephemeris::available()) return failure("SPICE is not active: " + Ephemeris::description());
+    const Astro::Site site{num(p, c, "lat"), num(p, c, "lon")}; const QDateTime now = QDateTime::currentDateTimeUtc();
+    Astro::BodyView b;
+    if (!Astro::bodyPosition(name, site, now, &b)) return failure("unknown body " + name + " (try: " + Ephemeris::bodyNames().join(", ") + ")");
+    const Astro::AltAz aa = Astro::altAz(b.eq, site, now);
+    if (aa.alt < 20) return failure(QString("%1 is at altitude %2 deg: refusing a target below 20 deg").arg(name).arg(aa.alt, 0, 'f', 1));
+    const Astro::Equatorial sun = Astro::sunPosition(now);
+    if (Astro::separationDeg(b.eq, sun) < 5.0) return failure(QString("%1 is only %2 deg from the Sun: refusing").arg(name).arg(Astro::separationDeg(b.eq, sun), 0, 'f', 1));
+    const int timeoutS = int(num(p, c, "timeout"));
+    QJsonObject r = call("goto", {{"ra_hours", b.eq.raHours}, {"dec_deg", b.eq.decDeg}, {"timeout", timeoutS}}, (timeoutS + 60) * 1000);
+    r["body"] = bodyJson(name, site, now); r["ra_hours"] = b.eq.raHours; r["dec_deg"] = b.eq.decDeg;
+    return r;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------
 // flats: frames of a uniformly lit sky at the current pointing, exposure adapted to a fixed signal level, then analysed (FlatAnalyzer). No motion.
 // ---------------------------------------------------------------------------------------------------------------------------------------
 QJsonObject cmdFlats(const Parsed& p, const Cmd& c)
@@ -1456,6 +1515,8 @@ int main(int argc, char* argv[])
         out = QJsonObject{{"ok", true}, {"cover_pct", cv}, {"note", "used for 90 minutes; forecast hours near now now follow the models that agree with it"}};
     }
     else if (cmd->name == "goto-altaz") out = cmdGotoAltAz(p, *cmd);
+    else if (cmd->name == "body") out = cmdBody(p, *cmd);
+    else if (cmd->name == "goto-body") out = cmdGotoBody(p, *cmd);
     else if (cmd->name == "now") out = cmdNow(p, *cmd);
     else if (cmd->name == "weather") out = cmdWeather(p, *cmd);
     else if (cmd->name == "go") out = cmdGo(p, *cmd);

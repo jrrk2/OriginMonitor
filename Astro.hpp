@@ -26,4 +26,9 @@ double moonIllumination(const QDateTime& utc);                    // 0..1
 double separationDeg(const Equatorial& a, const Equatorial& b);
 double moonSeparationDeg(const Equatorial& target, const QDateTime& utc);
 
+// Sun, Moon or planet (Ephemeris::bodyNames) as seen from the site: topocentric J2000 RA/Dec (parallax matters for the Moon, up to a degree), plus distance, elongation and
+// phase. Needs SPICE (there is no fallback for planets); returns false otherwise. Use this for any planet goto, not another library's barycentric coordinates.
+struct BodyView { Equatorial eq; double distKm = 0, elongationDeg = 0, illumination = 1, phaseAngleDeg = 0; };
+bool bodyPosition(const QString& name, const Site& site, const QDateTime& utc, BodyView* out);
+
 }   // namespace Astro

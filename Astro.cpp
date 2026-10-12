@@ -130,4 +130,17 @@ double moonSeparationDeg(const Equatorial& target, const QDateTime& utc)
     return separationDeg(target, moonPosition(utc));
 }
 
+
+bool bodyPosition(const QString& name, const Site& site, const QDateTime& utc, BodyView* out)
+{
+    Ephemeris::Body b;
+    if (!Ephemeris::body(name, utc, &b)) return false;
+    const double r = M_PI / 180.0, Re = 6378.137, phi = site.latDeg * r, lst = lstDegrees(julianDate(utc), site.lonDeg) * r;
+    const double ox = Re * std::cos(phi) * std::cos(lst), oy = Re * std::cos(phi) * std::sin(lst), oz = Re * std::sin(phi);   // observer, equator of date (the precession offset is metres)
+    const double x = b.xKm - ox, y = b.yKm - oy, z = b.zKm - oz, d = std::sqrt(x * x + y * y + z * z);
+    out->eq = {std::fmod(std::atan2(y, x) / r + 360.0, 360.0) / 15.0, std::asin(z / d) / r};
+    out->distKm = d; out->elongationDeg = b.elongationDeg; out->illumination = b.illumination; out->phaseAngleDeg = b.phaseAngleDeg;
+    return true;
+}
+
 }   // namespace Astro
