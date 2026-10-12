@@ -139,7 +139,7 @@ const QList<Cmd>& commands()
              {P("command", 's', "command name"), P("destination", 's', "destination, e.g. Camera"), O("params", 'j', "JSON object of parameters", "{}"), O("timeout", 'i', "seconds", "10")}, true);
         // --- orchestrated
         v.append({"focus-sweep", "action", "Move the focuser through positions around the current one, take frames, score the star HFR in-process and report the best position (restores the start unless --apply).", "", true, false,
-                  {O("span", 'i', "steps either side of the current position", "600"), O("step", 'i', "step between positions", "100"), O("frames", 'i', "snapshots per position (median)", "3"),
+                  {O("span", 'i', "steps either side of the current position", "600"), O("step", 'i', "step between positions", "100"), O("exposure", 'd', "seconds per frame", "4"), O("frames", 'i', "snapshots per position (median)", "3"),
                    O("dir", 's', "snapshot directory (default: temp)"), O("apply", 'b', "leave the focuser at the best position")}});
         v.append({"now", "planning", "Time, darkness, current target, minutes each candidate stays observable, and the planner's suggestion. Read-only.", "", false, false, plannerArgs()});
         {
@@ -720,7 +720,8 @@ QJsonObject cmdFocusSweep(const Parsed& p, const Cmd& c)
         if (!mv["ok"].toBool()) { results.append(QJsonObject{{"position", pos}, {"error", mv["error"]}}); break; }
         QList<double> h; int stars = 0;
         for (int f = 0; f < frames; ++f) {
-            const QJsonObject sn = call("snapshot", {{"dir", dir}}, 60000);
+            // explicit exposure: the snapshot then re-sends the capture parameters, otherwise the frame after a focuser move comes back as a PNG
+            const QJsonObject sn = call("snapshot", {{"dir", dir}, {"exposure", num(p, c, "exposure")}, {"iso", 800}, {"binning", 1}}, 60000);
             if (!sn["ok"].toBool()) continue;
             QFile file(sn["path"].toString());
             if (!file.open(QIODevice::ReadOnly)) continue;
@@ -736,7 +737,7 @@ QJsonObject cmdFocusSweep(const Parsed& p, const Cmd& c)
         results.append(e); note(e);
     }
     const int final = p.v.contains("apply") && good ? best["position"].toInt() : start;
-    const QJsonObject back = call("focuser_move", {{"position", final}, {"max_step", span + step + 100}}, 90000);
+    const QJsonObject back = call("focuser_move", {{"position", final}, {"max_step", 2 * span + step + 200}}, 90000);          // the sweep ends at the far edge: the way back is up to 2 spans
     return {{"ok", good}, {"unit", "HFR in full-resolution sensor pixels, lower is better"}, {"start", start}, {"best", best}, {"applied", p.v.contains("apply") && good}, {"final", back}, {"results", results}};
 }
 
