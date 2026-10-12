@@ -1512,7 +1512,13 @@ int main(int argc, char* argv[])
         const double cv = std::max(0.0, std::min(100.0, num(p, *cmd, "cover")));
         QFile f(originDataDir() + "/sky_report.json");
         if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(QJsonObject{{"cover_pct", cv}, {"time", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}}).toJson());
-        out = QJsonObject{{"ok", true}, {"cover_pct", cv}, {"note", "used for 90 minutes; forecast hours near now now follow the models that agree with it"}};
+        // keep the all-sky frame with its label: the camera's cover estimate is calibrated against these (allsky_labelled/, labels.jsonl)
+        const QString dir = originDataDir() + "/allsky_labelled"; QDir().mkpath(dir);
+        const QString stamp = QDateTime::currentDateTimeUtc().toString("yyyyMMdd_HHmmss"), img = originDataDir() + "/allsky_latest.jpg";
+        if (QFile::exists(img)) QFile::copy(img, dir + "/" + stamp + "_" + QString::number(int(cv)) + ".jpg");
+        QFile lf(dir + "/labels.jsonl");
+        if (lf.open(QIODevice::Append)) lf.write(QJsonDocument(QJsonObject{{"time", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}, {"cover_pct", cv}, {"file", stamp + "_" + QString::number(int(cv)) + ".jpg"}}).toJson(QJsonDocument::Compact) + "\n");
+        out = QJsonObject{{"ok", true}, {"cover_pct", cv}, {"note", "used for 90 minutes (the observer outweighs the camera and the airports); forecast hours near now follow the models that agree with it; the all-sky frame is kept as a labelled example"}};
     }
     else if (cmd->name == "goto-altaz") out = cmdGotoAltAz(p, *cmd);
     else if (cmd->name == "body") out = cmdBody(p, *cmd);

@@ -277,7 +277,7 @@ QJsonObject metarNowcast(double lat, double lon, const QString& cacheDir, int ma
         const QJsonObject r = QJsonDocument::fromJson(sf.readAll()).object(); sf.close();
         const QDateTime t = QDateTime::fromString(r["time"].toString(), Qt::ISODate);
         if (t.isValid() && t.secsTo(QDateTime::currentDateTimeUtc()) < 5400) {
-            const double w = 0.3;
+            const double w = 1.0;                                    // the observer looking at the sky outweighs the camera (0.1) and every airport (under 0.01 each)
             sw += w; sc += w * r["cover_pct"].toDouble() / 100; if (!newest.isValid() || t > newest) newest = t;
             st.append(QJsonObject{{"id", "observer"}, {"km", 0}, {"cover", r["cover_pct"].toDouble() / 100}, {"raw", "sky-report"}});
         }
