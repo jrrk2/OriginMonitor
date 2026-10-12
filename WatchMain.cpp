@@ -233,7 +233,7 @@ public:
                        ":root{color-scheme:dark light}body{font:15px -apple-system,system-ui,sans-serif;margin:0 0 3em;background:#0c0c10;color:#e6e6ea}"
                        "nav{display:flex;gap:4px;padding:8px;background:#1a1a22;position:sticky;top:0}nav a{flex:1;text-align:center;padding:8px 2px;border-radius:6px;background:#26262f;color:#9ec1ff;text-decoration:none}"
                        "main{padding:8px 12px}h2{font-size:15px;margin:14px 0 4px;color:#9ec1ff}table{width:100%;border-collapse:collapse}td{padding:3px 6px 3px 0;vertical-align:top;border-bottom:1px solid #22222a}"
-                       "td:first-child{color:#9a9aa6;width:38%}img{max-width:100%;height:auto;border-radius:6px}pre{white-space:pre-wrap;font:12px ui-monospace,monospace}.dim{color:#9a9aa6}"
+                       "td:first-child{color:#9a9aa6;width:38%}table.fc td,table.fc th{text-align:center;padding:3px 2px;font-size:12px;white-space:nowrap}table.fc td:first-child{color:inherit;width:auto}details{margin:10px 0}summary{color:#9ec1ff;padding:6px 0}img{max-width:100%;height:auto;border-radius:6px}pre{white-space:pre-wrap;font:12px ui-monospace,monospace}.dim{color:#9a9aa6}"
                        "@media (prefers-color-scheme:light){body{background:#f4f4f7;color:#111}nav{background:#e2e2ea}nav a{background:#fff;color:#1a56c4}td{border-color:#ddd}td:first-child,.dim{color:#666}h2{color:#1a56c4}}"
                        "</style></head><body><nav><a href=/>Now</a><a href=/log>Log</a><a href=/live>Live</a><a href=/stacks>Stacks</a><a href=/forecast>Forecast</a></nav><main>%2</main></body></html>")
             .arg(refreshS > 0 ? QString("<meta http-equiv=refresh content=%1>").arg(refreshS) : QString(), body);
@@ -276,12 +276,32 @@ public:
         }
         if (path == "/forecast") {
             QString h = "<h2>Forecast and nowcast</h2>";
-            for (QLabel* l : {m_fcInfo, m_fcNow, m_fcSky, m_fcAcc}) if (l && !l->text().isEmpty()) { QTextDocument d; d.setHtml(l->text()); h += "<p>" + esc(d.toPlainText()).replace("\n", "<br>") + "</p>"; }   // the labels are rich text; show their words only
-            return html(h + "<p><img src='/img/forecast.png' alt='forecast'></p>", 300);
+            if (!m_fcSky->pixmap().isNull() && !m_fcSky->isHidden()) h += "<p><img src='/img/allsky.jpg' alt='all-sky camera' style='max-width:40%'></p>";
+            for (QLabel* l : {m_fcInfo, m_fcNow, m_fcAcc}) if (l && !l->text().isEmpty()) { QTextDocument d; d.setHtml(l->text()); h += "<p>" + esc(d.toPlainText()).replace("\n", "<br>") + "</p>"; }   // the labels are rich text; show their words only
+            // the table as real HTML (the page scrolls as one; nothing is clipped inside a picture): the hourly columns, then the per-model columns in a fold-out
+            auto table = [&](QList<int> cols) {
+                QString t = "<table class=fc><tr>";
+                for (int c : cols) t += "<th>" + esc(m_fcTable->horizontalHeaderItem(c) ? m_fcTable->horizontalHeaderItem(c)->text() : QString()) + "</th>";
+                t += "</tr>";
+                for (int r = 0; r < m_fcTable->rowCount(); ++r) {
+                    t += "<tr>";
+                    for (int c : cols) {
+                        const QTableWidgetItem* it = m_fcTable->item(r, c); QString style;
+                        if (it && it->background().style() != Qt::NoBrush) style = " style='background:" + it->background().color().name() + ";color:#fff'";
+                        t += "<td" + style + ">" + esc(it ? it->text() : QString()) + "</td>";
+                    }
+                    t += "</tr>";
+                }
+                return t + "</table>";
+            };
+            h += table({0, 1, 2, 3, 4, 5, 6, 7});
+            h += "<details><summary>Quality by model</summary>" + table({0, 8, 9, 10, 11, 12, 13, 14}) + "</details>";
+            h += "<p class=dim>Quality 0..1 = how much of the hour is usable. Green 0.5 or more, amber 0.3-0.5, red below.</p>";
+            return html(h, 300);
         }
+        if (path == "/img/allsky.jpg") return png(m_fcSky->pixmap().toImage(), true);
         if (path == "/img/lastframe.jpg") return png(m_aPic->pixmap().toImage(), true);
         if (path == "/img/live.jpg") return png(m_live->image(), true);
-        if (path == "/img/forecast.png") { QWidget* w = findChild<QTabWidget*>()->widget(4); w->resize(1000, 900); return png(w->grab().toImage()); }
         if (path.startsWith("/img/stack/") && path.endsWith(".jpg")) {
             bool ok = false; const int i = path.mid(11, path.size() - 15).toInt(&ok); if (!ok || i < 0 || i >= m_list->count()) { r.status = 404; r.type = "text/plain"; r.body = "no such stack\n"; return r; }
             return png(QImage(m_list->item(i)->data(Qt::UserRole).toString() + "/preview.png"), true);
