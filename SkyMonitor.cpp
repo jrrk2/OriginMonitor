@@ -296,7 +296,7 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
         // Many round, sharp stars that will not register to a SMALL stack mean the reference is bad (seen 2026-10-11: a half-trailed first frame became the reference and every later
         // good frame read "cloudy"), not that the sky is cloudy. After 3 such frames the small stack is dropped and the next frame seeds a new one.
         const bool sharpSky = focus.valid && focus.stars >= 40 && focus.hfrPx > 0 && focus.hfrPx < 4.5;
-        if ((rep.inliers == 0 || rep.reason == "no star-pattern match") && sharpSky && m_stack.frames() <= 10) {
+        if ((rep.inliers == 0 || rep.reason == "no star-pattern match") && sharpSky && (m_stack.frames() <= 10 || m_stack.summary()["total_exposure_s"].toDouble() < 300.0)) {   // a small stack: not worth keeping over sharp frames that will not match it
             if (++m_regFailRun >= 3) { m_stack.reset(); m_regFailRun = 0; verdict = "unknown"; reasons << QString("the stack reference was bad (%1 sharp stars would not register): replaced, the next frame starts a new one").arg(focus.stars); }
             else { verdict = "unknown"; reasons << QString("%1 sharp stars but no match to the stack reference (%2 of 3 before it is replaced)").arg(focus.stars).arg(m_regFailRun); }
         } else if (rep.inliers == 0 || rep.reason == "no star-pattern match") {
