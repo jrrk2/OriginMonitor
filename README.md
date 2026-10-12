@@ -6,7 +6,8 @@ It started as a macOS GUI (generated with Claude.AI); it now also runs **headles
 script or an AI session.
 
 On macOS with the Xcode tools installed, `make run` generates the Xcode project and builds a release with a self-explanatory GUI (unchanged).
-Everything below describes the headless/Linux route that was used to image on **2026-10-09/10 from Cambridge, UK**, with the results and the problems met.
+Everything below describes the headless/Linux route that was used to image on **2026-10-09/10 and 2026-10-11/12 from Cambridge, UK**, with the results and the problems met. The first night was clear and
+supervised live; the second was broken cloud and run by the unattended supervisor (`autorun` from cron), which is the route to use.
 
 ![Andromeda](docs/previews/andromeda_m31.jpg)
 
@@ -22,22 +23,24 @@ program), Open-Meteo (free for non-commercial use) and aviationweather.gov obser
 
 ## Contents
 
-1. [Results of the first full unattended night](#results-of-the-first-full-unattended-night)
-2. [What you need](#what-you-need)
-3. [Build](#build)
-4. [Running the app](#running-the-app)
-5. [Control interface reference](#control-interface-reference)
-6. [Observing runbook, step by step](#observing-runbook-step-by-step)
-7. [Reading the analysis](#reading-the-analysis)
-8. [Troubleshooting: symptom, cause, fix](#troubleshooting-symptom-cause-fix)
-9. [Tools](#tools)
-10. [Files and directories](#files-and-directories)
-11. [Audit trail: weather, instrument, software, and my own mistakes](#audit-trail)
-12. [Open items](#open-items)
+1. [Results of the first night (9/10 October)](#results-of-the-first-night-910-october)
+2. [Results of the second night (11/12 October)](#results-of-the-second-night-1112-october)
+3. [What you need](#what-you-need)
+4. [Build](#build)
+5. [Running the app](#running-the-app)
+6. [Control interface reference](#control-interface-reference)
+7. [Unattended operation: autorun, supervisor, cron](#unattended-operation-autorun-supervisor-cron)
+8. [Observing runbook, step by step](#observing-runbook-step-by-step)
+9. [Reading the analysis](#reading-the-analysis)
+10. [Troubleshooting: symptom, cause, fix](#troubleshooting-symptom-cause-fix)
+11. [Tools](#tools)
+12. [Files and directories](#files-and-directories)
+13. [Audit trail, first night](#audit-trail) and [second night](#audit-trail-second-night-1112-october)
+14. [Open items](#open-items)
 
 ---
 
-## Results of the first full unattended night
+## Results of the first night (9/10 October)
 
 Live-stack previews as produced by the app (background extraction, colour neutralisation, hyperbolic stretch; no further processing). Frame field of view
 is about 75 x 50 arcmin (1.478 arcsec per pixel at full resolution; the stacks are 1528 x 1024 at 2.956 arcsec per pixel).
@@ -60,6 +63,44 @@ were written to disk, of which 1,012 were taken by the in-app sequencer (920 cle
 Per-frame measurements for the whole night are in `sequence_20261009.jsonl` and `sequence_20261010.jsonl`, and the quality references (focus HFR,
 dark-sky level, transparency) in `references_20261009.md`, all in the data directory.
 
+## Results of the second night (11/12 October)
+
+Broken cloud all evening and a clean spell from about 04:00; the unattended supervisor (`autorun` from cron, then `run --unattended`) followed the plan, changed target 12 times
+when cloud covered the current one, and parked on Polaris at 05:25 BST. The sequencer took 698 frames: 257 clear, 132 patchy, 31 hazy, 77 cloudy, 157 unscored ("unknown": too few stars,
+mostly heavy cloud), 3 trailed, 10 defocused and 31 unreadable (PNG after a slew). About 1.2 h of exposure ended up in stacks (against 5.0 h on the clear first night).
+
+| Target | Stack | Settings |
+|---|---|---|
+| Double Cluster (NGC 869/884) | 195 frames, 2,730 s | 14 s, ISO 800 |
+| Crab Nebula (M1) | 46 frames, 828 s | 18 s, ISO 800 |
+| Globular cluster M13 | 32 frames, 640 s | 20 s, ISO 800 |
+
+| | |
+|---|---|
+| ![Double Cluster](docs/previews/double_cluster_ngc869_884.jpg) **Double Cluster**, NGC 869/884 | ![Crab](docs/previews/crab_m1.jpg) **Crab Nebula**, M1 |
+| ![M13](docs/previews/m13.jpg) **Hercules cluster**, M13 | |
+
+Both nights, frame by frame: sky level (log scale) coloured by the analyser's verdict, with the target underneath (times BST).
+
+![Both nights: sky level, verdicts and targets](docs/capella/figs/fig_timelines.png)
+
+![What the analyser made of the frames, and the exposure kept](docs/capella/figs/fig_verdicts.png)
+
+Clear sky sits at one of two levels (about 110 ADU/s at ISO 200 and about 550 at ISO 800); cloud lifts it ten- to a thousand-fold:
+
+![Sky level by verdict](docs/capella/figs/fig_skylevel.png)
+
+The dusk forecast is archived and scored against the frames (`forecast-accuracy`). After one night (ten hours with enough frames) the seven-model blend averaged 0.43 against 0.19 observed
+(bias -0.24, too optimistic); the best single model was `ukmo_seamless` (mean absolute error 0.20) and the worst `meteofrance_seamless` (0.45). One night is not a ranking.
+
+![Forecast against measurement](docs/capella/figs/fig_forecast.png)
+
+**Jupiter at dawn** (12 October, Sun about -5 degrees): ISO 100 and 1 ms. Thirty frames registered on the disc show the belts; one frame hardly does. Jupiter saturates in a millisecond at ISO 800.
+
+![Jupiter, one frame and a stack of thirty](docs/capella/figs/fig_jupiter.png)
+
+An article about both nights for the Cambridge Astronomical Association's *Capella* is in `docs/capella/` (`Capella_article.md`, `.docx`, `.pdf`; the scripts that make its figures sit beside it).
+
 ---
 
 ## What you need
@@ -71,7 +112,9 @@ dark-sky level, transparency) in `references_20261009.md`, all in the data direc
 * A Linux or macOS host. The host should be on **one** network interface, preferably wired: a second interface with a default route confuses things.
   Frames are 12.5 MB each, so a 100 Mb/s link costs about 1 s per frame.
 * Qt 6 with Core, Gui, Widgets, Network and WebSockets, and `qmake6`. Plain `qmake` on many systems is Qt 5 and will fail.
-* Python 3 for the helper tools: `numpy`, `scipy`, `astropy`, `opencv-python` (the tools), nothing beyond the standard library for `originctl.py`.
+* Python 3 for the helper tools: `numpy`, `scipy`, `opencv-python`, `astropy` (FITS reading in `starshape.py`/`isoanalysis.py`; for ephemerides astropy is only a sanity check, see `tools/check_ephemeris.py`), nothing beyond the standard library for `originctl.py`.
+* For the unattended route: **astrometry.net** (`solve-field` and index files for about 1.5 arcsec per pixel; in this setup `~/astrometry_indices`), **CSPICE** with the JPL DE440 kernel for Sun, Moon and planets
+  (see the ephemeris note below), and cron. E-mail briefings need a Microsoft Graph sign-in (`mail-login`, never store a password).
 * Free disk space on the data disk: about 12.5 MB per frame; a full night was 17.7 GB plus about 0.7 GB of stacks.
 * Your own **horizon profile** (buildings, trees, fences): edit `tools/horizon.json` (see the runbook). Ours was north 40 degrees (foliage), east and west 30 degrees
   (fences), south 35 degrees (buildings; the height was assumed, not measured).
@@ -151,6 +194,37 @@ and the app re-asserts it after every frame, so a long `set` value doubles the c
 
 ---
 
+## Unattended operation: autorun, supervisor, cron
+
+This is what ran the second night. The daemon (`OriginHeadless serve`) must be running; two cron lines do the rest (`ORIGIN_CONTROL_PORT=8765` is the default port):
+
+```
+*/5  * * * * cd ~/OriginMonitor && ORIGIN_CONTROL_PORT=8765 build/headless/build/OriginHeadless briefing --auto >> ~/.cache/origin-briefing.log 2>&1
+*/10 * * * * cd ~/OriginMonitor && ORIGIN_CONTROL_PORT=8765 build/headless/build/OriginHeadless autorun         >> ~/.cache/origin-autorun.log  2>&1
+```
+
+* **What `autorun` does**, once per night, when the telescope answers and the Sun is below `--probe-sun-alt` (default -7 degrees): unpark if the tilt sensor says the tube is low, probe with plate solves
+  (exposure scaled to the sky brightness; the first solve of the second night came at Sun -10.9 degrees with 51 stars) to learn the azimuth, `initialize`, verify `IsAligned`, then launch
+  `run --unattended --mail`. The run itself waits for Sun below -12 degrees, follows the plan, switches to backup targets in cloud, re-centres and refocuses on a defocused verdict,
+  and parks on Polaris at the end of the dark or on a rain forecast. Decisions are lines in `<data dir>/run_<date>.jsonl`; the launcher's state is `autorun_state.json`.
+* **Planner preferences:** targets never imaged (under 600 s of stacked exposure) get +4, targets imaged within 30 days -4 (within 3 days -5); `--novelty off` disables it.
+  Boosts live in `~/.config/origin/target_boost.json` (for example `{"M1": 5}`) or `--boost KEY=N`. The learned obstruction and glare bins are always used.
+* **Doing anything by hand: create `~/.config/origin/autorun.off` first**, otherwise cron starts a supervisor within ten minutes and fights you for the mount (it did, during the M1 survey).
+  Remove the file afterwards: nothing removes it for you. If the GUI app `CelestronOrigin` is running, do not take the telescope.
+* **Restarting the supervisor** to deploy a fix: read its pid from `autorun_state.json` and kill it; `OriginHeadless sequence stop`; move that night's `run_<night>.jsonl` aside
+  (autorun reads a `parked` line as "finished"); set `launches` and `pid` to 0 in the state file; run `OriginHeadless autorun`. When restarting the **daemon**, wait until the port is free.
+* **Launching a run by hand, ignoring the forecast:** `OriginHeadless run --unattended --iso 800 --max-exposure 20 --not-before dusk --weather off --port 8765 --mail`. The default forecast filter
+  (min-quality 0.2 in `autorun`) dropped M1 on the second night while the sky was clear; whether the nowcast should override it is undecided.
+* **Scratch tests:** set `ORIGIN_DATA_DIR` and `ORIGIN_CONTROL_PORT` to scratch values. `serve` honours `ORIGIN_CONTROL_PORT` since the second night; before, a test daemon took the real port.
+* **Watching:** `tail -n 0 -F file | awk '{print; fflush()}'` (a `cut` or any unbuffered stage in the pipe silently loses events). `OriginWatch` shows the same state read-only.
+* **Twilight survey:** `survey` points at places the plan will use and records whether the view is blocked. Run it with the Sun between about -9 and -12 degrees: at -3 degrees (dawn) every frame was
+  saturated by the sky and it learned nothing. It refuses to start when the Sun is above `--sun-limit` (default -7).
+* **Planets, Moon, Sun:** `OriginHeadless body [name]` gives topocentric J2000 RA/Dec, altitude/azimuth, distance, elongation and phase from JPL DE440 via CSPICE; `goto-body NAME` slews there (refuses the Sun,
+  anything under 20 degrees and anything within 5 degrees of the Sun). Take planet coordinates from `body`, not from another library's barycentric ICRS: astropy's `.icrs` put Jupiter 9 degrees off.
+  Use very short exposures (the camera accepts 1 microsecond): Jupiter at ISO 100, 1 ms peaks near 35,000 ADU.
+
+---
+
 ## Observing runbook, step by step
 
 Times are local; "wait for idle" means poll `status` until `TaskController/GetStatus.State` is `IDLE` and the focuser's `IsMoveToOver` is true.
@@ -161,7 +235,8 @@ Times are local; "wait for idle" means poll `status` until `TaskController/GetSt
    wrong (ours was 51.28 N, -0.08 E). Edit `tools/horizon.json` to your obstructions (`[[azimuth, minimum altitude], ...]`, north 0, east 90); `--sky-map` on the
    planner also learns bins that are repeatedly bad.
 3. **Initialise** (the mount moves; do it deliberately): `{"cmd":"initialize"}` with your site, or `originctl.py initialize`. A good result reads
-   `INITIALIZED ... state IDLE, ready yes`; `IsAligned` true and `NumAlignRefs` 2 afterwards. A one-off "Can't add alignment reference (-53)" event during it was harmless.
+   `INITIALIZED ... state IDLE, ready yes`; `IsAligned` true and `NumAlignRefs` 2 afterwards. `initialize` used to report success after a failed alignment (the mount ends IDLE with `IsAligned` false and the
+   error "Did not find enough stars for alignment" is overwritten by the next status); it now requires `IsAligned`, and "not enough stars" failures do not count towards the three attempts. A one-off "Can't add alignment reference (-53)" event during it was harmless.
 4. **Plan.** `OriginHeadless schedule` lists popular targets observable under your horizon, Sun below -18 degrees and the Moon away, and builds a
    one-target-at-a-time plan (JSON by default, `--text` for a table; note it plans the evening of today's date, so after midnight it describes the next evening: work from the `fieldrot` tables and the current altitudes instead). For each target run
    `OriginHeadless fieldrot RA_HOURS DEC_DEG`: an alt-az mount rotates the field, and the 2-pixel corner-trail limit on exposure can be as short as 5 s for a target
@@ -171,7 +246,8 @@ Times are local; "wait for idle" means poll `status` until `TaskController/GetSt
 6. **Live exposure.** `{"cmd":"set","exposure":0.5,"iso":200}`.
 7. **Centring check.** `{"cmd":"target","name":"X","ra_hours":R,"dec_deg":D,"reset":true}`, then a short test:
    `{"cmd":"sequence","action":"start","exposure":20,"iso":200,"pipeline":false,"resend_params":true,"max_frames":3}`. Look at a **raw** frame (the app's `preview.png` has a
-   different orientation from the raw frames, which fooled us once). The firmware's own centring leaves random 5-12 arcmin offsets. If the target is more than
+   different orientation from the raw frames, which fooled us once). The firmware's own centring leaves random 5-12 arcmin offsets. `OriginHeadless solve` gives the true field centre
+   (astrometry.net `-z2`, about 11 s, agreement with the mount better than 0.03 degrees) and is the better measurement. If the target is more than
    about 6 arcmin from the frame centre, send a `goto` with a proportional correction and re-measure (our M31 correction moved the field 1.9x what we commanded the
    first time and 0.6x the second, so correct gently). The first frames after a slew are elongated while the mount settles (ellipticity 0.43, 0.40, 0.18, 0.07 on the first four frames).
 8. **Start the run.** `{"cmd":"target",... "reset":true}` again (so the stack reference is a settled, clear frame), `set exposure 0.5 iso 200`, then
@@ -192,10 +268,12 @@ Times are local; "wait for idle" means poll `status` until `TaskController/GetSt
 `{"cmd":"analysis"}` returns one record per frame; `sequence_*.jsonl` keeps the useful subset. Fuller field-by-field notes are in `OBSERVING.md`.
 
 * `verdict`: `clear`, `hazy` (transparency under 0.8), `cloudy` (under 0.5, or no star-pattern match), `patchy` (cloud edge: several tiles lack their stars), `moon_glow`,
-  `twilight`, `off_target`, `unreadable` (the file was not a FITS image), `unknown`.
+  `twilight`, `off_target`, `unreadable` (the file was not a FITS image), `trailed` (coherent streaks: at least 25 of the 100 brightest sources elongated the same way; a frame of bright cloud once gave a false positive),
+  `defocused` (many stars but all large, or under 15 round stars with the big ones dominating), `unknown`. Heavy cloud and defocus can both show 0 stars: look at `previews/last_frame.png` before deciding.
 * `stars` (usable, capped at 150), `hfr_px` (focus: lower is better; 2.2-2.5 px was normal here), `sky_rate` (ADU per second above black 4985),
   `sky_excess_over_dark` (against the lowest value stored for that ISO in `sky_map.json`), `registration.transparency` (star flux against the best this stack has seen),
   `registration.frames_in_stack` and `stacked`.
+* A bad frame also carries a `cause` (cloud / obstruction / unknown) from the evidence; only obstruction-attributed frames create a blocked direction in `sky_map.json`. A reference for the stack must have at least 25 round stars and HFR under 4 px; a small bad stack (10 frames or fewer, or under 300 s) is replaced after three sharp frames fail to register.
 * Cloud looked like this: stars fall to 0-16, `sky_rate` rises ten-fold (cloud lit from below by the town: 7,000-9,000 ADU/s against 106-140 on a clear night), the same in every
   direction. A uniform brightening with no stars is cloud, not focus and not dew (the dew heater was on automatic).
 
@@ -209,8 +287,15 @@ Times are local; "wait for idle" means poll `status` until `TaskController/GetSt
 | Everything `cloudy` and the reason says the sky is "N% above the dark baseline: not used as the stack reference" while the sky is clear | One corrupted frame lowered the stored dark baseline for that ISO | Stop, `quit`, set `dark_rate.isoNNN` in `<data dir>/sky_map.json` back to a normal value (about 105 at ISO 200 here), restart. Do not edit it while the app runs: it rewrites the file |
 | Frames arrive in about 2 s with absurd levels, or every second frame is a PNG | Pipelined/early capture requests, or an extra bit-depth command, disturbed the capture; or `resend_params` was turned off (the camera reverts to 24-bit after each capture) | `pipeline:false`, `resend_params:true` |
 | Cycle is about twice the exposure | The live exposure is long (`set exposure` with a big value) | `set exposure 0.5 iso 200` before starting the sequence |
-| First frame after a slew is a PNG / `not a FITS image` event | The firmware reverts the bit depth on a goto | Ignore (the sequencer retakes); one in thirty frames is also random |
+| First frame after a slew is a PNG / `not a FITS image` event | The firmware drops the capture settings on a goto | Ignore (the sequencer retakes). Bit depth 16 is now sent with every capture plus one retry; 16 of 1,012 frames (night one) and 31 of 698 (night two) were still unreadable |
 | Stars elongated in the first minutes after a slew | The mount is settling | Wait about 2 minutes, then `target ... reset:true` so the stack reference is sharp |
+| Stars are doughnuts after a goto, verdict `defocused` or `unknown/0 stars` | The firmware's autofocus after the goto ran with no stars (cloud) and left the focuser far off | The supervisor re-centres (a new goto re-runs the autofocus), then runs `focus-sweep` itself; by hand: `focus-sweep` (best focus on the second night was 18,980-19,034, HFR 2.2-2.5 px) |
+| `initialize` reports success but the mount is not aligned | The firmware ends IDLE with `IsAligned` false after a failed alignment | Check `IsAligned`; point at a clear part of the sky, check focus, retry (done automatically by `autorun`, up to 3 attempts) |
+| `solve` answers `not worth solving: too_bright / too_short / few_stars` | Sky too bright (saturated), exposure too short, or cloud | Wait for a darker sky or use the suggested exposure; `autorun` retries with longer exposures |
+| A supervisor starts while you work on the telescope | The cron `autorun` | `touch ~/.config/origin/autorun.off` first, remove it afterwards |
+| A planet is not in the field after a goto | Coordinates from a library that gave barycentric ICRS (astropy `.icrs`: Jupiter 9 degrees off) | Use `OriginHeadless body` / `goto-body` |
+| `survey` refuses: "too early" | The Sun is above `--sun-limit` (-7) | Run it between about -9 and -12 degrees |
+| A planned target is missing although the sky is clear | The forecast filter (min-quality 0.2) dropped it | Launch the run by hand with `--weather off`, or `sky-report` what you see |
 | Star trails growing outwards from the centre | Field rotation | Shorter exposure (`OriginHeadless fieldrot`) or a target with low rotation |
 | Target is 5-12 arcmin off centre after the goto | The firmware's centring | Measure on a raw frame and correct gently (runbook step 7) |
 | The app dies when a client hangs up immediately after sending | Open server bug (client half-close) | Use `tools/tcp.sh`; never `nc -q0` or `socat` |
@@ -234,6 +319,7 @@ Times are local; "wait for idle" means poll `status` until `TaskController/GetSt
 
 Data directory: `snapshot_YYYYMMDD_HHMMSS_mmm.fits` (raw 16-bit Bayer, GRBG, BZERO 32768, black level about 4985, the header `BAYERPAT` says RGGB but is wrong),
 `stacks/<target>/{state.bin,preview.png}`, `sky_map.json` (learned obstruction bins and per-ISO dark baselines), `focus_log.csv`, `sequence_YYYYMMDD.jsonl`.
+Also in the data directory: `run_<date>.jsonl` (supervisor decisions), `autorun_state.json`, `solve_probes.jsonl`, `survey/` and `survey_<night>.json`, `briefings/`, `forecasts/` and `forecast_accuracy.csv/.json`, `flats/`, `allsky/` (all-sky camera frames, every 10 minutes, 3 days kept), `previews/` (live_preview.png, last_frame.png).
 Telescope message logs go to `~/Documents/CelestronOriginLogs/websocket_log_*.txt` (every message sent and received, useful for timing questions).
 
 ---
@@ -296,15 +382,50 @@ or open.
 
 ---
 
+## Audit trail, second night (11/12 October)
+
+Broken cloud; the unattended supervisor ran the night while I fixed what it showed. The log records 17 run starts, most of them restarts to deploy a fix. Times BST unless marked UT.
+
+### Instrument and software failures
+
+| What happened | Impact | Status |
+|---|---|---|
+| `initialize` reported success on a failed alignment (mount IDLE, `IsAligned` false) | A run launched on an unaligned mount | Fixed: needs `IsAligned`; `autorun` verifies it; "not enough stars" failures do not count towards the 3 attempts |
+| `ControlServer` SIGSEGV when a client hung up during a long command | Daemon down mid-run | Fixed (deferred socket deletion) |
+| `solve` blocked the event loop; the telescope dropped the websocket | Lost connection during a solve | Fixed (waits on the event loop). The snapshot exposure also lagged one request behind: explicit values now go straight into the capture |
+| After a slew the telescope drops its capture settings; frames came back PNG | 3 of 11 survey frames, many first frames | Mitigated: bit depth 16 with every capture and one retry; not eliminated (31 of 698) |
+| The firmware autofocus after a goto ran with no stars (cloud) and left the focuser far off | Doughnut stars read as "unknown/0 stars" like cloud | Fixed: `defocused` verdict, re-centre, then supervisor-run `focus-sweep` (up to 6 per night) |
+| Stack reference seeded from a bad first frame; M1's stack poisoned by my own focus-scan frames | Good frames dropped as unregistered | Fixed: reference needs 25 round stars and HFR under 4 px; a small bad stack is replaced after 3 sharp failures |
+| `trailed` verdict fired on frames of bright cloud | Frames wrongly rejected | Fixed: needs coherent streaks (25 of the 100 brightest sources, axis ratio 2 or more, coherence 0.8 or more) |
+| Novelty counted any stack directory as "imaged", so M1's probe frames demoted it | Wrong target order | Fixed: needs 600 s of stacked exposure |
+| `autorun` dropped M1 (forecast quality under 0.2) while the sky was clear | A target skipped | Workaround: launch by hand with `--weather off`; open |
+| Trailing for about six minutes after the first goto | Soft frames | Unexplained; tracking rate measured correct afterwards |
+| The twilight survey needs Sun between about -9 and -12 degrees | At -3 degrees every frame was saturated by dawn | Documented; `survey` refuses above `--sun-limit` |
+
+### My own mistakes (the supervising Claude session)
+
+| What | Cost | Lesson |
+|---|---|---|
+| Ran manual telescope work while the cron `autorun` could relaunch a supervisor (during the M1 survey) | The two fought for the mount | `touch ~/.config/origin/autorun.off` first |
+| A scratch test daemon took the real port 8765 because `serve` ignored `ORIGIN_CONTROL_PORT` | A briefly confused control port | `serve` now honours the variable; use scratch data dir and port |
+| Took a planet's coordinates from astropy's `.icrs` (barycentric): Jupiter came out 9 degrees off (8.98 h +17.8 instead of 9.58 h +15.05 degrees), the telescope slewed to an empty field, and I wrongly blamed the mount for a pointing error | One wasted slew and a wrong claim | Use `OriginHeadless body` / `goto-body` (CSPICE DE440, agrees with the hand-centred mount to under an arcminute); astropy only as a sanity check |
+| Reported that the survey had removed the autorun off-switch; it was my own wrapper command | A wrong statement | Nothing removes `autorun.off` for you |
+
+---
+
 ## Open items
 
-* An outlier guard so one bad frame cannot lower the dark baseline or poison the stack reference.
-* The server crash when a client half-closes its connection straight after sending.
-* A star-shape check (ellipticity) in the analyser, so soft or trailed frames are not stacked.
-* Plate solving, so centring corrections after a goto are automatic and exact.
+* An outlier guard on the dark baseline and the best-transparency value (the stack-reference rules are in place; a single freak frame can still set those two).
+* The server crash when a client half-closes its connection straight after sending (a second crash, a client hanging up during a long command, was fixed by deferring socket deletion).
 * Whether the sample ISO follows the capture request or the live `set iso`. (`RunImaging` is not an option for the per-frame overhead: it never deletes downloaded subs, so the telescope's disk clogs, and it offers no per-frame quality check.)
-* Measure the real horizon (the south buildings were assumed 35 degrees).
-* A proper automated test of the sequencer against the simulator (`OriginSimulator` serves TIFF/JPEG, not raw FITS, so it cannot exercise the analyser yet).
+* Measure the real horizon (the south buildings were assumed 35 degrees). The obstruction classifier has never seen a real obstruction, and the glare map needs clear dark nights.
+* Stars trailed for about six minutes after the first goto on the second night; the mount's tracking rate was measured correct afterwards (1.00 of sidereal in both axes). Unexplained.
+* Remaining PNG frames after slews (about one in twenty on the second night), and idle time between plan blocks.
+* Whether the nowcast (airport observations, all-sky camera, `sky-report`) should override the forecast filter in `autorun`; the all-sky camera has no night-time cloud method yet.
+* In-daemon automatic reconnection is not built. `--init-fallback fake-init` is untested on the real mount. `RunAddReference` and `HaltTasks` have never been used.
+* Forecast accuracy has one night of record; backfilling earlier nights and a seeing-versus-cloud analysis are not done.
+* The control layer is not abstracted from the Origin (`OriginBackend` is called directly and the pixel scale, black level and firmware workarounds are fixed in the code), although nothing precludes other smart telescopes such as OpenStellina.
+* A proper automated test of the sequencer against the simulator (`OriginSimulator` serves raw FITS now but cannot exercise unpark, solving or alignment).
 
 ## OriginHeadless: GUI-free server, CLI and daemon
 
