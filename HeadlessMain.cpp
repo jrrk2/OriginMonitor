@@ -860,6 +860,16 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth)
         bool defocusFix = false;
         if (lastV == "defocused") { const QJsonObject nc = Weather::metarNowcast(g_run.o.site.latDeg, g_run.o.site.lonDeg, originDataDir(), 10, nullptr); defocusFix = !nc["ok"].toBool() || nc["cover_pct"].toDouble() < 60; }
         if (lastV == "trailed" || defocusFix) {
+            if (lastV == "defocused" && regotos >= 1 && ++trailedFrames >= 3 && g_run.refocuses < 6) {
+                // a re-centre (the telescope's own autofocus) already failed to fix it: sweep the focuser ourselves, wide enough to reach the usual best position from wherever it is
+                call("sequence", {{"action", "stop"}, {"reason", "defocused: refocusing"}});
+                runLog("refocus", {{"target", t["key"]}, {"why", "still defocused after a re-centre"}});
+                const Cmd* fs = nullptr; for (const Cmd& c : commands()) if (c.name == "focus-sweep") fs = &c;
+                Parsed fp; fp.v["span"] = 900; fp.v["step"] = 100; fp.v["frames"] = 2; fp.v["exposure"] = 4; fp.v["apply"] = true;
+                const QJsonObject sw = cmdFocusSweep(fp, *fs);
+                runLog("refocus_done", {{"ok", sw["ok"]}, {"best", sw["best"]}}); ++g_run.refocuses; g_run.lastRefocus = QDateTime::currentDateTimeUtc();
+                trailedFrames = 0; call("set", {{"exposure", exposure}, {"iso", iso}}); startSeq(exposure, iso, endUtc, true); lastTick = now; continue;
+            }
             if (++trailedFrames >= (lastV == "trailed" ? 2 : 3) && regotos < 3) {
                 call("sequence", {{"action", "stop"}, {"reason", "trailed stars: re-centring"}});
                 const QJsonObject g = call("goto", {{"ra_hours", t["ra_hours"]}, {"dec_deg", t["dec_deg"]}, {"timeout", 240}}, 300000);
