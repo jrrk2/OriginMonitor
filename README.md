@@ -12,8 +12,8 @@ Everything below describes the headless/Linux route that was used to image on **
 
 ## Licence
 
-This program is free software under the **GNU General Public Licence, version 3 or (at your option) any later version** (see `LICENSE`), because part of its functionality
-was taken from **Origin Live View** (OLV) by Gene Hunter, which states that it "can be freely distributed under GPL License" (no version given). It comes with no warranty.
+This program is free software under the **GNU General Public Licence, version 3 or (at your option) any later version** (see `LICENSE`), because the focuser commands
+were taken from **Origin Live View** (OLV) by Gene Hunter, which states that it "can be freely distributed under GPL License" (no version given). It comes with no warranty.
 
 Third-party pieces are used under their own terms and are not part of this repository: Qt 6, NAIF's CSPICE and the JPL DE440 ephemeris, astrometry.net (run as an external
 program), Open-Meteo (free for non-commercial use) and aviationweather.gov observations.
