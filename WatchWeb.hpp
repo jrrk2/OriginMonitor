@@ -4,6 +4,7 @@
 // Access is limited to private-network peers (loopback, 10/8, 172.16/12, 192.168/16, link-local, fc00::/7), so a router that forwards the port by mistake does not publish it,
 // and optionally to a shared token (?t=TOKEN once, then a cookie). It never writes anything and never talks to the telescope: the handler only shows what the OriginWatch window shows.
 
+#include <QDateTime>
 #include <QFile>
 #include <QHostAddress>
 #include <QObject>
@@ -44,6 +45,11 @@ public:
             auto* s = new QSslServer(this); s->setSslConfiguration(cfg); m_server = s; m_tls = true;
         } else m_server = new QTcpServer(this);
         if (!m_server->listen(bind, port)) { *err = m_server->errorString(); return false; }
+        if (auto* ss = qobject_cast<QSslServer*>(m_server)) {
+            connect(ss, &QSslServer::startedEncryptionHandshake, this, [](QSslSocket* s) { fprintf(stderr, "%s web TLS handshake from %s\n", qPrintable(QDateTime::currentDateTime().toString(Qt::ISODate)), qPrintable(s->peerAddress().toString())); });
+            connect(ss, &QSslServer::errorOccurred, this, [](QSslSocket* s, QAbstractSocket::SocketError e) { fprintf(stderr, "  TLS/socket error from %s: %d\n", qPrintable(s->peerAddress().toString()), int(e)); });
+            connect(ss, &QSslServer::sslErrors, this, [](QSslSocket* s, const QList<QSslError>& errs) { for (const QSslError& e : errs) fprintf(stderr, "  TLS error from %s: %s\n", qPrintable(s->peerAddress().toString()), qPrintable(e.errorString())); });
+        }
         connect(m_server, &QTcpServer::newConnection, this, &WebServer::onConnection);
         connect(m_server, &QTcpServer::pendingConnectionAvailable, this, &WebServer::onConnection);        // QSslServer queues a socket only after the TLS handshake
         return true;
@@ -67,7 +73,8 @@ private:
     void onConnection()
     {
         while (QTcpSocket* s = m_server->nextPendingConnection()) {
-            if (!privatePeer(s->peerAddress())) { s->abort(); s->deleteLater(); continue; }
+            fprintf(stderr, "%s web connection from %s\n", qPrintable(QDateTime::currentDateTime().toString(Qt::ISODate)), qPrintable(s->peerAddress().toString()));
+            if (!privatePeer(s->peerAddress())) { fprintf(stderr, "  refused: not a private-network address\n"); s->abort(); s->deleteLater(); continue; }
             auto* buf = new QByteArray; auto* timer = new QTimer(s); timer->setSingleShot(true);
             connect(timer, &QTimer::timeout, s, [s] { s->abort(); });
             connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
@@ -96,6 +103,8 @@ private:
             if (!ok) { r.status = 403; r.type = "text/plain"; r.body = "forbidden: open the address with ?t=TOKEN once\n"; }
             else r = m_handler(url.path(), q);
         }
+        fprintf(stderr, "%s web %s %s -> %d\n", qPrintable(QDateTime::currentDateTime().toString(Qt::ISODate)), qPrintable(s->peerAddress().toString()),
+                first.size() >= 2 ? qPrintable(QString::fromLatin1(first[0]) + " " + QUrl::fromEncoded(first[1]).path()) : "(malformed)", r.status);      // access log: path only, never the query (it holds the token)
         const char* reason = r.status == 200 ? "OK" : r.status == 403 ? "Forbidden" : r.status == 404 ? "Not Found" : r.status == 405 ? "Method Not Allowed" : "Error";
         s->write("HTTP/1.1 " + QByteArray::number(r.status) + " " + reason + "\r\nContent-Type: " + r.type + "\r\nContent-Length: " + QByteArray::number(r.body.size()) +
                  "\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n" + extra + "\r\n" + r.body);
