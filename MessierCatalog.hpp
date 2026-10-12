@@ -4,6 +4,8 @@
 
 #include <QStringList>
 #include <QMap>
+#include <QSet>
+#include <QSizeF>
 
 struct MessierSkyPosition {
     double ra_deg;

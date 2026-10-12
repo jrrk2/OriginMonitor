@@ -43,8 +43,10 @@ SOURCES += \
     SkyFrame.cpp \
     Registration.cpp \
     LiveStacker.cpp \
+    Image16.cpp \
     SkyMonitor.cpp \
     Astro.cpp \
+    Ephemeris.cpp \
 
 # Original header files
 HEADERS += \
@@ -54,8 +56,10 @@ HEADERS += \
     SkyFrame.hpp \
     Registration.hpp \
     LiveStacker.hpp \
+    Image16.hpp \
     SkyMonitor.hpp \
     Astro.hpp \
+    Ephemeris.hpp \
     CoordinateUtils.hpp \
     MessierCatalog.hpp \
     DataDir.hpp \

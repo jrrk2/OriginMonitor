@@ -16,6 +16,9 @@ class OriginBackend;
  * With `pipeline` the next exposure is requested at the telescope's "image ready" notification, so download and analysis overlap it.
  * With `early` the next exposure is requested as soon as the previous exposure has finished (the telescope's LIVE preview notification),
  * while it is still writing the FITS (about 6.6 s on this telescope). If the telescope rejects that, `early` switches itself off.
+ * Focus watchdog: the median HFR of the last `focus_window` (8) good frames with at least 30 stars is compared with a baseline (`focus_baseline`, full-resolution px,
+ * else the first full window). When it stays above baseline x `focus_drift` (1.15) for 5 frames a `sequence_focus_drift` event is recorded and, with
+ * `focus_pause`, the sequence stops so that the supervisor can run focus-sweep and restart.
  * Stops on: stop command, `until_local`/`for_minutes`, `max_frames`, disconnect, or a frame that never arrives (events are recorded).
  */
 class Sequencer : public QObject
@@ -58,4 +61,10 @@ private:
     QString m_logPath, m_curPath, m_lastVerdict, m_stopReason;
     double m_curCaptureMs = 0, m_curCycleMs = 0;
     QJsonObject m_last;
+    // focus watchdog: rolling median of the HFR of good frames against a baseline (given, or the first full window)
+    QList<double> m_hfrWin;
+    double m_hfrBase = 0, m_hfrMedian = 0, m_driftRatio = 1.15;
+    int m_focusWin = 8, m_driftRun = 0, m_drifts = 0;
+    bool m_focusPause = false;
+    QString m_lastCause;                            // cause of the previous bad frame (obstruction | cloud | unknown), empty after a good one
 };

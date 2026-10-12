@@ -1,0 +1,31 @@
+[
+ {
+  "night": "Night 1: 9/10 October",
+  "frames": 1012,
+  "verdicts": {
+   "clear": 920,
+   "cloudy": 37,
+   "hazy": 28,
+   "patchy": 11,
+   "unreadable": 16
+  },
+  "stacked_s": 18078,
+  "stacked_frames": 933
+ },
+ {
+  "night": "Night 2: 11/12 October",
+  "frames": 698,
+  "verdicts": {
+   "unreadable": 31,
+   "cloudy": 77,
+   "trailed": 3,
+   "clear": 257,
+   "unknown": 157,
+   "patchy": 132,
+   "hazy": 31,
+   "defocused": 10
+  },
+  "stacked_s": 4484,
+  "stacked_frames": 288
+ }
+]

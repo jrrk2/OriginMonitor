@@ -11,6 +11,18 @@
 
 OriginBackend::OriginBackend(QObject *parent)
     : QObject(parent)
+    , m_nextSequenceId(2000)
+    , m_webSocket(nullptr)
+    , m_dataProcessor(nullptr)
+    , m_networkManager(nullptr)
+    , m_statusTimer(nullptr)
+    , m_pingTimer(nullptr)
+    , m_parkMonitorTimer(nullptr)
+    , m_connectedPort(80)
+    , m_isExposing(false)
+    , m_imageReady(false)
+    , m_logFile(nullptr)
+    , m_logStream(nullptr)
     , m_cameraManualMode(false)
     , m_currentExposure(0.1)
     , m_currentISO(200)
@@ -19,22 +31,10 @@ OriginBackend::OriginBackend(QObject *parent)
     , m_lastImageRa(0)
     , m_lastImageDec(0)
     , m_lastImageExposure(0)
-    , m_webSocket(nullptr)
-    , m_dataProcessor(nullptr)
-    , m_networkManager(nullptr)
-    , m_statusTimer(nullptr)
-    , m_pingTimer(nullptr)
-    , m_connectedPort(80)
-    , m_isExposing(false)
-    , m_imageReady(false)
-    , m_nextSequenceId(2000)
-    , m_logFile(nullptr)
-    , m_logStream(nullptr)
     , m_statusRotation(0)
     , m_parkingInProgress(false)
     , m_unparkingInProgress(false)
     , m_targetAltitude(0.0)
-    , m_parkMonitorTimer(nullptr)
 {
     m_webSocket = new QWebSocket("", QWebSocketProtocol::VersionLatest, this);
     m_dataProcessor = new TelescopeDataProcessor(this);
@@ -52,12 +52,12 @@ OriginBackend::OriginBackend(QObject *parent)
     connect(m_webSocket, &QWebSocket::textMessageReceived, this, &OriginBackend::onTextMessageReceived);
 
     // ADD THESE - WebSocket ping/pong handling:
-    connect(m_webSocket, &QWebSocket::pong, this, [this](quint64 elapsedTime, const QByteArray &payload) {
+    connect(m_webSocket, &QWebSocket::pong, this, [this](quint64 elapsedTime, const QByteArray &) {
         qDebug() << "Pong received, RTT:" << elapsedTime << "ms";
         logWebSocketMessage("PONG", QString("RTT: %1ms").arg(elapsedTime));
     });
     
-    connect(m_webSocket, QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error),
+    connect(m_webSocket, &QWebSocket::errorOccurred,
             this, [this](QAbstractSocket::SocketError error) {
         qWarning() << "WebSocket error:" << error << m_webSocket->errorString();
         logWebSocketMessage("ERROR", QString("Code: %1, Message: %2")
@@ -232,7 +232,7 @@ void OriginBackend::stopContinuousSnapshots()
   emit continuousSnapshotsChanged(false);
 }
 
-bool OriginBackend::takeSnapshot(double exposure, int iso, int binning)
+bool OriginBackend::takeSnapshot(double exposure, int iso, int binning, bool forceBitDepth)
 {
     qDebug() << "Taking snapshot: Exposure =" << exposure << "ISO =" << iso;
     if (!isConnected()) {
@@ -240,6 +240,10 @@ bool OriginBackend::takeSnapshot(double exposure, int iso, int binning)
         return false;
     }
 
+    // Remember what was asked, so that the parameters are resent after the capture: the telescope resets them and a frame taken with the reset values comes back as a PNG
+    // instead of the raw FITS (every frame of a 2026-10-11 survey did, because explicit-exposure snapshots never registered their parameters)
+    if (exposure > 0) m_requestedExposure = exposure;
+    if (iso > 0) m_requestedISO = iso;
     m_snapshotInProgress = true;
     // RunSampleCapture command triggers a single snapshot
     QJsonObject params;
@@ -249,7 +253,7 @@ bool OriginBackend::takeSnapshot(double exposure, int iso, int binning)
     // Snapshots are always the raw 16-bit Bayer frame (FITS). Ask for that explicitly: older firmware defaulted to a
     // debayered TIFF when "Debayer" was absent (logs Oct 2025 - Jan 2026), current firmware (Origin 1.5.6240) defaults
     // to raw FITS, so relying on the default would change the file type after a firmware update.
-    if (m_requestedBitDepth != 16)
+    if (m_requestedBitDepth != 16 || forceBitDepth)
         setCameraBitDepth(16);
     params["Debayer"] = false;
     
@@ -642,6 +646,7 @@ bool OriginBackend::isImageReady() const
     return m_imageReady;
 }
 
+#ifndef ORIGIN_NO_GUI
 QImage OriginBackend::getLastImage() const
 {
     return m_lastImage;
@@ -651,6 +656,8 @@ void OriginBackend::setLastImage(const QImage& image)
 {
     m_lastImage = image;
 }
+
+#endif
 
 void OriginBackend::setImageReady(bool ready)
 {
@@ -717,6 +724,7 @@ bool OriginBackend::setCameraISO(int iso)
     return true;
 }
 
+#ifndef ORIGIN_NO_GUI
 QImage OriginBackend::singleShot(int gain, int binning, int exposureTimeMicroseconds)
 {
     if (!isConnected()) {
@@ -773,6 +781,7 @@ QImage OriginBackend::singleShot(int gain, int binning, int exposureTimeMicrosec
         return QImage();
     }
 }
+#endif
 
 // Also log connection events by modifying these methods:
 void OriginBackend::onWebSocketConnected()
@@ -1001,6 +1010,7 @@ void OriginBackend::updateStatusFromProcessor()
     m_status.isTracking = data.mount.isTracking;
     m_status.isSlewing = !data.mount.isGotoOver;
     m_status.isAligned = data.mount.isAligned;
+    m_sky.setMountAligned(data.mount.isAligned);
     
     // Convert coordinates from radians
     m_status.raPosition = radiansToHours(data.mount.enc0); // Assuming enc0 is RA
@@ -1029,8 +1039,9 @@ void OriginBackend::updateStatusFromProcessor()
 void OriginBackend::requestImage(const QString &filePath, bool isSnapshot) {
     if (m_connectedHost.isEmpty()) return;
     
+    const QString hostPort = m_connectedPort == 80 ? m_connectedHost : QString("%1:%2").arg(m_connectedHost).arg(m_connectedPort);
     QString fullPath = QString("http://%1/SmartScope-1.0/dev2/%2")
-                       .arg(m_connectedHost, filePath);
+                       .arg(hostPort, filePath);
     QUrl url(fullPath);
     QNetworkRequest request(url);
     
@@ -1081,9 +1092,13 @@ void OriginBackend::requestImage(const QString &filePath, bool isSnapshot) {
                 // Live stream - could emit different signal or handle directly
                 // For now, your existing code handles this
 		// Try to load as an image
+#ifndef ORIGIN_NO_GUI
 		QImage image;
 		if (image.loadFromData(imageData)) {
 		    m_lastImage = image;
+#else
+		if (!imageData.isEmpty()) {                 // headless build: no image decoder, the encoded bytes are passed on as they are
+#endif
 		    m_imageReady = true;
 
 		    if (false) qDebug() << "Image downloaded successfully, size:" << imageData.size() << "bytes";

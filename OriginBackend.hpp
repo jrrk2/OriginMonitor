@@ -9,7 +9,9 @@
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
+#ifndef ORIGIN_NO_GUI
 #include <QImage>
+#endif
 #include <QUuid>
 #include <QFile>
 #include <QTextStream>
@@ -94,14 +96,18 @@ public:
     void setCameraConnected(bool connected);
     bool isExposing() const;
     bool isImageReady() const;
+#ifndef ORIGIN_NO_GUI
     QImage getLastImage() const;
     void setLastImage(const QImage& image);
+#endif
     void setImageReady(bool ready);
     bool abortExposure();
+#ifndef ORIGIN_NO_GUI
     QImage singleShot(int gain, int binning, int exposureTimeMicroseconds);
+#endif
     void sendCommand(const QString& command, const QString& destination, 
                     const QJsonObject& params = QJsonObject());
-    bool takeSnapshot(double exposure, int iso, int binning);
+    bool takeSnapshot(double exposure, int iso, int binning, bool forceBitDepth = false);   // forceBitDepth: send BitDepth 16 even if it was sent before (the telescope drops it after a slew and the frame comes back as a PNG)
     bool setManualMode();
     bool setAutoMode();
     bool getCameraMode();
@@ -187,7 +193,9 @@ private:
     int m_connectedPort;
     bool m_isExposing;
     bool m_imageReady;
+#ifndef ORIGIN_NO_GUI
     QImage m_lastImage;
+#endif
     
     // Current telescope status
     TelescopeStatus m_status;

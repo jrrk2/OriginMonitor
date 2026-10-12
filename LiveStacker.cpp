@@ -61,7 +61,8 @@ double flattenPlane(std::vector<float>& img, int w, int h)
         for (size_t i = 0; i < g.size(); ++i) G[i] = num[i] / std::max(den[i], 1e-3f);
         std::vector<float> r; for (size_t i = 0; i < g.size(); ++i) if (wt[i] > 0) r.push_back(g[i] - G[i]);
         std::nth_element(r.begin(), r.begin() + r.size() / 2, r.end()); const float md = r[r.size() / 2];
-        for (auto& t : r) t = std::fabs(t - md); std::nth_element(r.begin(), r.begin() + r.size() / 2, r.end()); const float sd = 1.4826f * r[r.size() / 2] + 1e-6f;
+        for (auto& t : r) t = std::fabs(t - md);
+        std::nth_element(r.begin(), r.begin() + r.size() / 2, r.end()); const float sd = 1.4826f * r[r.size() / 2] + 1e-6f;
         for (size_t i = 0; i < g.size(); ++i) wt[i] = (g[i] - G[i] - md) > 1.5f * sd ? 0.f : 1.f;
     }
     // bilinear interpolation of the block model (block centres at (x + 0.5) * B)
@@ -75,7 +76,8 @@ double flattenPlane(std::vector<float>& img, int w, int h)
     }
     std::vector<float> s; for (int y = 0; y < h; y += 4) for (int x = 0; x < w; x += 4) s.push_back(img[size_t(y) * w + x]);
     std::nth_element(s.begin(), s.begin() + s.size() / 2, s.end()); const float md = s[s.size() / 2];
-    for (auto& t : s) t = std::fabs(t - md); std::nth_element(s.begin(), s.begin() + s.size() / 2, s.end());
+    for (auto& t : s) t = std::fabs(t - md);
+    std::nth_element(s.begin(), s.begin() + s.size() / 2, s.end());
     return 1.4826 * s[s.size() / 2] + 1e-6;
 }
 
@@ -165,7 +167,7 @@ void extractBackground(std::vector<float>& plane, int w, int h, int cell, double
 
 }   // namespace
 
-static QImage vlStretchToImage(std::vector<float> col[3], int w, int h)
+static Image16 vlStretchToImage(std::vector<float> col[3], int w, int h)
 {
     const size_t n = size_t(w) * h;
     // non-negative linear data: lift the noise floor, remove the sky model, normalise to the brightest pixels
@@ -208,7 +210,8 @@ static QImage vlStretchToImage(std::vector<float> col[3], int w, int h)
         double mean = 0; for (float v : l) mean += v; mean /= l.size(); double var = 0; for (float v : l) var += (v - mean) * (v - mean); const float sd = float(std::sqrt(var / l.size()));
         const float mn = *std::min_element(l.begin(), l.end()), md = percentileOf(l, 50);
         const float floor_ = std::max(mn, md - 2.7f * sd); float soft = percentileOf(l, 99.0), hard = percentileOf(l, 99.99);
-        if (soft <= floor_) soft = floor_ + 1e-6f; if (hard <= soft) hard = soft + 1e-6f;
+        if (soft <= floor_) soft = floor_ + 1e-6f;
+        if (hard <= soft) hard = soft + 1e-6f;
         const float ped = 0.001f, scale = std::min((0.98f - ped) / (soft - floor_ + 1e-9f), (1.f - ped) / (hard - floor_ + 1e-9f));
         for (auto& v : rgb) v = std::clamp((v - floor_) * scale + ped, 0.f, 1.f);
         std::vector<float> l2; for (size_t i = 0; i < n; i += 5) l2.push_back(lumaOf(&rgb[i * 3]));
@@ -216,10 +219,10 @@ static QImage vlStretchToImage(std::vector<float> col[3], int w, int h)
         if (cur > 0 && cur < 1 && std::fabs(cur - targetBg) > 1e-3f) { const float m = cur * (targetBg - 1) / (cur * (2 * targetBg - 1) - targetBg); for (auto& v : rgb) v = mtfF(v, m); }
         for (auto& v : rgb) v = softClipF(v);
     }
-    QImage img(w, h, QImage::Format_RGBX64);                           // 16 bits per channel
+    Image16 img = Image16::make(w, h);
     for (int y = 0; y < h; ++y) {
-        quint16* line = reinterpret_cast<quint16*>(img.scanLine(h - 1 - y));    // FITS rows run bottom-up
-        for (int x = 0; x < w; ++x) { for (int c = 0; c < 3; ++c) line[4 * x + c] = quint16(rgb[(size_t(y) * w + x) * 3 + c] * 65535.f + 0.5f); line[4 * x + 3] = 65535; }
+        quint16* line = img.row(h - 1 - y);                                     // FITS rows run bottom-up
+        for (int x = 0; x < w; ++x) for (int c = 0; c < 3; ++c) line[3 * x + c] = quint16(rgb[(size_t(y) * w + x) * 3 + c] * 65535.f + 0.5f);
     }
     return img;
 }
@@ -345,9 +348,9 @@ LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double
     return rep;
 }
 
-QImage LiveStacker::preview() const
+Image16 LiveStacker::preview() const
 {
-    if (m_frames == 0) return QImage();
+    if (m_frames == 0) return Image16();
     // Well-covered area: shrink the rectangle until every border row/column is at least 98% covered by 60% of the peak weight
     double mx = 0; for (double v : m_sw[1]) mx = std::max(mx, v);
     auto cov = [&](int x, int y) { return m_sw[1][size_t(y) * m_w + x] >= 0.6 * mx; };
@@ -395,7 +398,7 @@ bool LiveStacker::save(const QString& dir) const
     if (!f.open(QIODevice::WriteOnly) || f.write(b) != b.size()) return false;
     f.close(); QFile::remove(dir + "/state.bin");
     if (!QFile::rename(dir + "/state.bin.tmp", dir + "/state.bin")) return false;
-    preview().save(dir + "/preview.png");
+    preview().savePng(dir + "/preview.png");
     return true;
 }
 

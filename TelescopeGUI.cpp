@@ -80,7 +80,7 @@ TelescopeGUI::TelescopeGUI(QWidget *parent)
 
     // Connect live JPEG stream to image preview
     connect(originBackend, &OriginBackend::liveImageDownloaded,
-	    this, [this](const QByteArray& imageData, double ra, double dec, double exposure) {
+	    this, [this](const QByteArray& imageData, double ra, double dec, double) {
 
 		// Load image from data
 		QImage image;
@@ -1523,9 +1523,7 @@ void TelescopeGUI::analyzeImageForFocus(const QByteArray &imageData) {
         }
     }
     
-    double contrastScore = sqrt(totalVariance / totalPixels);
-    
-    // Store this score somewhere (member variable or display in UI)
+    // contrast score sqrt(totalVariance / totalPixels) is not stored or displayed yet
     //    qDebug() << "Focus quality score (contrast):" << contrastScore;
     
     // You could update a label in the UI to show this
@@ -1921,7 +1919,6 @@ void TelescopeGUI::checkMountStatus() {
     mountStatusLabel->setText(mountStatus);
     
     // Enable/disable slewing based on status
-    bool canSlew = data.mount.isAligned && data.mount.isGotoOver;
     startSlewButton->setEnabled(!isSlewingAndImaging);
 }
 
@@ -1991,7 +1988,7 @@ void TelescopeGUI::showLogReplay()
         
         // Connect signals to update main GUI as replay progresses
         connect(m_logReplayDialog, &LogReplayDialog::messageProcessed,
-                this, [this](const LogEntry& entry, bool success) {
+                this, [this](const LogEntry&, bool success) {
             if (success) {
                 // Update displays as if receiving real data
                 updateMountDisplay();
