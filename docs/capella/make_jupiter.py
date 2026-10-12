@@ -16,7 +16,7 @@ for f in fs:
     s = ndi.shift(im, (im.shape[0] / 2 - cy, im.shape[1] / 2 - cx, 0), order=1)
     acc = s if acc is None else acc + s; n += 1
     if first is None: first = s
-def crop(a, r=48): h, w = a.shape[:2]; return a[h // 2 - r:h // 2 + r, w // 2 - r:w // 2 + r]
+def crop(a, r=30): h, w = a.shape[:2]; return a[h // 2 - r:h // 2 + r, w // 2 - r:w // 2 + r]
 stack = acc / n
 bg = np.median(stack.reshape(-1, 3), axis=0); stack = stack - bg; first = first - bg      # background subtraction
 refl = crop(stack, 14).sum((0, 1)); gain = refl.max() / refl; stack = stack * gain; first = first * gain      # equal disc channels: colour is only roughly balanced
