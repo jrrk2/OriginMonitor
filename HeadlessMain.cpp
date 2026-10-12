@@ -854,15 +854,19 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth)
             continue;
         }
         // trailed stars are the mount's fault, not cloud: re-centre with a fresh goto (at most 3 times per block) instead of counting cloud time or leaving for a backup
-        if (s["last_verdict"].toString() == "trailed") {
-            if (++trailedFrames >= 2 && regotos < 3) {
+        const QString lastV = s["last_verdict"].toString();
+        // defocus is only worth a re-centre (which repeats the telescope's autofocus) while the sky is clear enough for that autofocus to see stars
+        bool defocusFix = false;
+        if (lastV == "defocused") { const QJsonObject nc = Weather::metarNowcast(g_run.o.site.latDeg, g_run.o.site.lonDeg, originDataDir(), 10, nullptr); defocusFix = !nc["ok"].toBool() || nc["cover_pct"].toDouble() < 60; }
+        if (lastV == "trailed" || defocusFix) {
+            if (++trailedFrames >= (lastV == "trailed" ? 2 : 3) && regotos < 3) {
                 call("sequence", {{"action", "stop"}, {"reason", "trailed stars: re-centring"}});
                 const QJsonObject g = call("goto", {{"ra_hours", t["ra_hours"]}, {"dec_deg", t["dec_deg"]}, {"timeout", 240}}, 300000);
-                runLog("regoto", {{"target", t["key"]}, {"why", "trailed stars (mount not tracking correctly)"}, {"ok", g["ok"]}, {"count", ++regotos}});
+                runLog("regoto", {{"target", t["key"]}, {"why", lastV == "trailed" ? "trailed stars (mount not tracking correctly)" : "defocused stars (the autofocus after the last goto ran without stars)"}, {"ok", g["ok"]}, {"count", ++regotos}});
                 trailedFrames = 0; call("set", {{"exposure", exposure}, {"iso", iso}}); startSeq(exposure, iso, endUtc, true); lastTick = now; continue;
             }
         } else trailedFrames = 0;
-        const bool probing = s["state"].toString() == "probing" && s["last_verdict"].toString() != "trailed";
+        const bool probing = s["state"].toString() == "probing" && lastV != "trailed" && lastV != "defocused";
         if (probing) { if (!cloudSince.isValid()) cloudSince = now; cloudMinTotal += lastTick.secsTo(now) / 60.0; } else cloudSince = QDateTime();
         lastTick = now;
         // a high ISO whose dark baseline was never learned reads as cloud on a clear forecast: fall back once to ISO 200

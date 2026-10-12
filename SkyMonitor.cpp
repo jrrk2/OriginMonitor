@@ -253,6 +253,19 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
         return o;
     }
 
+    // --- defocus: plenty of stars but all of them big (donuts). The telescope's own autofocus after a goto can leave the focuser far off when it ran in cloud (2026-10-11: HFR 6+ px instead of
+    // 2.4, the frames read "unknown" with 0 stars for an hour). A re-centring goto repeats that autofocus, which works once stars are visible.
+    if (!streaks.trailed && focus.stars <= 3 && F.stars.size() >= 15 && source != "unknown") {
+        std::vector<float> h; for (size_t i = 0; i < F.stars.size() && i < 30; ++i) h.push_back(F.stars[i].hfr);
+        std::sort(h.begin(), h.end()); const float med = h[h.size() / 2];
+        if (med >= 2.6f) {                                  // half-resolution pixels: focused is about 1.2, donuts 3 to 5
+            o["verdict"] = "defocused"; o["cause"] = "focus";
+            o["reasons"] = QJsonArray{QString("%1 stars but the brightest have a median radius of %2 px at half resolution (focused is about 1.2): out of focus, not cloud").arg(F.stars.size()).arg(med, 0, 'f', 1)};
+            o["cause_reasons"] = QJsonArray{"defocused stars point at the focuser, not cloud"}; o["notes"] = QJsonArray(); o["stack"] = stackSummary();
+            return o;
+        }
+    }
+
     // --- no usable pointing (mount not aligned, no plate solve): nothing about the geometry, the stack or the obstruction map can be judged
     if (source == "unknown") {
         o["verdict"] = "no_pointing";
