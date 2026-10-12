@@ -73,7 +73,7 @@ Findings from the 2026-10-09 night:
 * The stack reference seeded from a cloud-lit, soft or settling frame makes later clear frames fail to register and read cloudy: `target NAME ... reset:true`.
   The app now refuses to seed it when the sky is over 3x the stored dark baseline. A corrupted frame can also lower the stored dark baseline
   (`sky_map.json` `dark_rate`); repair it while the app is stopped.
-* Field rotation (alt-az mount) limits the exposure: `tools/fieldrot.py RA_HOURS DEC_DEG` gives the longest exposure for a corner trail under 2 px at each hour.
+* Field rotation (alt-az mount) limits the exposure: `OriginHeadless fieldrot RA_HOURS DEC_DEG` gives the longest exposure for a corner trail under 2 px at each hour.
   Targets in the east or west rotate slowly; near the meridian at high altitude the limit can be a few seconds.
 * Higher ISO gave no signal-to-noise gain (sky-limited, `tools/isoanalysis.py`); the first frames after a slew are elongated while the mount settles
   (`tools/starshape.py` measures star ellipticity); the firmware centring leaves 5-12 arcmin random offsets, so check the first raw frame.

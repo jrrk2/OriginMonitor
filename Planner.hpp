@@ -11,7 +11,7 @@
 #include <QString>
 
 /**
- * Offline observing planner and exposure limits (no telescope connection needed). C++ replacement for tools/schedule.py and tools/fieldrot.py.
+ * Offline observing planner and exposure limits (no telescope connection needed). Replaced the old tools/schedule.py and tools/fieldrot.py (deleted).
  * Sun, Moon and target altitudes come from Astro.cpp (low precision: ample for "is it dark, is it above the local horizon").
  */
 namespace Planner {
