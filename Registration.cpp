@@ -102,40 +102,44 @@ RegResult registerStars(const std::vector<SkyStar>& ref, const std::vector<SkySt
     };
     if (guess) { attempt(*guess); if (R.ok) return R; }
 
-    // Pair voting: equal separations in both lists constrain rotation and shift (scale is ~1)
-    const int K = 40;
-    const std::vector<Pair> rp = pairsOf(ref, K);
-    std::vector<Pair> tp = pairsOf(tgt, K);
-    std::sort(tp.begin(), tp.end(), [](const Pair& a, const Pair& b) { return a.d < b.d; });
-    struct Acc { int n = 0; double th = 0, tx = 0, ty = 0; };
-    std::unordered_map<long long, Acc> votes;
-    auto key = [](int a, int b, int c) { return ((long long)(a + 4096) << 40) | ((long long)(b + 4096) << 20) | (long long)(c + 4096); };
-    for (const Pair& r : rp) {
-        if (r.d < 40) continue;
-        const float tol = 0.012f * r.d + 0.8f;
-        auto lo = std::lower_bound(tp.begin(), tp.end(), r.d - tol, [](const Pair& p, float v) { return p.d < v; });
-        for (auto it = lo; it != tp.end() && it->d <= r.d + tol; ++it) {
-            for (int flip = 0; flip < 2; ++flip) {
-                const SkyStar& tk = tgt[flip ? it->j : it->i];
-                const double th = r.ang - (flip ? it->ang + kPi : it->ang);
-                const double c = std::cos(th), s = std::sin(th);
-                const SkyStar& ri = ref[r.i];
-                const double tx = ri.x - (c * tk.x - s * tk.y), ty = ri.y - (s * tk.x + c * tk.y);
-                double tn = std::remainder(th, 2 * kPi);
-                Acc& a = votes[key(int(std::lround(tn * 180 / kPi)), int(std::lround(tx / 8)), int(std::lround(ty / 8)))];
-                a.n++; a.th += tn; a.tx += tx; a.ty += ty;
+    // Pair voting over the brightest K stars of each list: 40 first (fast), then 80 when that finds nothing. Bright-star ranks are scrambled when the frames differ in ISO or saturate
+    // (21 Apr M101, ISO 1000 against an ISO 200 reference: 98 of 599 frames matched with K=40, 582 with K=80; PixInsight StarAlignment matched 588).
+    for (const int K : {40, 80}) {
+        // Equal separations in both lists constrain rotation and shift (scale is ~1)
+        const std::vector<Pair> rp = pairsOf(ref, K);
+        std::vector<Pair> tp = pairsOf(tgt, K);
+        std::sort(tp.begin(), tp.end(), [](const Pair& a, const Pair& b) { return a.d < b.d; });
+        struct Acc { int n = 0; double th = 0, tx = 0, ty = 0; };
+        std::unordered_map<long long, Acc> votes;
+        auto key = [](int a, int b, int c) { return ((long long)(a + 4096) << 40) | ((long long)(b + 4096) << 20) | (long long)(c + 4096); };
+        for (const Pair& r : rp) {
+            if (r.d < 40) continue;
+            const float tol = 0.012f * r.d + 0.8f;
+            auto lo = std::lower_bound(tp.begin(), tp.end(), r.d - tol, [](const Pair& p, float v) { return p.d < v; });
+            for (auto it = lo; it != tp.end() && it->d <= r.d + tol; ++it) {
+                for (int flip = 0; flip < 2; ++flip) {
+                    const SkyStar& tk = tgt[flip ? it->j : it->i];
+                    const double th = r.ang - (flip ? it->ang + kPi : it->ang);
+                    const double c = std::cos(th), s = std::sin(th);
+                    const SkyStar& ri = ref[r.i];
+                    const double tx = ri.x - (c * tk.x - s * tk.y), ty = ri.y - (s * tk.x + c * tk.y);
+                    double tn = std::remainder(th, 2 * kPi);
+                    Acc& a = votes[key(int(std::lround(tn * 180 / kPi)), int(std::lround(tx / 8)), int(std::lround(ty / 8)))];
+                    a.n++; a.th += tn; a.tx += tx; a.ty += ty;
+                }
             }
         }
-    }
-    // Rank bins by their own votes plus the neighbours', try the best few
-    std::vector<std::pair<int, Acc>> top;
-    for (auto& [k, a] : votes) if (a.n >= 3) top.push_back({a.n, a});
-    std::sort(top.begin(), top.end(), [](const auto& x, const auto& y) { return x.first > y.first; });
-    for (size_t i = 0; i < top.size() && i < 6 && !R.ok; ++i) {
-        const Acc& a = top[i].second;
-        const double th = a.th / a.n;
-        Similarity T; T.a = std::cos(th); T.b = std::sin(th); T.tx = a.tx / a.n; T.ty = a.ty / a.n;
-        attempt(T);
+        // Rank bins by their own votes plus the neighbours', try the best few
+        std::vector<std::pair<int, Acc>> top;
+        for (auto& [k, a] : votes) if (a.n >= 3) top.push_back({a.n, a});
+        std::sort(top.begin(), top.end(), [](const auto& x, const auto& y) { return x.first > y.first; });
+        for (size_t i = 0; i < top.size() && i < 6 && !R.ok; ++i) {
+            const Acc& a = top[i].second;
+            const double th = a.th / a.n;
+            Similarity T; T.a = std::cos(th); T.b = std::sin(th); T.tx = a.tx / a.n; T.ty = a.ty / a.n;
+            attempt(T);
+        }
+        if (R.ok) break;
     }
     return R;
 }
