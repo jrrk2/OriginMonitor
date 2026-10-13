@@ -150,7 +150,7 @@ const QList<Cmd>& commands()
         v.append({"run", "planning", "UNATTENDED night supervisor: follows the plan, goes to a backup target on obstruction or prolonged cloud, refocuses on drift, parks on a rain forecast or at dawn. Needs --unattended (it slews); --dry-run only prints the plan.", "", true, false,
                   [] { QList<Arg> a = {O("unattended", 'b', "confirm that the supervisor may slew and run all night"), O("dry-run", 'b', "print the plan and backups, do nothing"),
                                        O("iso", 'i', "ISO for the frames (falls back once to 200 if the first frames are all rejected on a clear forecast)", "800"),
-                                       O("max-exposure", 'd', "longest exposure, s (further limited by field rotation for each block)", "20"),
+                                       O("max-exposure", 'd', "longest exposure, s: used for faint targets, 40% of it for the brightest, and further limited by field rotation for each block", "20"),
                                        O("cloud-patience", 'd', "minutes of cloud before going to a backup target", "10"), O("give-up", 'd', "minutes of cloud on one block before moving to the next block", "60"),
                                        O("not-before", 's', "\"dusk\" (Sun below -12 deg at the site) or a local HH:MM; no slewing before this", "dusk"), O("connect", 's', "telescope host to reconnect to (default: the server's)"),
                                        O("mail", 'b', "e-mail a summary of the night when the run ends")};
@@ -784,9 +784,12 @@ bool rainSoon()
     return false;
 }
 
+// The exposure for a block: --max-exposure is the ceiling for the faintest targets, scaled down to 40% of it for bright ones (faintness 0, e.g. M1, M27, M45: 8 s of a 20 s ceiling) because
+// a bright target needs less time per frame to stand out of the sky and keeps its stars and core from saturating; both are then limited by field rotation. No faintness in the entry (a backup target
+// from an older plan) means the full ceiling.
 double exposureFor(const QJsonObject& t, const QDateTime& from, const QDateTime& to)
 {
-    double lim = g_run.maxExposure;
+    double lim = g_run.maxExposure * (0.4 + 0.6 * std::clamp(t["faintness"].isDouble() ? t["faintness"].toDouble() : 1.0, 0.0, 1.0));
     const QDateTime mid = from.addSecs(from.secsTo(to) / 2);
     for (const QDateTime& when : {from, mid, to}) {
         const Planner::RotLimit r = Planner::maxExposure(t["ra_hours"].toDouble(), t["dec_deg"].toDouble(), g_run.o.site, when, 2.0);
