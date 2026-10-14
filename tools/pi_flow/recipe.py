@@ -46,9 +46,12 @@ def choose(m, cls, size_arcmin, faint, obj_snr, nframes, total_s):
 
     # --- stretch: put the target's typical brightness at a class-dependent display level (arcsinh, colour preserving)
     star_field = cls in ('open_cluster', 'globular_cluster')
+    extended = size_arcmin >= 60 and not star_field        # a target as large as a third of the 75 x 50 arcmin frame or more: its bright core must not set the display level
     level = 0.12 if star_field else (0.40 if faint < 0.3 else 0.33 if faint < 0.7 else 0.27)
-    S['stretch'] = {'target_display_level': level, 'black_sigma': 1.0, 'reference': 'sky background' if star_field else 'target region'}
-    why['stretch'] = '%s, faintness %.1f: display level %.2f for the %s' % (cls, faint, level, 'sky (the stars are the subject)' if star_field else 'target region')
+    if extended: level = 0.30
+    ref = 'sky background' if star_field else ('extended signal' if extended else 'target region')
+    S['stretch'] = {'target_display_level': level, 'black_sigma': 1.0 if not extended else 0.5, 'reference': ref}
+    why['stretch'] = '%s, %.0f arcmin, faintness %.1f: display level %.2f for the %s' % (cls, size_arcmin, faint, level, {'sky background': 'sky (the stars are the subject)', 'extended signal': '85th percentile of the smoothed signal (the target fills the frame: the faint outer parts, not the core, set the stretch)', 'target region': 'target region'}[ref])
 
     # --- colour saturation and chroma noise
     base = {'emission_nebula': 2.2, 'snr': 2.2, 'planetary_nebula': 2.0, 'reflection_nebula': 2.0, 'galaxy': 1.8, 'open_cluster': 1.6, 'globular_cluster': 1.6}.get(cls, 1.8)

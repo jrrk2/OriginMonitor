@@ -17,25 +17,38 @@ from PIL import Image
 import assess, recipe, pi_run
 
 
+def header_of(path):
+    """primary FITS header, or the image extension's for a tile-compressed (.fz) file"""
+    h = fits.getheader(path)
+    if 'RA' not in h and 'CRVAL1' not in h:
+        try: h = fits.getheader(path, ext=1)
+        except Exception: pass
+    return h
+
+
 def log(msg): print('[%s] %s' % (time.strftime('%H:%M:%S'), msg), flush=True)
 
 
 # ------------------------------------------------------------------------------------------------ stack from frames
-def stack_from_frames(frames, work, rejection, ref_index=None):
-    """raw Bayer FITS -> debayer (the Origin's layout is GRBG as PixInsight reads the file) -> align -> integrate. Returns the path of the integrated FITS with red and blue in their right order."""
+def stack_from_frames(frames, work, rejection, ref_index=None, debayered=False):
+    """frames -> (debayer: the Origin's raw layout is GRBG as PixInsight reads the file) -> align -> integrate. Frames that are already RGB (debayered by the telescope app, 3 planes) skip the debayer step; .fz files
+    are unpacked with funpack. Returns the path of the integrated FITS (red and blue in their right order)."""
     raw = os.path.join(work, 'raw')
     for sub in ('raw', 'deb', 'reg'): os.makedirs(os.path.join(work, sub), exist_ok=True)
-    for i, f in enumerate(frames):
+    for i, fr in enumerate(frames):
         dst = os.path.join(raw, 'f_%03d.fits' % i)
-        if not os.path.exists(dst): os.symlink(os.path.abspath(f), dst)
+        if os.path.exists(dst): continue
+        if fr.endswith('.fz'):
+            with open(dst, 'wb') as out: subprocess.run(['funpack', '-C', '-S', fr], stdout=out, check=True)
+        else: os.symlink(os.path.abspath(fr), dst)
     ref = len(frames) // 2 if ref_index is None else ref_index
+    src_dir = 'raw' if debayered else 'deb'
     rejmap = {'PercentileClip': 'PercentileClip', 'SigmaClip': 'SigmaClip', 'WinsorizedSigmaClip': 'WinsorizedSigmaClip', 'LinearFit': 'LinearFit'}
     body = '''
 var base = "%(w)s/";
 var files = searchDirectory(base + "raw/*.fits", false).sort();
-var D = new Debayer; D.bayerPattern = Debayer.prototype.GBRG; D.debayerMethod = Debayer.prototype.VNG; D.outputDirectory = base + "deb"; D.outputPostfix = "_d"; D.overwriteExistingFiles = true;
-D.targetItems = files.map(function(f){ return [true, f]; }); D.executeGlobal(); __out += "debayered\\n";
-var deb = searchDirectory(base + "deb/*.xisf", false).sort();
+%(debayer)s
+var deb = searchDirectory(base + "%(srcdir)s/*.%(srcext)s", false).sort();
 var A = new StarAlignment; A.referenceImage = deb[%(ref)d]; A.referenceIsFile = true; A.targets = deb.map(function(f){ return [true, true, f]; });
 A.outputDirectory = base + "reg"; A.overwriteExistingFiles = true; A.onError = StarAlignment.prototype.Continue; A.generateMasks = false; A.executeGlobal(); __out += "aligned\\n";
 var reg = searchDirectory(base + "reg/*.xisf", false).sort();
@@ -43,20 +56,21 @@ var I = new ImageIntegration; I.images = reg.map(function(f){ return [true, f, "
 I.rejection = ImageIntegration.prototype.%(rej)s; I.normalization = ImageIntegration.prototype.AdditiveWithScaling; I.weightMode = ImageIntegration.prototype.NoiseEvaluation;
 I.rejectionNormalization = ImageIntegration.prototype.Scale; I.sigmaLow = 4; I.sigmaHigh = 3; I.generateRejectionMaps = false; I.generateIntegratedImage = true; I.evaluateNoise = true;
 I.executeGlobal(); var w = ImageWindow.activeWindow; w.saveAs(base + "integrated.fits", false, false, false, false); __out += "integrated " + reg.length + " frames\\n";
-''' % {'w': work, 'ref': ref, 'rej': rejmap[rejection]}
+''' % {'w': work, 'ref': ref, 'rej': rejmap[rejection], 'srcdir': src_dir, 'srcext': 'fits' if debayered else 'xisf',
+          'debayer': '' if debayered else 'var D = new Debayer; D.bayerPattern = Debayer.prototype.GBRG; D.debayerMethod = Debayer.prototype.VNG; D.outputDirectory = base + "deb"; D.outputPostfix = "_d"; D.overwriteExistingFiles = true;\nD.targetItems = files.map(function(f){ return [true, f]; }); D.executeGlobal(); __out += "debayered\\n";'}
     ok, text, dt = pi_run.run(body, work, 'stack', timeout=7200)
     log('stack from %d frames: %s in %.0f s' % (len(frames), 'ok' if ok else 'FAILED', dt))
     if not ok: raise RuntimeError('stack failed:\n' + text[-1500:])
-    res, good = check_registration(work, len(frames))
+    res, good = check_registration(work, len(frames), suffix='_r' if debayered else '_d_r')
     if not good: raise RuntimeError('StarAlignment left the frames unregistered (%s): do not use this stack; use the live stacker registration instead' % res)
     return os.path.join(work, 'integrated.fits')
 
 
-def check_registration(work, n, min_fraction=0.7):
+def check_registration(work, n, min_fraction=0.7, suffix='_d_r'):
     """StarAlignment can report success and still leave frames essentially unregistered (seen 2026-10-14: 180 frames of 4 s at altitude 81, field rotating fast, "180 succeeded" and a stack of star trails).
     Export a few registered frames and compare their brightest stars with the reference frame's: the fraction that coincide within 2 px must be high. Returns (fractions, ok)."""
-    ids = sorted({0, n // 4, n // 2, (3 * n) // 4, n - 1}); body = ('var ids = %s; for (var i = 0; i < ids.length; ++i) { var s = ("000" + ids[i]).slice(-3); var w = ImageWindow.open("%s/reg/f_" + s + "_d_r.xisf")[0];'
-                                                                     ' w.saveAs("%s/chk_" + s + ".fits", false, false, false, false); w.forceClose(); }') % (ids, work, work)
+    ids = sorted({0, n // 4, n // 2, (3 * n) // 4, n - 1}); body = ('var ids = %s; for (var i = 0; i < ids.length; ++i) { var s = ("000" + ids[i]).slice(-3); var w = ImageWindow.open("%s/reg/f_" + s + "%s.xisf")[0];'
+                                                                     ' w.saveAs("%s/chk_" + s + ".fits", false, false, false, false); w.forceClose(); }') % (ids, work, suffix, work)
     ok, text, dt = pi_run.run(body, work, 'chk')
     def peaks(p):
         d = fits.getdata(p).astype(np.float64); L = d.mean(0); H, W = L.shape; Ls = ndi.gaussian_filter(L, 1.0); bg = ndi.zoom(ndi.median_filter(L[::4, ::4], size=25), 4, order=1)[:H, :W]
@@ -91,17 +105,22 @@ def gaia_cone(ra, dec, radius, work, gmax=18.5):
     raise RuntimeError('no Gaia source available')
 
 
+def pointing(h):
+    """telescope pointing (RA, Dec degrees) from a frame header: the WCS reference value when present, else RA and DEC"""
+    return (h['CRVAL1'], h['CRVAL2']) if 'CRVAL1' in h else (h['RA'], h['DEC'])
+
+
 def solve_wcs(L, ref_hdr, work, binning=1):
     """plate-match the stack to Gaia: start from the pointing and orientation in the raw frame header, find the offset by voting, refine an affine transform. Returns a WCS header (FITS convention, y up) or None."""
-    H, W = L.shape; ra0, dec0 = ref_hdr['CRVAL1'], ref_hdr['CRVAL2']
+    H, W = L.shape; ra0, dec0 = pointing(ref_hdr)
     g = gaia_cone(ra0, dec0, 0.7, work)
     Ls = ndi.gaussian_filter(L, 1.0); bg = ndi.zoom(ndi.median_filter(L[::4, ::4], size=25), 4, order=1)[:H, :W]
     valid = ndi.binary_erosion(L > 0, iterations=30)
-    pk = (Ls == ndi.maximum_filter(Ls, size=9)) & valid & (Ls - bg > 0.008); py, px = np.nonzero(pk)
+    pk = (Ls == ndi.maximum_filter(Ls, size=9)) & valid & (Ls - bg > 8 * assess.smooth_noise(Ls, bg, valid)); py, px = np.nonzero(pk)
     ra, dec = np.radians(g['ra']), np.radians(g['dec']); r0, d0 = np.radians(ra0), np.radians(dec0)
     cosc = np.sin(d0) * np.sin(dec) + np.cos(d0) * np.cos(dec) * np.cos(ra - r0)
     xi = np.degrees(np.cos(dec) * np.sin(ra - r0) / cosc); eta = np.degrees((np.cos(d0) * np.sin(dec) - np.sin(d0) * np.cos(dec) * np.cos(ra - r0)) / cosc)
-    s1, s2, rot0 = ref_hdr['CDELT1'] * binning, ref_hdr['CDELT2'] * binning, math.radians(ref_hdr['CROTA2'])
+    s1 = ref_hdr.get('CDELT1', -1.478 / 3600) * binning; s2 = ref_hdr.get('CDELT2', 1.478 / 3600) * binning; rot0 = math.radians(ref_hdr.get('CROTA2', 0.0))
     amp = (Ls - bg)[py, px]; top = np.argsort(-amp)[:1500]; ppx, ppy = px[top].astype(float), py[top].astype(float); bright = np.argsort(g['phot_g_mean_mag'])[:400]
     def cd_for(delta_deg):
         rot = rot0 + math.radians(delta_deg); return np.array([[s1 * math.cos(rot), -s2 * math.sin(rot)], [s1 * math.sin(rot), s2 * math.cos(rot)]])
@@ -120,8 +139,8 @@ def solve_wcs(L, ref_hdr, work, binning=1):
         for dd in pass_deltas:
             r = vote(dd, flips, 1800.0, 20.0, 250)
             if r and (best is None or r[0] > best[0]): best = r
-        if best and best[0] >= 8: break
-    if best is None or best[0] < 8: log('astrometry: no convincing offset peak (best z %.1f)' % (best[0] if best else float('nan'))); return None
+        if best and best[0] >= 15: break                  # a chance peak in a sparse field can reach z of 8 to 10; real matches score 25 and more
+    if best is None or best[0] < 12: log('astrometry: no convincing offset peak (best z %.1f)' % (best[0] if best else float('nan'))); return None
     fine = None
     for dd in np.arange(best[6] - 0.6, best[6] + 0.61, 0.1):
         r = vote(dd, [(best[1], best[2])], 45.0, 3.0, 400, center=(best[3], best[4]))
@@ -142,8 +161,8 @@ def solve_wcs(L, ref_hdr, work, binning=1):
         A = np.linalg.lstsq(P[ii], det[jj], rcond=None)[0].T; res = np.hypot(*(P[ii] @ A.T - det[jj]).T); n = len(ii); rms = float(np.sqrt((res ** 2).mean()))
     log('astrometry: %d Gaia stars matched, rms %.2f px (flip x %s y %s)' % (n, rms, fx, fy))
     if rms > 1.5 or n < 100: return None
-    M = np.linalg.inv(A[:, :2]); t0 = -M @ A[:, 2]; c = np.array([W / 2 + tx, H / 2 + ty]); CDp = CD @ M; pref = np.linalg.solve(M, c - t0)
-    hd = {'CTYPE1': 'RA---TAN', 'CTYPE2': 'DEC--TAN', 'CRVAL1': ra0, 'CRVAL2': dec0, 'CRPIX1': float(pref[0] + 1), 'CRPIX2': float(pref[1] + 1), 'CD1_1': float(CDp[0, 0]), 'CD1_2': float(CDp[0, 1]),
+    M = np.linalg.inv(A[:, :2]); t0 = -M @ A[:, 2]; c = np.array([W / 2 + tx, H / 2 + ty]); Fm = np.diag([-1.0 if fx else 1.0, -1.0 if fy else 1.0]); CDp = CD @ Fm @ M; pref = np.linalg.solve(M, c - t0)
+    hd = {'CTYPE1': 'RA---TAN', 'CTYPE2': 'DEC--TAN', 'CRVAL1': float(ra0), 'CRVAL2': float(dec0), 'CRPIX1': float(pref[0] + 1), 'CRPIX2': float(pref[1] + 1), 'CD1_1': float(CDp[0, 0]), 'CD1_2': float(CDp[0, 1]),
           'CD2_1': float(CDp[1, 0]), 'CD2_2': float(CDp[1, 1]), 'RADESYS': 'ICRS', 'EQUINOX': 2000.0}
     hd['_matches'] = n; hd['_rms_px'] = rms
     return hd
@@ -221,6 +240,7 @@ def render(d, valid, gains, rec, center_xy, crop_px, out_png, fade_clipped=True,
     sm = ndi.gaussian_filter(Lb, 3.0)
     if rec['stretch']['reference'] == 'target region':
         yy, xx = np.mgrid[0:H, 0:W]; disk = (np.hypot(xx - center_xy[0], yy - center_xy[1]) < crop_px / 8) & valid; ref = float(np.median(sm[disk]))
+    elif rec['stretch']['reference'] == 'extended signal': ref = float(np.percentile(sm[valid], 85))
     else: ref = float(np.percentile(sm[valid], 70))
     ref = max(ref, 3 * noise); lvl = rec['stretch']['target_display_level']; xmax = float(Lb.max())
     lo, hi = 1e-5, 10.0
@@ -250,7 +270,7 @@ def render(d, valid, gains, rec, center_xy, crop_px, out_png, fade_clipped=True,
 # ------------------------------------------------------------------------------------------------ main
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--stack'); ap.add_argument('--swap-rb', action='store_true'); ap.add_argument('--frames'); ap.add_argument('--ref-header', help='a raw frame of the target (pointing and orientation for the astrometry)')
+    ap.add_argument('--stack'); ap.add_argument('--swap-rb', action='store_true'); ap.add_argument('--frames'); ap.add_argument('--debayered', action='store_true', help='frames are already RGB (3 planes): skip the debayer step'); ap.add_argument('--ref-header', help='a raw frame of the target (pointing and orientation for the astrometry)')
     ap.add_argument('--bin', type=int, default=1, help='pixel binning of the stack relative to the sensor (2 for an exported live stack)'); ap.add_argument('--target', required=True); ap.add_argument('--nframes', type=int); ap.add_argument('--total-s', type=float); ap.add_argument('--out', required=True)
     a = ap.parse_args(); os.makedirs(a.out, exist_ok=True); work = os.path.join(a.out, 'work'); os.makedirs(work, exist_ok=True); T = {'start': time.time()}
     rep = {'target': a.target}; assess.ARCSEC_PER_PX = 1.478 * a.bin
@@ -258,17 +278,17 @@ def main():
     frames = None
     if a.frames:
         frames = [l.strip() for l in open(a.frames) if l.strip()]; a.nframes = len(frames); a.ref_header = a.ref_header or frames[len(frames) // 2]
-        a.total_s = a.total_s or sum(float(fits.getheader(f).get('EXPTIME', 0)) for f in frames)
-        a.stack = stack_from_frames(frames, work, recipe.choose({'gradient_rms_over_noise': 0, 'psf_fwhm_px': float('nan'), 'psf_ellipticity': 0, 'psf_stars': 0, 'star_density_per_mpx': 0, 'saturated_star_fraction': 0}, cls, size_arcmin, faint, float('nan'), a.nframes, a.total_s or 0)['steps']['integration']['rejection'])
-        a.swap_rb = True
-    ref_hdr = fits.getheader(a.ref_header); rep['frames'] = {'count': a.nframes, 'total_exposure_s': a.total_s}
+        a.total_s = a.total_s or sum(float(header_of(f).get('EXPTIME', 0)) for f in frames)
+        a.stack = stack_from_frames(frames, work, recipe.choose({'gradient_rms_over_noise': 0, 'psf_fwhm_px': float('nan'), 'psf_ellipticity': 0, 'psf_stars': 0, 'star_density_per_mpx': 0, 'saturated_star_fraction': 0}, cls, size_arcmin, faint, float('nan'), a.nframes, a.total_s or 0)['steps']['integration']['rejection'], debayered=a.debayered)
+        a.swap_rb = not a.debayered
+    ref_hdr = header_of(a.ref_header); rep['frames'] = {'count': a.nframes, 'total_exposure_s': a.total_s}
     d, hdr = assess.load_stack(a.stack, a.swap_rb); valid = assess.valid_mask(d); C, H, W = d.shape
     # 1. measure
     t = time.time(); m, psf = assess.measure(d, valid); rep['metrics'] = m; log('measured: PSF FWHM %.2f px (ellipticity %.3f, %d stars), noise %.4f, gradient %.2f, %.0f stars/Mpx' % (m['psf_fwhm_px'], m['psf_ellipticity'], m['psf_stars'], m['noise_sigma'], m['gradient_rms_over_noise'], m['star_density_per_mpx']))
     # 2. astrometry and the target's position
     wcs = solve_wcs(d.mean(0), ref_hdr, work, a.bin); rep['astrometry'] = None if wcs is None else {'matches': wcs['_matches'], 'rms_px': wcs['_rms_px']}
     if wcs is None: center = (W / 2, H / 2)
-    else: center = world2pix(wcs, ref_hdr['CRVAL1'], ref_hdr['CRVAL2'])
+    else: center = world2pix(wcs, *pointing(ref_hdr))
     # 3. background and the target's own signal-to-noise
     pre = recipe.choose(m, cls, size_arcmin, faint, float('nan'), a.nframes or 0, a.total_s or 0); deg = pre['steps']['background']['degree']
     bg, _ = assess.fit_background(d, valid, deg); d_bg = d - bg; d_bg += 0.01 - np.median(d_bg[:, valid], axis=1)[:, None, None]; d_bg[:, ~valid] = 0
@@ -288,16 +308,20 @@ def main():
     # 6. deconvolution with the iteration count searched
     final = d_bg; decon_report = None; dec = plan['steps']['deconvolution']
     if dec and psf is not None:
-        its = dec['iterations_to_try']; paths = deconvolve_variants(bgpath, psf, its, work); base_fw, base_wing, _ = assess.core_fwhm(d_bg, valid); base_noise = assess.hp_noise(d_bg.mean(0), valid)
-        rows = [{'iterations': 0, 'core_fwhm_px': base_fw, 'wing_min': base_wing, 'noise_ratio': 1.0, 'score': 0.0}]; best = None
-        for n, p in sorted(paths.items()):
-            v = fits.getdata(p).astype(np.float64); v, nrep = repair_clipped(d_bg, v); fw, wing, _ = assess.core_fwhm(v, valid); nz = assess.hp_noise(v.mean(0), valid) / base_noise
-            ring = -wing / 0.001                                  # 1.0 = dark wings at 0.1% of the star's peak
-            minfw = dec['min_core_fwhm_px']
-            score = (base_fw - fw) / base_fw - 0.25 * max(0.0, ring - 0.5) - 3 * max(0.0, nz - 1.3) - 1.5 * max(0.0, minfw - fw) / minfw
-            rows.append({'iterations': n, 'core_fwhm_px': fw, 'wing_min': wing, 'noise_ratio': nz, 'score': score, 'repaired_px': nrep})
-            if best is None or score > best[0]: best = (score, n, v)
-            log('  decon %3d it: core FWHM %.2f px (was %.2f), dark wings %.2f, noise x%.2f, score %.3f' % (n, fw, base_fw, ring, nz, score))
+        its = list(dec['iterations_to_try']); base_fw, base_wing, _ = assess.core_fwhm(d_bg, valid); base_noise = assess.hp_noise(d_bg.mean(0), valid)
+        rows = [{'iterations': 0, 'core_fwhm_px': base_fw, 'wing_min': base_wing, 'noise_ratio': 1.0, 'score': 0.0}]; best = None; done = set()
+        for rnd in range(2):                      # a second round, with larger counts, when the best of the first is the largest tried
+            todo = [n for n in its if n not in done]; paths = deconvolve_variants(bgpath, psf, todo, work); done.update(todo)
+            for n, p in sorted(paths.items()):
+                v = fits.getdata(p).astype(np.float64); v, nrep = repair_clipped(d_bg, v); fw, wing, _ = assess.core_fwhm(v, valid); nz = assess.hp_noise(v.mean(0), valid) / base_noise
+                ring = -wing / 0.001                                  # 1.0 = dark wings at 0.1% of the star's peak
+                minfw = dec['min_core_fwhm_px']
+                score = (base_fw - fw) / base_fw - 0.25 * max(0.0, ring - 0.5) - 3 * max(0.0, nz - 1.3) - 1.5 * max(0.0, minfw - fw) / minfw
+                rows.append({'iterations': n, 'core_fwhm_px': fw, 'wing_min': wing, 'noise_ratio': nz, 'score': score, 'repaired_px': nrep})
+                if best is None or score > best[0]: best = (score, n, v)
+                log('  decon %3d it: core FWHM %.2f px (was %.2f), dark wings %.2f, noise x%.2f, score %.3f' % (n, fw, base_fw, ring, nz, score))
+            if rnd == 0 and best and best[1] == max(its) and best[0] > 0.02: its = sorted(set(its) | {int(max(its) * 1.5), int(max(its) * 2)}); log('  best was the largest count tried: extending the search to %s' % its)
+            else: break
         decon_report = {'candidates': rows}
         if best and best[0] > 0.02: final = best[2]; decon_report['chosen_iterations'] = best[1]; log('deconvolution: chose %d iterations' % best[1])
         else: decon_report['chosen_iterations'] = 0; log('deconvolution: no candidate beat the unprocessed stack by the margin; skipped')

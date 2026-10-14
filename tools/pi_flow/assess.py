@@ -82,13 +82,20 @@ def hp_noise(L, valid):
     return float(1.4826 * np.median(np.abs(v - np.median(v))))
 
 
+def smooth_noise(Ls, bg, valid):
+    """noise of the sigma-1 smoothed luminance above its local background (robust: stars and nebulosity are a small fraction of the area). Detection thresholds are multiples of this, not fixed
+    numbers, so that faint data (10 s frames at ISO 100) find their stars as well as bright data do."""
+    v = (Ls - bg)[valid]; return float(1.4826 * np.median(np.abs(v - np.median(v))))
+
+
 def star_psf(d, valid, max_stars=1500, R=15):
     """empirical PSF: the median of isolated, unsaturated, sub-pixel centred stars. Returns (psf, fwhm_px, ellipticity, n_stars, peak positions of all detected stars, saturated fraction)."""
     C, H, W = d.shape; L = d.mean(0); Ls = ndi.gaussian_filter(L, 1.0)
     bg = ndi.zoom(ndi.median_filter(L[::4, ::4], size=25), 4, order=1)[:H, :W]
-    allpk = (Ls == ndi.maximum_filter(Ls, size=15)) & valid & (Ls - bg > 0.02)
+    sn = smooth_noise(Ls, bg, valid)
+    allpk = (Ls == ndi.maximum_filter(Ls, size=15)) & valid & (Ls - bg > 8 * sn)
     sat_frac = float(((d.max(0) > 0.85) & allpk).sum() / max(allpk.sum(), 1))
-    pk = (Ls == ndi.maximum_filter(Ls, size=21)) & valid & (Ls - bg > 0.05) & (Ls - bg < 0.4)
+    pk = (Ls == ndi.maximum_filter(Ls, size=21)) & valid & (Ls - bg > 25 * sn) & (Ls - bg < 0.4)
     ys, xs = np.nonzero(pk); yy, xx = np.mgrid[-R:R + 1, -R:R + 1]; rr = np.hypot(xx, yy); st = []
     for y, x in zip(ys, xs):
         if not (R + 3 <= y < H - R - 4 and R + 3 <= x < W - R - 4): continue
