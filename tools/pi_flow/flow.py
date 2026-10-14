@@ -91,7 +91,7 @@ def gaia_cone(ra, dec, radius, work, gmax=18.5):
     raise RuntimeError('no Gaia source available')
 
 
-def solve_wcs(L, ref_hdr, work):
+def solve_wcs(L, ref_hdr, work, binning=1):
     """plate-match the stack to Gaia: start from the pointing and orientation in the raw frame header, find the offset by voting, refine an affine transform. Returns a WCS header (FITS convention, y up) or None."""
     H, W = L.shape; ra0, dec0 = ref_hdr['CRVAL1'], ref_hdr['CRVAL2']
     g = gaia_cone(ra0, dec0, 0.7, work)
@@ -101,7 +101,7 @@ def solve_wcs(L, ref_hdr, work):
     ra, dec = np.radians(g['ra']), np.radians(g['dec']); r0, d0 = np.radians(ra0), np.radians(dec0)
     cosc = np.sin(d0) * np.sin(dec) + np.cos(d0) * np.cos(dec) * np.cos(ra - r0)
     xi = np.degrees(np.cos(dec) * np.sin(ra - r0) / cosc); eta = np.degrees((np.cos(d0) * np.sin(dec) - np.sin(d0) * np.cos(dec) * np.cos(ra - r0)) / cosc)
-    s1, s2, rot0 = ref_hdr['CDELT1'], ref_hdr['CDELT2'], math.radians(ref_hdr['CROTA2'])
+    s1, s2, rot0 = ref_hdr['CDELT1'] * binning, ref_hdr['CDELT2'] * binning, math.radians(ref_hdr['CROTA2'])
     amp = (Ls - bg)[py, px]; top = np.argsort(-amp)[:1500]; ppx, ppy = px[top].astype(float), py[top].astype(float); bright = np.argsort(g['phot_g_mean_mag'])[:400]
     def cd_for(delta_deg):
         rot = rot0 + math.radians(delta_deg); return np.array([[s1 * math.cos(rot), -s2 * math.sin(rot)], [s1 * math.sin(rot), s2 * math.cos(rot)]])
@@ -251,9 +251,9 @@ def render(d, valid, gains, rec, center_xy, crop_px, out_png, fade_clipped=True,
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--stack'); ap.add_argument('--swap-rb', action='store_true'); ap.add_argument('--frames'); ap.add_argument('--ref-header', help='a raw frame of the target (pointing and orientation for the astrometry)')
-    ap.add_argument('--target', required=True); ap.add_argument('--nframes', type=int); ap.add_argument('--total-s', type=float); ap.add_argument('--out', required=True)
+    ap.add_argument('--bin', type=int, default=1, help='pixel binning of the stack relative to the sensor (2 for an exported live stack)'); ap.add_argument('--target', required=True); ap.add_argument('--nframes', type=int); ap.add_argument('--total-s', type=float); ap.add_argument('--out', required=True)
     a = ap.parse_args(); os.makedirs(a.out, exist_ok=True); work = os.path.join(a.out, 'work'); os.makedirs(work, exist_ok=True); T = {'start': time.time()}
-    rep = {'target': a.target}
+    rep = {'target': a.target}; assess.ARCSEC_PER_PX = 1.478 * a.bin
     cls, size_arcmin, faint = assess.classify(a.target); rep['class'] = {'class': cls, 'size_arcmin': size_arcmin, 'faintness': faint}; log('target %s: %s, %.0f arcmin, faintness %.2f' % (a.target, cls, size_arcmin, faint))
     frames = None
     if a.frames:
@@ -266,7 +266,7 @@ def main():
     # 1. measure
     t = time.time(); m, psf = assess.measure(d, valid); rep['metrics'] = m; log('measured: PSF FWHM %.2f px (ellipticity %.3f, %d stars), noise %.4f, gradient %.2f, %.0f stars/Mpx' % (m['psf_fwhm_px'], m['psf_ellipticity'], m['psf_stars'], m['noise_sigma'], m['gradient_rms_over_noise'], m['star_density_per_mpx']))
     # 2. astrometry and the target's position
-    wcs = solve_wcs(d.mean(0), ref_hdr, work); rep['astrometry'] = None if wcs is None else {'matches': wcs['_matches'], 'rms_px': wcs['_rms_px']}
+    wcs = solve_wcs(d.mean(0), ref_hdr, work, a.bin); rep['astrometry'] = None if wcs is None else {'matches': wcs['_matches'], 'rms_px': wcs['_rms_px']}
     if wcs is None: center = (W / 2, H / 2)
     else: center = world2pix(wcs, ref_hdr['CRVAL1'], ref_hdr['CRVAL2'])
     # 3. background and the target's own signal-to-noise

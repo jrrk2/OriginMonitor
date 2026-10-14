@@ -6,7 +6,7 @@ searches the parameters that cannot be ruled, and writes a before/after picture 
     flow.py --stack STACK.fits [--swap-rb] --ref-header RAW_FRAME.fits --target "M 1" --nframes 142 --total-s 2438 --out DIR
     flow.py --frames FRAMES.txt --target "NGC 7000" --out DIR        # builds the stack first (Debayer GRBG, StarAlignment, ImageIntegration)
 
-Files: `pi_run.py` (headless PixInsight runner), `assess.py` (metrics, target classes), `recipe.py` (the rules, each with its reason), `flow.py` (orchestration), `introspect.js` (lists the
+Files: `export_livestack.py` (live stack state to a linear RGB FITS, half resolution; use `flow.py --bin 2` on it), `pi_run.py` (headless PixInsight runner), `assess.py` (metrics, target classes), `recipe.py` (the rules, each with its reason), `flow.py` (orchestration), `introspect.js` (lists the
 processes a script can create and their parameters; output in `archive_qc/pi_flow/process_catalog.json`).
 
 ## What is measured, and what it decides
