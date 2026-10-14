@@ -31,6 +31,9 @@ public:
     QJsonObject stop(const QString& reason);
     QJsonObject status() const;
 
+signals:
+    void stopped();                                // the sequence has finished (after any in-flight frame has been taken in)
+
 private slots:
     void onImage(const QString& remotePath, const QByteArray& data, double ra, double dec, double exposure);
     void onMessage(const QJsonObject& msg);        // ImageServer NewImageReady: the exposure is done, the file is waiting on the telescope
@@ -41,6 +44,11 @@ private slots:
 private:
     enum class State { Shooting, Probing };
     void finish(const QString& reason);
+    // Pipelined captures leave the next exposure in flight while the previous frame is downloaded and analysed. A stop that is not a failure waits for them (the frame is taken in and scored),
+    // so that a goto or a refocus afterwards does not ruin an exposure and the last frame is not lost.
+    void beginDrain(const QString& reason);
+    void checkDrained();
+    bool m_draining = false; QString m_drainReason;
 
     OriginBackend* m_b;
     bool m_active = false;

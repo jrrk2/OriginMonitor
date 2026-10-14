@@ -244,6 +244,7 @@ bool OriginBackend::takeSnapshot(double exposure, int iso, int binning, bool for
     // instead of the raw FITS (every frame of a 2026-10-11 survey did, because explicit-exposure snapshots never registered their parameters)
     if (exposure > 0) m_requestedExposure = exposure;
     if (iso > 0) m_requestedISO = iso;
+    m_lastReqExposure = exposure; m_lastReqIso = iso;
     m_snapshotInProgress = true;
     // RunSampleCapture command triggers a single snapshot
     QJsonObject params;
@@ -288,6 +289,14 @@ bool OriginBackend::setCameraAutoMode()
     m_requestedISO = 0;
     sendCommand("SetEnableAuto", "LiveStream", cmd);
     qDebug() << "Setting auto mode";
+    return true;
+}
+
+bool OriginBackend::setLiveStreamDisabled(bool disable)
+{
+    if (!isConnected()) return false;
+    QJsonObject cmd; cmd["Disable"] = disable;
+    sendCommand("SetDisableLiveStream", "LiveStream", cmd);
     return true;
 }
 
@@ -803,6 +812,7 @@ void OriginBackend::onWebSocketConnected()
     // Request initial status
     sendCommand("GetStatus", "Mount");
     setCameraBitDepth(16);     // raw 16-bit Bayer snapshots (re-sent after each capture, the camera reverts it)
+    setLiveStreamDisabled(true);
     
     emit connected();
 }
@@ -1036,6 +1046,21 @@ void OriginBackend::updateStatusFromProcessor()
     emit statusUpdated();
 }
 
+// value of a numeric FITS header keyword (only the first blocks are read); NaN when absent
+static double fitsHeaderNumber(const QByteArray& d, const char* key)
+{
+    const int n = qMin(d.size(), 2880 * 6);
+    for (int i = 0; i + 80 <= n; i += 80) {
+        const QByteArray card = d.mid(i, 80);
+        if (card.startsWith("END")) break;
+        if (card.left(8).trimmed() == key && card.size() > 10 && card[8] == '=') {
+            bool ok = false; const double v = card.mid(10, 20).split('/')[0].trimmed().toDouble(&ok);
+            return ok ? v : std::numeric_limits<double>::quiet_NaN();
+        }
+    }
+    return std::numeric_limits<double>::quiet_NaN();
+}
+
 void OriginBackend::requestImage(const QString &filePath, bool isSnapshot) {
     if (m_connectedHost.isEmpty()) return;
     
@@ -1078,6 +1103,15 @@ void OriginBackend::requestImage(const QString &filePath, bool isSnapshot) {
                 m_snapshotInProgress = false;
                 qDebug() << "Snapshot complete - resuming live stream";
                 emit tiffImageDownloaded(filePath, imageData, ra, dec, exposure);
+                // a frame taken with the previous exposure or ISO (seen at the start of a run after a change of either, 2026-10-14) says nothing about the sky: report "settling", do not score or stack it
+                const double hx = fitsHeaderNumber(imageData, "EXPTIME"), hi = fitsHeaderNumber(imageData, "ISOSPEED");
+                const bool badExp = m_lastReqExposure > 0 && std::isfinite(hx) && std::fabs(hx - m_lastReqExposure) > 0.02 * m_lastReqExposure + 1e-7;
+                const bool badIso = m_lastReqIso > 0 && std::isfinite(hi) && int(hi + 0.5) != m_lastReqIso;
+                if (badExp || badIso) {
+                    QJsonObject o{{"verdict", "settling"}, {"valid", false}, {"file", filePath}, {"stars", 0}, {"hfr_px", 0.0},
+                                  {"reasons", QJsonArray{QString("frame header says exposure %1 s ISO %2 but %3 s ISO %4 was requested: taken with the previous settings, not scored").arg(hx).arg(hi).arg(m_lastReqExposure).arg(m_lastReqIso)}}};
+                    emit focusEvaluated(o);
+                } else
                 evaluateSnapshotFocus(filePath, imageData, ra, dec, exposure);
                 // The telescope resets the live-stream exposure/ISO after a sample capture
                 if (m_resendCaptureParams) {

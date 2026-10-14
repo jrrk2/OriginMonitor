@@ -805,12 +805,12 @@ QJsonObject slewTo(const QJsonObject& t, double exposure, int iso)
     if (!(r = call("target", {{"name", t["key"]}, {"ra_hours", t["ra_hours"]}, {"dec_deg", t["dec_deg"]}}))["ok"].toBool()) return r;     // resumes a saved stack of that name
     if (!(r = call("goto", {{"ra_hours", t["ra_hours"]}, {"dec_deg", t["dec_deg"]}}, 240000))["ok"].toBool()) return r;
     waitIdle(180);
-    return call("set", {{"exposure", exposure}, {"iso", iso}});
+    return call("set", {{"exposure", 0.5}, {"iso", iso}});
 }
 
 bool startSeq(double exposure, int iso, const QDateTime& endUtc, bool focusPause)
 {
-    const QJsonObject r = call("sequence", {{"action", "start"}, {"exposure", exposure}, {"iso", iso}, {"pipeline", false}, {"focus_pause", focusPause},
+    const QJsonObject r = call("sequence", {{"action", "start"}, {"exposure", exposure}, {"iso", iso}, {"pipeline", true}, {"focus_pause", focusPause},
                                             {"until_local", endUtc.toTimeZone(g_run.zone).toString("HH:mm")}});
     return r["ok"].toBool() && r["status"].toObject()["active"].toBool();
 }
@@ -852,7 +852,7 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth)
                 Parsed fp; fp.v["span"] = 300; fp.v["step"] = 60; fp.v["frames"] = 2; fp.v["apply"] = true;
                 const QJsonObject sw = cmdFocusSweep(fp, *fs);
                 runLog("refocus_done", {{"ok", sw["ok"]}, {"best", sw["best"]}}); ++g_run.refocuses; g_run.lastRefocus = QDateTime::currentDateTimeUtc();
-                r = call("set", {{"exposure", exposure}, {"iso", iso}});
+                r = call("set", {{"exposure", 0.5}, {"iso", iso}});
             } else {
                 runLog("sequence_stopped", {{"target", t["key"]}, {"reason", why}});
                 if (++g_run.restarts > 6) return RunResult::Failed;
@@ -876,16 +876,19 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth)
                 Parsed fp; fp.v["span"] = 900; fp.v["step"] = 100; fp.v["frames"] = 2; fp.v["exposure"] = 4; fp.v["apply"] = true;
                 const QJsonObject sw = cmdFocusSweep(fp, *fs);
                 runLog("refocus_done", {{"ok", sw["ok"]}, {"best", sw["best"]}}); ++g_run.refocuses; g_run.lastRefocus = QDateTime::currentDateTimeUtc();
-                trailedFrames = 0; call("set", {{"exposure", exposure}, {"iso", iso}}); startSeq(exposure, iso, endUtc, true); lastTick = now; continue;
+                trailedFrames = 0; call("set", {{"exposure", 0.5}, {"iso", iso}}); startSeq(exposure, iso, endUtc, true); lastTick = now; continue;
             }
             if (++trailedFrames >= (lastV == "trailed" ? 2 : 3) && regotos < 3) {
                 call("sequence", {{"action", "stop"}, {"reason", "trailed stars: re-centring"}});
                 const QJsonObject g = call("goto", {{"ra_hours", t["ra_hours"]}, {"dec_deg", t["dec_deg"]}, {"timeout", 240}}, 300000);
                 runLog("regoto", {{"target", t["key"]}, {"why", lastV == "trailed" ? "trailed stars (mount not tracking correctly)" : "defocused stars (the autofocus after the last goto ran without stars)"}, {"ok", g["ok"]}, {"count", ++regotos}});
-                trailedFrames = 0; call("set", {{"exposure", exposure}, {"iso", iso}}); startSeq(exposure, iso, endUtc, true); lastTick = now; continue;
+                trailedFrames = 0; call("set", {{"exposure", 0.5}, {"iso", iso}}); startSeq(exposure, iso, endUtc, true); lastTick = now; continue;
             }
         } else trailedFrames = 0;
-        const bool probing = s["state"].toString() == "probing" && lastV != "trailed" && lastV != "defocused";
+        // "reference" (sharp stars that would not register: a bad or stale stack reference) and "focus" frames say nothing about the sky: they do not run the cloud timer (2026-10-13: soft M27 frames
+        // read "unknown", counted as cloud, and the supervisor left a clear sky; 6 of that night's 16 switches were of that kind)
+        const QString lastCause = s["last"].toObject()["cause"].toString();
+        const bool probing = s["state"].toString() == "probing" && lastV != "trailed" && lastV != "defocused" && lastCause != "reference" && lastCause != "focus";
         if (probing) { if (!cloudSince.isValid()) cloudSince = now; cloudMinTotal += lastTick.secsTo(now) / 60.0; } else cloudSince = QDateTime();
         lastTick = now;
         // a high ISO whose dark baseline was never learned reads as cloud on a clear forecast: fall back once to ISO 200
@@ -896,7 +899,7 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth)
                 g_run.isoFallbackDone = true; iso = 200;
                 call("sequence", {{"action", "stop"}, {"reason", "iso fallback"}});
                 runLog("iso_fallback", {{"from", g_run.iso}, {"to", 200}, {"why", "6 bad frames at the start while the forecast is clear"}});
-                call("set", {{"exposure", exposure}, {"iso", iso}});
+                call("set", {{"exposure", 0.5}, {"iso", iso}});
                 startSeq(exposure, iso, endUtc, true); continue;
             }
         }

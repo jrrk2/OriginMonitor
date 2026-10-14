@@ -174,7 +174,7 @@ every command prints one JSON object). It has no `sequence` subcommand: use `too
 | `target` | `name`, `ra_hours`, `dec_deg`, `reset` | Chooses (and resumes, unless `reset:true`) the live stack for a target |
 | `stack` | | Saves the live stack and its `preview.png`; returns frame count and seconds |
 | `sky_map`, `monitor` | `lat_deg`, `lon_deg`, `black_level`, `auto_stack`, `min_transparency` | Learned obstruction bins; analysis settings |
-| `sequence` | `action`=start/stop/status; start takes `exposure`, `iso`, `pipeline`=false, `resend_params`=true, `bad_limit`=3, `probe_s`=30, `max_frames`, `for_minutes`, `until_local`="HH:MM" | The unattended exposure loop (below) |
+| `sequence` | `action`=start/stop/status; start takes `exposure`, `iso`, `pipeline`=true, `resend_params`=true, `bad_limit`=3, `probe_s`=30, `max_frames`, `for_minutes`, `until_local`="HH:MM" | The unattended exposure loop (below) |
 | `send` | `command`, `destination`, `params` | Raw telescope command (only with `--control-raw`) |
 | `quit` | | Save the stack and exit |
 
@@ -183,14 +183,14 @@ every command prints one JSON object). It has no `sequence` subcommand: use `too
 `sequence start` runs the exposure loop inside the app: frames back to back; after `bad_limit` consecutive frames whose verdict is not clear/hazy it
 drops to **probing** (one frame every `probe_s` seconds) and resumes on the first clear probe. Every frame is saved, analysed, stacked if usable, and
 logged as one JSON line in `sequence_YYYYMMDD.jsonl` (a new file each calendar date) with verdict, stars, HFR, sky rate, transparency, and timings.
-While it runs, `snapshot`, `goto`, `set`, `focuser_move` and `initialize` are refused. Use `pipeline:false` and keep `resend_params` true (see the audit trail
-for why).
+While it runs, `snapshot`, `goto`, `set`, `focuser_move` and `initialize` are refused. Keep `resend_params` true (see the audit trail for why).
+**Pipelined capture (the supervisor's mode since 2026-10-14):** with `pipeline:true` the next exposure is requested the moment the telescope reports a frame ready, and the HTTP download and analysis overlap it. This works now that the live stream is disabled (the backend sends `SetDisableLiveStream {"Disable": true}` on every connect and at every sequence start; the earlier PNG failure was with the live stream on). Measured on the idle telescope: a 20 s frame costs 20.5 s (97%), against 22.0 s (91%) without pipelining and 41 s (48%) on 13 and 14 Oct. `sequence stop`, a frame limit, an end time and a focus-drift stop issue no new exposure and wait for the one in flight to arrive and be scored, so a goto after a stop never ruins an exposure. A frame whose header exposure or ISO differs from the request (taken with the previous settings) is reported as `settling` and is neither scored nor stacked.
 
 ### The live exposure (read this before imaging)
 
 The telescope's cycle for one sample capture is the **sample exposure plus the live-stream frame in progress**. `set exposure X` sets the live-stream exposure,
 and the app re-asserts it after every frame, so a long `set` value doubles the cycle (a 15 s sample took 31.4 s). Before every sequence do
-`set exposure 0.5 iso 200`; the real exposure travels in each capture request. With that, a 20 s frame costs 23 s (87% duty).
+`set exposure 0.5 iso 200`; the real exposure travels in each capture request. With that, a 20 s frame costs 23 s (87% duty). With the live stream disabled (now automatic) the live exposure no longer matters, and the supervisor still sets 0.5 s.
 
 ---
 
@@ -274,7 +274,7 @@ Times are local; "wait for idle" means poll `status` until `TaskController/GetSt
 * `stars` (usable, capped at 150), `hfr_px` (focus: lower is better; 2.2-2.5 px was normal here), `sky_rate` (ADU per second above black 4985),
   `sky_excess_over_dark` (against the lowest value stored for that ISO in `sky_map.json`), `registration.transparency` (star flux against the best this stack has seen),
   `registration.frames_in_stack` and `stacked`.
-* A bad frame also carries a `cause` (cloud / obstruction / unknown) from the evidence; only obstruction-attributed frames create a blocked direction in `sky_map.json`. A reference for the stack must have at least 25 round stars and HFR under 4 px; a small bad stack (10 frames or fewer, or under 300 s) is replaced after three sharp frames fail to register.
+* A bad frame also carries a `cause` (cloud / obstruction / unknown) from the evidence; only obstruction-attributed frames create a blocked direction in `sky_map.json`. A reference for the stack must have at least 25 round stars and HFR under 4 px. While the stack is tiny (6 frames or 150 s at most) a clearly sharper frame (HFR 15% lower, at least 90% of the stars) replaces the reference, because the first frames after a goto and autofocus are often the softest. With no reference yet, 40 or more round stars at HFR 4 px or worse read `defocused` (cause `focus`), not `unknown`, so the supervisor re-centres and refocuses. 40 or more sharp stars (HFR under 4.5 px) that will not register to the stack read `unknown` with cause `reference`, not `cloudy` (registration is by star pattern, so cloud does not break it): a small stack (10 frames or fewer, or under 300 s) is replaced after 3 such frames, a larger one after 10, and the larger one is first archived as `stacks/<target>_<UTC>`. The supervisor's cloud timer ignores frames with cause `reference` or `focus`. The sequence log now records each frame's `reasons`.
 * Cloud looked like this: stars fall to 0-16, `sky_rate` rises ten-fold (cloud lit from below by the town: 7,000-9,000 ADU/s against 106-140 on a clear night), the same in every
   direction. A uniform brightening with no stars is cloud, not focus and not dew (the dew heater was on automatic).
 
@@ -285,7 +285,7 @@ Times are local; "wait for idle" means poll `status` until `TaskController/GetSt
 | Symptom | Cause | Fix |
 |---|---|---|
 | Clear sky (150 stars, normal sky rate) but verdict `cloudy`, `cannot register`, transparency 0.00, frames not stacked | The stack reference was seeded from a cloud-lit, soft or settling frame | `target NAME ra dec reset:true` (the sequence can keep running); frames are on disk either way |
-| Everything `cloudy` and the reason says the sky is "N% above the dark baseline: not used as the stack reference" while the sky is clear | One corrupted frame lowered the stored dark baseline for that ISO | Stop, `quit`, set `dark_rate.isoNNN` in `<data dir>/sky_map.json` back to a normal value (about 105 at ISO 200 here), restart. Do not edit it while the app runs: it rewrites the file |
+| Everything `cloudy` and the reason says the sky is "N% above the dark baseline: not used as the stack reference" while the sky is clear (only targets with no saved stack; 2026-10-13: one 20 s frame at 87 ADU/s set `iso800` to 86.8 against about 570 normal) | One corrupted frame lowered the stored dark baseline for that ISO | Stop, `quit`, set `dark_rate.isoNNN` in `<data dir>/sky_map.json` back to a normal value (about 105 at ISO 200 here), restart. Do not edit it while the app runs: it rewrites the file |
 | Frames arrive in about 2 s with absurd levels, or every second frame is a PNG | Pipelined/early capture requests, or an extra bit-depth command, disturbed the capture; or `resend_params` was turned off (the camera reverts to 24-bit after each capture) | `pipeline:false`, `resend_params:true` |
 | Cycle is about twice the exposure | The live exposure is long (`set exposure` with a big value) | `set exposure 0.5 iso 200` before starting the sequence |
 | First frame after a slew is a PNG / `not a FITS image` event | The firmware drops the capture settings on a goto | Ignore (the sequencer retakes). Bit depth 16 is now sent with every capture plus one retry; 16 of 1,012 frames (night one) and 31 of 698 (night two) were still unreadable |

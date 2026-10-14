@@ -77,11 +77,19 @@ QJsonObject SkyMonitor::setTarget(const QString& name, double raHours, double de
     m_target = name.isEmpty() ? "auto" : name;
     m_targetKnown = raHours >= 0 && raHours < 24 && decDeg >= -90 && decDeg <= 90;
     if (m_targetKnown) m_targetPos = {raHours, decDeg};
-    m_stack.reset(); m_sinceSave = 0;
+    m_stack.reset(); m_sinceSave = 0; m_refHfr = 0; m_refStars = 0; m_regFailRun = 0;
     bool resumed = false;
     if (!reset) resumed = m_stack.load(stackDirectory());
     QJsonObject o{{"ok", true}, {"target", m_target}, {"resumed", resumed}, {"stack", m_stack.summary()}};
     return o;
+}
+
+void SkyMonitor::archiveStack()
+{
+    if (m_stack.frames() <= 0) return;
+    saveStack();
+    const QString dir = stackDirectory();
+    QDir().rename(dir, dir + "_" + QDateTime::currentDateTimeUtc().toString("yyyyMMdd_HHmmss"));
 }
 
 bool SkyMonitor::saveStack() { return m_stack.frames() > 0 && m_stack.save(stackDirectory()); }
@@ -238,7 +246,15 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     o["stars_detected"] = int(F.stars.size()); o["layout_green_main_diagonal"] = F.greenOnMainDiagonal;
     const QString isoKey = QString("iso%1").arg(iso);
     const bool dark = sunAlt < -18 && moonAlt < -5;
-    if (dark && bgRate > 0 && (!m_darkRate.contains(isoKey) || bgRate < m_darkRate[isoKey])) { m_darkRate[isoKey] = bgRate; ++m_mapDirty; }
+    // The dark baseline is the lowest sky level seen, but one odd frame must not set it: a single 20 s frame at 87 ADU/s (normal 570) made every later first frame of a target read "sky 560% above
+    // the dark baseline" (2026-10-13), and 4 s frames read about 5 times lower than 20 s ones. So only exposures of 8 s or more count, and the baseline moves to the median of the last 5 of them.
+    if (dark && bgRate > 0 && exposureS >= 8.0) {
+        QList<double>& recent = m_darkRecent[isoKey]; recent.append(bgRate); while (recent.size() > 5) recent.removeFirst();
+        if (recent.size() == 5) {
+            QList<double> sorted = recent; std::sort(sorted.begin(), sorted.end());
+            if (!m_darkRate.contains(isoKey) || sorted[2] < m_darkRate[isoKey]) { m_darkRate[isoKey] = sorted[2]; ++m_mapDirty; }
+        }
+    }
     double excess = 0;
     if (m_darkRate.contains(isoKey) && m_darkRate[isoKey] > 0) { excess = bgRate / m_darkRate[isoKey] - 1.0; o["sky_excess_over_dark"] = excess; }
 
@@ -267,6 +283,16 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
         }
     }
 
+    // --- soft focus before any reference exists: plenty of round stars, none sharp enough to seed a stack (a reference must be under 4.0 px; focused is about 2.5). The frame is not cloud and not
+    // a bad reference candidate to wait out: say "defocused" so the supervisor re-centres (the telescope's autofocus) and then sweeps the focuser (seen 2026-10-13: M27, 12 frames at 4.2 px
+    // read "unknown", the cloud timer counted them and the supervisor left a clear sky).
+    if (!streaks.trailed && source != "unknown" && !m_stack.hasReference() && focus.valid && focus.stars >= 40 && focus.hfrPx >= 4.0) {
+        o["verdict"] = "defocused"; o["cause"] = "focus";
+        o["reasons"] = QJsonArray{QString("%1 round stars but HFR %2 px (focused is about 2.5; a reference must be under 4.0): soft focus, not cloud").arg(focus.stars).arg(focus.hfrPx, 0, 'f', 1)};
+        o["cause_reasons"] = QJsonArray{"soft stars point at the focuser, not cloud"}; o["notes"] = QJsonArray(); o["stack"] = stackSummary();
+        return o;
+    }
+
     // --- no usable pointing (mount not aligned, no plate solve): nothing about the geometry, the stack or the obstruction map can be judged
     if (source == "unknown") {
         o["verdict"] = "no_pointing";
@@ -278,9 +304,17 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     // --- registration against the target's stack and per-tile coverage
     QStringList reasons; QString verdict = "clear";
     LiveStacker::Report rep;
-    const bool haveStack = m_stack.hasReference();
+    bool haveStack = m_stack.hasReference();
     const bool pointingOk = !m_targetKnown || offTarget < 0.5;
     if (!pointingOk) { verdict = "off_target"; reasons << QString("mount is %1 deg from the target position").arg(offTarget, 0, 'f', 2); }
+    QString refNote;
+    // --- a better reference: the first acceptable frame seeds the stack, but every later frame is registered and its transparency measured against that reference, and the first frames follow
+    // a goto and autofocus and are often the softest. While the stack is tiny (6 frames or 150 s at most), a clearly sharper frame with as many stars replaces the reference.
+    if (haveStack && pointingOk && m_refHfr > 0 && m_stack.frames() <= 6 && m_stack.summary()["total_exposure_s"].toDouble() < 150.0 && focus.valid && focus.stars >= 25 &&
+        focus.hfrPx > 0 && focus.hfrPx < 0.85 * m_refHfr && focus.stars >= 0.9 * m_refStars && excess <= 2.0) {
+        m_stack.reset(); m_refHfr = 0; m_refStars = 0; m_regFailRun = 0; haveStack = false;
+        refNote = QString("a sharper frame (HFR %1 px) replaces the stack reference").arg(focus.hfrPx, 0, 'f', 2);
+    }
     if (haveStack && pointingOk) {
         rep = m_stack.assess(F, exposureS);                 // register and measure first; only frames judged usable are stacked
         QJsonObject reg{{"inliers", rep.inliers}, {"rms_px", rep.rms}, {"rotation_deg", rep.rotationDeg}, {"shift_px", rep.shiftPx}, {"matched_fraction", rep.matchedFraction},
@@ -297,10 +331,19 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
         // Many round, sharp stars that will not register to a SMALL stack mean the reference is bad (seen 2026-10-11: a half-trailed first frame became the reference and every later
         // good frame read "cloudy"), not that the sky is cloudy. After 3 such frames the small stack is dropped and the next frame seeds a new one.
         const bool sharpSky = focus.valid && focus.stars >= 40 && focus.hfrPx > 0 && focus.hfrPx < 4.5;
-        if ((rep.inliers == 0 || rep.reason == "no star-pattern match") && sharpSky && (m_stack.frames() <= 10 || m_stack.summary()["total_exposure_s"].toDouble() < 300.0)) {   // a small stack: not worth keeping over sharp frames that will not match it
-            if (++m_regFailRun >= 3) { m_stack.reset(); m_regFailRun = 0; verdict = "unknown"; reasons << QString("the stack reference was bad (%1 sharp stars would not register): replaced, the next frame starts a new one").arg(focus.stars); }
-            else { verdict = "unknown"; reasons << QString("%1 sharp stars but no match to the stack reference (%2 of 3 before it is replaced)").arg(focus.stars).arg(m_regFailRun); }
-        } else if (rep.inliers == 0 || rep.reason == "no star-pattern match") {
+        const bool noMatch = rep.inliers == 0 || rep.reason == "no star-pattern match";
+        if (noMatch && sharpSky) {
+            // plenty of round, sharp stars that will not register mean a bad or stale reference, not cloud (registration is by star pattern, so thin cloud does not break it): "unknown", cause "reference",
+            // which the supervisor does not count as cloud. A small stack is dropped after 3 such frames; a large one after 10, and then archived (stacks/<target>_<UTC>), not overwritten.
+            const bool small = m_stack.frames() <= 10 || m_stack.summary()["total_exposure_s"].toDouble() < 300.0;
+            const int limit = small ? 3 : 10;
+            verdict = "unknown"; o["cause"] = "reference";
+            if (++m_regFailRun >= limit) {
+                if (!small) archiveStack();
+                m_stack.reset(); m_refHfr = 0; m_refStars = 0; m_regFailRun = 0;
+                reasons << QString("the stack reference was bad (%1 sharp stars would not register %2 times): %3, the next frame starts a new one").arg(focus.stars).arg(limit).arg(small ? "replaced" : "archived and replaced");
+            } else reasons << QString("%1 sharp stars but no match to the stack reference (%2 of %3 before it is replaced)").arg(focus.stars).arg(m_regFailRun).arg(limit);
+        } else if (noMatch) {
             m_regFailRun = 0;
             verdict = "cloudy"; reasons << QString("cannot register: %1 stars detected").arg(F.stars.size());
         } else if (rep.rawTransparency > 0) {
@@ -321,6 +364,7 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
             verdict = "cloudy"; reasons << QString("sky %1% above the dark baseline: not used as the stack reference").arg(int(excess * 100));
         } else {
             rep = m_autoStack ? m_stack.add(F, exposureS, m_minTransparency) : LiveStacker::Report();
+            if (rep.accepted && rep.frames == 1) { m_refHfr = focus.hfrPx; m_refStars = focus.stars; }
             o["registration"] = QJsonObject{{"reference_frame", rep.accepted}, {"stacked", rep.accepted}, {"frames_in_stack", rep.frames}};
             if (!rep.accepted && m_autoStack) { verdict = F.stars.size() < 12 ? "cloudy" : "unknown"; reasons << rep.reason; }
             if (F.stars.size() < 25) { verdict = "cloudy"; reasons << QString("only %1 stars detected").arg(F.stars.size()); }
@@ -343,6 +387,7 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
 
     // --- sky brightness context (never overrides cloud, but explains it and flags what the moon or dawn are doing)
     QStringList notes;
+    if (!refNote.isEmpty()) notes << refNote;
     if (sunAlt > -12) notes << (sunAlt > -6 ? "bright twilight" : "twilight");
     if (moonAlt > 0 && moonIll > 0.05 && (excess > 0.3 || gradient > 8)) notes << QString("moon glow (moon alt %1, illumination %2, separation %3 deg)").arg(moonAlt, 0, 'f', 0).arg(moonIll, 0, 'f', 2).arg(moonSep, 0, 'f', 0);
     else if (excess > 0.5 && dark) notes << "sky brighter than the dark baseline without the moon or sun up (light pollution, thin cloud lit from below, or dew)";
