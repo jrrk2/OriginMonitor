@@ -235,7 +235,7 @@ public:
                        "main{padding:8px 12px}h2{font-size:15px;margin:14px 0 4px;color:#9ec1ff}table{width:100%;border-collapse:collapse}td{padding:3px 6px 3px 0;vertical-align:top;border-bottom:1px solid #22222a}"
                        "td:first-child{color:#9a9aa6;width:38%}table.fc td,table.fc th{text-align:center;padding:3px 2px;font-size:12px;white-space:nowrap}table.fc td:first-child{color:inherit;width:auto}details{margin:10px 0}summary{color:#9ec1ff;padding:6px 0}img{max-width:100%;height:auto;border-radius:6px}pre{white-space:pre-wrap;font:12px ui-monospace,monospace}.dim{color:#9a9aa6}"
                        "@media (prefers-color-scheme:light){body{background:#f4f4f7;color:#111}nav{background:#e2e2ea}nav a{background:#fff;color:#1a56c4}td{border-color:#ddd}td:first-child,.dim{color:#666}h2{color:#1a56c4}}"
-                       "</style></head><body><nav><a href=/>Now</a><a href=/log>Log</a><a href=/live>Live</a><a href=/stacks>Stacks</a><a href=/forecast>Forecast</a></nav><main>%2</main></body></html>")
+                       "</style></head><body><nav><a href=/>Now</a><a href=/log>Log</a><a href=/live>Live</a><a href=/stacks>Stacks</a><a href=/forecast>Forecast</a><a href=/planner>Planner</a></nav><main>%2</main></body></html>")
             .arg(refreshS > 0 ? QString("<meta http-equiv=refresh content=%1>").arg(refreshS) : QString(), body);
     }
     QString nowHtml() const
@@ -258,7 +258,26 @@ public:
     WebReply web(const QString& path, const QUrlQuery&)
     {
         WebReply r; auto html = [&](const QString& body, int refresh) { r.body = webPage(body, refresh).toUtf8(); return r; };
+        {   // the pages are only shown while the telescope reports that it is on the charger (a battery night ended at 23:18 on 2026-10-16): CHARGING, or full
+            const bool fresh = m_chargerAtMs && QDateTime::currentMSecsSinceEpoch() - m_chargerAtMs < 60000;
+            const QString c = m_charger.toUpper();
+            const bool onCharger = fresh && !c.contains("DISCHARG") && (c.contains("CHARG") || c.contains("FULL"));
+            if (onCharger) m_gateDismissed = false;                    // on the charger again: the alert re-arms for the next battery night
+            if (path == "/gate/dismiss") { m_gateDismissed = true; r.status = 303; r.type = "text/plain"; r.body = "dismissed\n"; r.location = "/"; return r; }
+            if (!onCharger && !m_gateDismissed) {
+                r.status = 503;
+                const QString why = !fresh ? "The telescope is not reporting its battery (powered off, or not connected to the daemon)."
+                                           : QString("Charger status: <b>%1</b>, battery level: <b>%2</b>.").arg(esc(m_charger.isEmpty() ? "unknown" : m_charger), esc(m_batteryLevel.isEmpty() ? "unknown" : m_batteryLevel));
+                r.body = webPage("<h2>Charger not connected</h2><p>" + why + "</p><p>These pages stay hidden until the telescope is plugged in and reports CHARGING or full. Connect the charger; this page re-checks every 10 seconds.</p><p><a href=/gate/dismiss>Dismiss and disable this alert</a> (until the telescope next reports CHARGING)</p>", 10).toUtf8();
+                return r;
+            }
+        }
         auto png = [&](const QImage& im, bool photo = false) { if (im.isNull()) { r.status = 404; r.type = "text/plain"; r.body = "no image\n"; } else if (photo) { r.type = "image/jpeg"; r.body = jpegOf(im); } else { r.type = "image/png"; r.body = pngOf(im); } return r; };
+        if (path == "/planner" || path == "/planner.json") {        // tools/planner_data.py writes both into the data dir; static files, read-only
+            QFile f(m_dir + (path == "/planner" ? "/planner.html" : "/planner.json"));
+            if (!f.open(QIODevice::ReadOnly)) { r.status = 404; r.type = "text/plain"; r.body = "no planner data yet: run tools/planner_data.py\n"; return r; }
+            r.type = path == "/planner" ? "text/html; charset=utf-8" : "application/json"; r.body = f.readAll(); return r;
+        }
         if (path == "/" || path == "/now") return html(nowHtml(), 10);
         if (path == "/log") { const QStringList lines = m_log->toPlainText().split('\n'); return html("<pre>" + esc(lines.mid(std::max(0, int(lines.size()) - 300)).join('\n')) + "</pre>", 15); }
         if (path == "/live") {
@@ -515,6 +534,7 @@ private:
     {
         m_tMount->setText(QString("%1, %2").arg(m["IsTracking"].toBool() ? "tracking" : "not tracking", m["IsAligned"].toBool() ? "aligned" : "not aligned"));
         m_tBatt->setText(QString("%1 %2 V %3").arg(m["BatteryLevel"].toString()).arg(m["BatteryVoltage"].toDouble(), 0, 'f', 1).arg(m["ChargerStatus"].toString()));
+        m_charger = m["ChargerStatus"].toString(); m_batteryLevel = m["BatteryLevel"].toString(); m_chargerAtMs = QDateTime::currentMSecsSinceEpoch();
         m_pRaDec->setText(QString("%1  %2").arg(hms(m["Ra"].toDouble() * 12 / kPi), dms(m["Dec"].toDouble() * 180 / kPi)));
         m_pAltAz->setText(QString("%1°  %2°").arg(m["Alt"].toDouble() * 180 / kPi, 0, 'f', 1).arg(m["Azm"].toDouble() * 180 / kPi, 0, 'f', 1));
         m_pGoto->setText(m["IsGotoOver"].toBool(true) ? "idle" : "SLEWING");
@@ -604,6 +624,7 @@ private:
         qApp->setStyleSheet(on ? "QWidget { background: #100000; color: #ff4040; } QGroupBox { border: 1px solid #601010; margin-top: 8px; } QPushButton, QTabBar::tab { background: #200000; border: 1px solid #601010; padding: 4px; } QListWidget::item:selected, QTabBar::tab:selected { background: #500000; }" : QString());
     }
 
+    QString m_charger, m_batteryLevel; qint64 m_chargerAtMs = 0; bool m_gateDismissed = false;       // latest ChargerStatus / BatteryLevel from the mount, and when
     Client* m_client = nullptr; QString m_dir; int m_port; double m_lat, m_lon; QTimer m_poll, m_files, m_liveTimer, m_fcTimer;
     QDateTime m_picStamp; QElapsedTimer m_webLive;
     QLabel *m_fcInfo = nullptr, *m_fcAcc = nullptr, *m_fcNow = nullptr, *m_fcSky = nullptr; QTableWidget* m_fcTable = nullptr; bool m_fcFresh = false;
