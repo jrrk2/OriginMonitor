@@ -135,6 +135,8 @@ const QList<Cmd>& commands()
               O("focus-pause", 'o', "on|off stop the sequence when the focus drifts, so that focus-sweep can be run (default off: only an event is recorded)"),
               O("focus-drift", 'd', "HFR ratio over the baseline that counts as drift", "1.15"), O("focus-baseline", 'd', "baseline HFR, full-resolution px (default: the first 8 good frames)"),
               O("focus-window", 'i', "frames in the rolling median", "8")}, true);
+        pass("filter", "action", "Declare the hand-inserted filter to the firmware (clear or nebula; there is no motor, it only affects exposure choices for plate solving and centring), or read the current setting when no name is given. Setting takes about 11 s.", "filter",
+             {P("name", 's', "clear | nebula (default: just read)", false)});
         pass("send", "action", "Raw telescope command (server must run with --control-raw).", "send",
              {P("command", 's', "command name"), P("destination", 's', "destination, e.g. Camera"), O("params", 'j', "JSON object of parameters", "{}"), O("timeout", 'i', "seconds", "10")}, true);
         // --- orchestrated
@@ -1456,7 +1458,7 @@ int serve(const Parsed& p, int& argc, char** argv)
 #endif
         qInfo() << "OriginHeadless control server on 127.0.0.1:" << port << (p.v.contains("control-raw") ? "(raw commands enabled)" : "");
         const QString host = str(p, "connect");
-        if (!host.isEmpty()) QTimer::singleShot(0, &app, [&]() { qInfo() << "connect" << host << backend.connectToTelescope(host, p.v.contains("telescope-port") ? str(p, "telescope-port").toInt() : 80); });
+        if (!host.isEmpty()) QTimer::singleShot(0, &app, [&]() { const bool up = backend.connectToTelescope(host, p.v.contains("telescope-port") ? str(p, "telescope-port").toInt() : 80); qInfo() << "connect" << host << up; if (up) server.declareConfiguredFilter(); });
         const int rc = app.exec();
         if (!pidfile.isEmpty()) QFile::remove(pidfile);
         qInfo() << "stopped";

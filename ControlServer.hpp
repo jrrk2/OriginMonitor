@@ -16,7 +16,7 @@ class Sequencer;
  * Reply:    {"ok": true, ...}\n   or   {"ok": false, "error": "..."}\n
  *
  * Commands: ping, connect, status, manual, auto, set, snapshot, mount_status, goto,
- *           focus_status, analysis, events, target, stack, sky_map, monitor, focuser_status, focuser_move, focuser_settings, send (only with allowRaw), quit.
+ *           focus_status, analysis, events, target, stack, sky_map, monitor, focuser_status, focuser_move, focuser_settings, filter, send (only with allowRaw), quit.
  * Many clients (AI sessions, scripts) may be connected at once. Read-only queries are answered from a short-lived cache (status 2 s, focus/analysis 1 s,
  * sky map 30 s ...) so polling clients do not each hit the telescope; the reply then carries "cached":true and "age_ms". Any other command (goto, set,
  * snapshot, ...) clears the cache. Add "fresh":true to a request to bypass it. {"cmd":"cache"} reports hit statistics, {"cmd":"cache","clear":true} flushes.
@@ -30,6 +30,9 @@ public:
     bool listen(quint16 port);
     void setCacheEnabled(bool on) { m_cacheOn = on; }
     void shutdown();                                  // stop any sequence, save the live stack, quit the application (also what "quit" does)
+    /// Declare the hand-inserted filter named in ~/.config/origin/filter ("nebula" or "clear") to the firmware unless it already reports it. Called after every connect and
+    /// before every initialize, so plate solves and centring choose exposures for the filter that is really fitted. {"configured": false} when the file is absent.
+    QJsonObject declareConfiguredFilter();
 
 private slots:
     void onNewConnection();
@@ -46,6 +49,7 @@ private:
     QJsonObject queryMount(int timeoutMs = 5000);              // GetStatus on Mount
     QJsonObject doGoto(const QJsonObject& req);
     QJsonObject doInitialize(const QJsonObject& req);
+    QJsonObject applyFilter(const QString& name, bool force);   // SetFilter "clear"/"nebula" (skipped when GetFilter already says so and !force), then read it back
     QJsonObject doUnpark(const QJsonObject& req);
     QJsonObject doSolve(const QJsonObject& req);
     QJsonObject doFrameStats(const QJsonObject& req);
