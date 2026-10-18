@@ -1,0 +1,10 @@
+# NGC 869/884, the Double Cluster, night of 2026-10-11/12 (no filter, 14 s, ISO 800). WIN = a 1100 x 1700 px window (about 27 x 42 arcmin) that holds BOTH clusters: the upper one near frame
+# pixel (1760, 1340) and the lower one near (2000, 380). The pictures show all of it at 1x. OBJ = a disc (output px) around the upper cluster for the split-half test.
+NAME  ?= double_cluster
+SEQ   ?= /mnt/fits-backup/claude/sequence_20261012.jsonl
+FROM  ?= 2026-10-12T03:46:43
+TO    ?= 2026-10-12T05:25:06
+WIN   ?= 1300 0 1100 1700
+OBJ   ?= 920 2680 300
+CROP  ?=
+ZOOM  ?= 1

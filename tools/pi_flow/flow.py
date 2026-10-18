@@ -14,6 +14,7 @@ from astropy.io import fits
 from scipy import ndimage as ndi
 from scipy.spatial import cKDTree
 from PIL import Image
+import cv2
 import assess, recipe, pi_run
 
 
@@ -260,10 +261,11 @@ def render(d, valid, gains, rec, center_xy, crop_px, out_png, fade_clipped=True,
     if a > 0:
         lum = out.mean(0); loc = lum + a * (lum - ndi.gaussian_filter(lum, 25)); out = out * (np.clip(loc, 1e-4, None) / np.clip(lum, 1e-4, None))
     out = np.clip(out, 0, 1); out[:, ~valid] = 0
-    img = (out.transpose(1, 2, 0)[::-1] * 255 + 0.5).astype(np.uint8)
+    img = np.ascontiguousarray(out.transpose(1, 2, 0)[::-1]).astype(np.float32)          # kept in float until the last step: 16 bits per channel on disk, no 8-bit banding in the smooth sky and galaxy
     cx, cy = center_xy; half = crop_px // 2; cyf = H - 1 - cy
     crop = img[max(0, int(cyf) - half * 3 // 4):int(cyf) + half * 3 // 4, max(0, int(cx) - half):int(cx) + half]
-    Image.fromarray(crop).resize((crop.shape[1] * 2, crop.shape[0] * 2), Image.LANCZOS).save(out_png)
+    big = np.clip(cv2.resize(crop, (crop.shape[1] * 2, crop.shape[0] * 2), interpolation=cv2.INTER_LANCZOS4), 0, 1)
+    cv2.imwrite(out_png, cv2.cvtColor((big * 65535 + 0.5).astype(np.uint16), cv2.COLOR_RGB2BGR))      # 16-bit PNG (OpenCV writes BGR order)
     return {'asinh_scale': s, 'reference_level': ref, 'sky': sky, 'noise': noise}
 
 
@@ -335,6 +337,7 @@ def main():
     crop_px = int(min(max(size_arcmin * 60 / assess.ARCSEC_PER_PX * 3, 600), 1800))
     r0 = render(d_bg, valid, gains, plan['steps'], center, crop_px, os.path.join(a.out, 'baseline.png'), orig_for_clip=d_bg)
     r1 = render(final_dn, valid, gains, plan['steps'], center, crop_px, os.path.join(a.out, 'processed.png'), orig_for_clip=d_bg); rep['render'] = {'baseline': r0, 'processed': r1}
+    fits.writeto(os.path.join(a.out, 'processed_linear.fits'), final_dn.astype(np.float32), overwrite=True)       # linear, calibrated, denoised: to re-stretch without re-running the flow
     rep['elapsed_s'] = time.time() - T['start']
     json.dump(rep, open(os.path.join(a.out, 'report.json'), 'w'), indent=1, default=float); log('done in %.0f s: %s' % (rep['elapsed_s'], a.out))
 
