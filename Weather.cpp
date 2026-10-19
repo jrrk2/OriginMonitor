@@ -41,6 +41,7 @@ QJsonObject toJson(const Hour& h)
             {"visibility_km", r1(h.visibilityM / 1000)}, {"humidity", h.humidity}, {"dew_c", h.dew}, {"temp_c", h.temp}, {"wind_ms", h.wind}, {"gust_ms", h.gust}, {"quality", std::round(h.quality * 100) / 100}, {"q_min", std::round(h.qMin * 100) / 100}, {"q_max", std::round(h.qMax * 100) / 100}, {"q_model", std::round((h.qModel >= 0 ? h.qModel : h.quality) * 100) / 100}, {"obs_weight", std::round(h.obsWeight * 100) / 100}, {"models", mj}};
 }
 
+static const int kFetchDays = 16;   // always fetched and cached in full (the longest Open-Meteo model, GFS, reaches 16 days); callers get the days they ask for
 static const QStringList kModels = {"ukmo_seamless", "ecmwf_ifs025", "ecmwf_aifs025_single", "icon_seamless", "gfs_seamless", "meteofrance_seamless", "knmi_seamless"};
 
 static bool parse(const QJsonObject& d, const QJsonObject& multi, QVector<Hour>* out)
@@ -87,9 +88,12 @@ QJsonObject fetch(double lat, double lon, int days, int maxAgeMin, const QString
     QFile cf(cachePath);
     if (cf.open(QIODevice::ReadOnly)) { cached = QJsonDocument::fromJson(cf.readAll()).object(); fetchedMs = qint64(cached["fetched_ms"].toDouble()); cf.close(); }
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const bool cacheFull = cached["days"].toInt() >= kFetchDays;      // a cache written before the full fetch holds fewer days: refresh it
+    const QDateTime until = QDateTime::currentDateTimeUtc().date().startOfDay(QTimeZone::UTC).addDays(std::max(1, std::min(days, kFetchDays)));   // Open-Meteo's forecast_days counts from today 00:00 UTC
     auto done = [&](const QJsonObject& data, const QJsonObject& multi, bool fromCache, qint64 when, const QString& note) {
         QVector<Hour> tmp; QVector<Hour>& v = out ? *out : tmp;
         if (!parse(data, multi, &v)) return QJsonObject{{"ok", false}, {"error", "forecast had no hourly data"}};
+        v.erase(std::remove_if(v.begin(), v.end(), [&](const Hour& h) { return h.utc >= until; }), v.end());
         const QJsonObject nc = metarNowcast(lat, lon, cacheDir, 15, &v);
         QJsonArray hs; for (const Hour& h : v) hs.append(toJson(h));
         QJsonObject r{{"ok", true}, {"source", multi.isEmpty() ? "Open-Meteo (open-meteo.com)" : "Open-Meteo (open-meteo.com), blend of 7 models"}, {"cached", fromCache}, {"fetched", QDateTime::fromMSecsSinceEpoch(when, QTimeZone::UTC).toString(Qt::ISODate)}, {"hours", hs}};
@@ -97,13 +101,13 @@ QJsonObject fetch(double lat, double lon, int days, int maxAgeMin, const QString
         if (nc["ok"].toBool()) r["metar"] = nc;
         return r;
     };
-    if (maxAgeMin > 0 && fetchedMs && now - fetchedMs < qint64(maxAgeMin) * 60000 && cached.contains("data")) return done(cached["data"].toObject(), cached["multi"].toObject(), true, fetchedMs, QString());
+    if (maxAgeMin > 0 && fetchedMs && cacheFull && now - fetchedMs < qint64(maxAgeMin) * 60000 && cached.contains("data")) return done(cached["data"].toObject(), cached["multi"].toObject(), true, fetchedMs, QString());
 
     QUrl url("https://api.open-meteo.com/v1/forecast");
     QUrlQuery q;
     q.addQueryItem("latitude", QString::number(lat, 'f', 4)); q.addQueryItem("longitude", QString::number(lon, 'f', 4));
     q.addQueryItem("hourly", "cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,precipitation_probability,precipitation,visibility,relative_humidity_2m,dew_point_2m,temperature_2m,wind_speed_10m,wind_gusts_10m");
-    q.addQueryItem("forecast_days", QString::number(std::max(1, std::min(days, 7)))); q.addQueryItem("past_days", "1");
+    q.addQueryItem("forecast_days", QString::number(kFetchDays)); q.addQueryItem("past_days", "1");
     q.addQueryItem("timezone", "UTC"); q.addQueryItem("wind_speed_unit", "ms");
     url.setQuery(q);
     auto get = [](const QUrl& u, QString* err) {
@@ -126,12 +130,12 @@ QJsonObject fetch(double lat, double lon, int days, int maxAgeMin, const QString
             QUrl murl("https://api.open-meteo.com/v1/forecast"); QUrlQuery mq;
             mq.addQueryItem("latitude", QString::number(lat, 'f', 4)); mq.addQueryItem("longitude", QString::number(lon, 'f', 4));
             mq.addQueryItem("hourly", "cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high"); mq.addQueryItem("models", kModels.join(","));
-            mq.addQueryItem("forecast_days", QString::number(std::max(1, std::min(days, 7)))); mq.addQueryItem("past_days", "1"); mq.addQueryItem("timezone", "UTC");
+            mq.addQueryItem("forecast_days", QString::number(kFetchDays)); mq.addQueryItem("past_days", "1"); mq.addQueryItem("timezone", "UTC");
             murl.setQuery(mq);
             QString merr; const QJsonObject multi = QJsonDocument::fromJson(get(murl, &merr)).object();
             const QJsonObject usable = (merr.isEmpty() && multi.contains("hourly")) ? multi : QJsonObject();
             QFile f(cachePath);
-            if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(QJsonObject{{"fetched_ms", double(now)}, {"data", data}, {"multi", usable}}).toJson(QJsonDocument::Compact));
+            if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(QJsonObject{{"fetched_ms", double(now)}, {"days", kFetchDays}, {"data", data}, {"multi", usable}}).toJson(QJsonDocument::Compact));
             return done(data, usable, false, now, usable.isEmpty() ? "multi-model request failed (" + merr + "); single best-match model" : QString());
         }
         err = "unexpected reply: " + data["reason"].toString();

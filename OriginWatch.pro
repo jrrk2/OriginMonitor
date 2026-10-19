@@ -13,5 +13,15 @@ LIBS += -ljpeg
 DESTDIR = build
 OBJECTS_DIR = build/obj
 MOC_DIR = build/moc
-SOURCES += WatchMain.cpp Weather.cpp
-HEADERS += DataDir.hpp Weather.hpp WatchWeb.hpp
+SOURCES += WatchMain.cpp Weather.cpp Astro.cpp Ephemeris.cpp
+HEADERS += DataDir.hpp Weather.hpp WatchWeb.hpp Astro.hpp Ephemeris.hpp
+
+# Sun altitude for the forecast tab (daylight rows, dark hours per night). As in OriginHeadless.pro: JPL DE440 through CSPICE when a CSPICE tree is found,
+# else Astro.cpp's low-precision series (a few arcminutes for the Sun, plenty here).
+CSPICE_DIR = $$(ORIGIN_CSPICE)
+isEmpty(CSPICE_DIR): exists($$PWD/build/cspice/cspice/lib/cspice.a): CSPICE_DIR = $$PWD/build/cspice/cspice
+!isEmpty(CSPICE_DIR) {
+    DEFINES += ORIGIN_SPICE
+    INCLUDEPATH += $$CSPICE_DIR/include
+    LIBS += $$CSPICE_DIR/lib/cspice.a -lm
+}

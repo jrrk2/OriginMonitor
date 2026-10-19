@@ -33,7 +33,8 @@ double quality(const Hour& h);
 
 /// The cloud layers come from several models (Met Office, ECMWF, ECMWF AIFS, ICON, GFS, Meteo-France, KNMI) because single models disagree by 50 points or more
 /// for a given hour; low/mid/high are their means, quality is the mean of the per-model qualities, models/qMin/qMax keep the spread.
-/// Fetch (or read the cache of) the forecast for the next `days` days. maxAgeMin 0 forces a fresh request. On failure falls back to a cache of any age.
+/// Fetch (or read the cache of) the forecast for the next `days` days (1..16, counted from today 00:00 UTC). The full 16 days are always fetched and cached, so callers
+/// asking for different ranges share one cache. maxAgeMin 0 forces a fresh request. On failure falls back to a cache of any age.
 /// Returns {ok, source, fetched, cached, hours:[...]}; hours are also parsed into `out`.
 QJsonObject fetch(double latDeg, double lonDeg, int days, int maxAgeMin, const QString& cacheDir, QVector<Hour>* out);
 
