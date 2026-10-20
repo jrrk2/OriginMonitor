@@ -7,10 +7,14 @@
 // It talks to 127.0.0.1:<port> with a whitelist of read-only commands (see allowed()) and reads <data dir> files; it cannot move or change anything.
 #include "DataDir.hpp"
 #include "Weather.hpp"
+#include "WatchWeb.hpp"
 
 #include <QApplication>
+#include <QBuffer>
+#include <QFormLayout>
 #include <QCheckBox>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -43,6 +47,7 @@
 #include <QHeaderView>
 #include <QTimeZone>
 #include <QTabWidget>
+#include <QTextDocument>
 #include <QTcpSocket>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -129,6 +134,7 @@ public:
         setMinimumSize(320, 240); setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding); setFocusPolicy(Qt::ClickFocus);
         setToolTip("wheel: zoom   drag: pan   double-click: fit");
     }
+    QImage image() const { return m_img; }
     void setImage(const QImage& im, const QString& caption)
     {
         if (im.size() != m_img.size()) resetView();                          // a refresh of the same size keeps the view
@@ -212,6 +218,96 @@ public:
     void showTab(int i) { if (auto* t = findChild<QTabWidget*>()) t->setCurrentIndex(i); }
     void clickRender() { renderLive(); }
     void selectStack(int i) { if (i < m_list->count()) m_list->setCurrentRow(i); }
+
+    // ---------------------------------------------------------------- the web view (see WatchWeb.hpp): the same information as the window, read-only
+    static QByteArray pngOf(const QImage& im) { QByteArray b; QBuffer buf(&b); buf.open(QIODevice::WriteOnly); im.save(&buf, "PNG"); return b; }
+    static QByteArray jpegOf(const QImage& im)             // photographs for a phone: at most 1400 px wide, about 10 times smaller than the PNG
+    {
+        QByteArray b; QBuffer buf(&b); buf.open(QIODevice::WriteOnly);
+        (im.width() > 1400 ? im.scaledToWidth(1400, Qt::SmoothTransformation) : im).convertToFormat(QImage::Format_RGB32).save(&buf, "JPEG", 85); return b;
+    }
+    static QString esc(const QString& t) { return t.toHtmlEscaped(); }
+    QString webPage(const QString& body, int refreshS) const
+    {
+        return QString("<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>%1<title>OriginWatch</title><style>"
+                       ":root{color-scheme:dark light}body{font:15px -apple-system,system-ui,sans-serif;margin:0 0 3em;background:#0c0c10;color:#e6e6ea}"
+                       "nav{display:flex;gap:4px;padding:8px;background:#1a1a22;position:sticky;top:0}nav a{flex:1;text-align:center;padding:8px 2px;border-radius:6px;background:#26262f;color:#9ec1ff;text-decoration:none}"
+                       "main{padding:8px 12px}h2{font-size:15px;margin:14px 0 4px;color:#9ec1ff}table{width:100%;border-collapse:collapse}td{padding:3px 6px 3px 0;vertical-align:top;border-bottom:1px solid #22222a}"
+                       "td:first-child{color:#9a9aa6;width:38%}table.fc td,table.fc th{text-align:center;padding:3px 2px;font-size:12px;white-space:nowrap}table.fc td:first-child{color:inherit;width:auto}details{margin:10px 0}summary{color:#9ec1ff;padding:6px 0}img{max-width:100%;height:auto;border-radius:6px}pre{white-space:pre-wrap;font:12px ui-monospace,monospace}.dim{color:#9a9aa6}"
+                       "@media (prefers-color-scheme:light){body{background:#f4f4f7;color:#111}nav{background:#e2e2ea}nav a{background:#fff;color:#1a56c4}td{border-color:#ddd}td:first-child,.dim{color:#666}h2{color:#1a56c4}}"
+                       "</style></head><body><nav><a href=/>Now</a><a href=/log>Log</a><a href=/live>Live</a><a href=/stacks>Stacks</a><a href=/forecast>Forecast</a></nav><main>%2</main></body></html>")
+            .arg(refreshS > 0 ? QString("<meta http-equiv=refresh content=%1>").arg(refreshS) : QString(), body);
+    }
+    QString nowHtml() const
+    {
+        QString h = QString("<p class=dim>%1</p>").arg(esc(m_conn->text()));
+        auto* tabs = findChild<QTabWidget*>(); if (!tabs) return h;
+        for (QGroupBox* g : tabs->widget(0)->findChildren<QGroupBox*>()) {
+            auto* f = qobject_cast<QFormLayout*>(g->layout()); if (!f) continue;
+            h += "<h2>" + esc(g->title()) + "</h2><table>";
+            for (int r = 0; r < f->rowCount(); ++r) {
+                auto* lab = qobject_cast<QLabel*>(f->itemAt(r, QFormLayout::LabelRole) ? f->itemAt(r, QFormLayout::LabelRole)->widget() : nullptr);
+                auto* val = qobject_cast<QLabel*>(f->itemAt(r, QFormLayout::FieldRole) ? f->itemAt(r, QFormLayout::FieldRole)->widget() : nullptr);
+                if (lab && val) h += "<tr><td>" + esc(lab->text()) + "</td><td>" + esc(val->text()) + "</td></tr>";
+            }
+            h += "</table>";
+            if (g->title().startsWith("Sky") && !m_aPic->pixmap().isNull()) h += QString("<p><img src='/img/lastframe.jpg?v=%1' alt='last frame'></p>").arg(m_picStamp.toSecsSinceEpoch());
+        }
+        return h;
+    }
+    WebReply web(const QString& path, const QUrlQuery&)
+    {
+        WebReply r; auto html = [&](const QString& body, int refresh) { r.body = webPage(body, refresh).toUtf8(); return r; };
+        auto png = [&](const QImage& im, bool photo = false) { if (im.isNull()) { r.status = 404; r.type = "text/plain"; r.body = "no image\n"; } else if (photo) { r.type = "image/jpeg"; r.body = jpegOf(im); } else { r.type = "image/png"; r.body = pngOf(im); } return r; };
+        if (path == "/" || path == "/now") return html(nowHtml(), 10);
+        if (path == "/log") { const QStringList lines = m_log->toPlainText().split('\n'); return html("<pre>" + esc(lines.mid(std::max(0, int(lines.size()) - 300)).join('\n')) + "</pre>", 15); }
+        if (path == "/live") {
+            if (!m_webLive.isValid() || m_webLive.elapsed() > 20000) { renderLive(); m_webLive.restart(); }
+            return html(QString("<p class=dim>%1</p><p><img src='/img/live.jpg?v=%2' alt='live stack'></p>").arg(esc(m_liveInfo->text())).arg(QDateTime::currentSecsSinceEpoch()), 30);
+        }
+        if (path == "/stacks") {
+            reloadStacks(); QString h = "<h2>Stacks</h2><table>";
+            for (int i = 0; i < m_list->count(); ++i) h += QString("<tr><td><a href='/stack/%1'>%2</a></td></tr>").arg(i).arg(esc(m_list->item(i)->text()));
+            return html(h + "</table>", 0);
+        }
+        if (path.startsWith("/stack/")) {
+            bool ok = false; const int i = path.mid(7).toInt(&ok); if (!ok || i < 0 || i >= m_list->count()) { r.status = 404; r.type = "text/plain"; r.body = "no such stack\n"; return r; }
+            return html(QString("<p>%1</p><p><img src='/img/stack/%2.jpg' alt='stack'></p>").arg(esc(m_list->item(i)->text())).arg(i), 0);
+        }
+        if (path == "/forecast") {
+            QString h = "<h2>Forecast and nowcast</h2>";
+            if (!m_fcSky->pixmap().isNull() && !m_fcSky->isHidden()) h += "<p><img src='/img/allsky.jpg' alt='all-sky camera' style='max-width:40%'></p>";
+            for (QLabel* l : {m_fcInfo, m_fcNow, m_fcAcc}) if (l && !l->text().isEmpty()) { QTextDocument d; d.setHtml(l->text()); h += "<p>" + esc(d.toPlainText()).replace("\n", "<br>") + "</p>"; }   // the labels are rich text; show their words only
+            // the table as real HTML (the page scrolls as one; nothing is clipped inside a picture): the hourly columns, then the per-model columns in a fold-out
+            auto table = [&](QList<int> cols) {
+                QString t = "<table class=fc><tr>";
+                for (int c : cols) t += "<th>" + esc(m_fcTable->horizontalHeaderItem(c) ? m_fcTable->horizontalHeaderItem(c)->text() : QString()) + "</th>";
+                t += "</tr>";
+                for (int r = 0; r < m_fcTable->rowCount(); ++r) {
+                    t += "<tr>";
+                    for (int c : cols) {
+                        const QTableWidgetItem* it = m_fcTable->item(r, c); QString style;
+                        if (it && it->background().style() != Qt::NoBrush) style = " style='background:" + it->background().color().name() + ";color:#fff'";
+                        t += "<td" + style + ">" + esc(it ? it->text() : QString()) + "</td>";
+                    }
+                    t += "</tr>";
+                }
+                return t + "</table>";
+            };
+            h += table({0, 1, 2, 3, 4, 5, 6, 7});
+            h += "<details><summary>Quality by model</summary>" + table({0, 8, 9, 10, 11, 12, 13, 14}) + "</details>";
+            h += "<p class=dim>Quality 0..1 = how much of the hour is usable. Green 0.5 or more, amber 0.3-0.5, red below.</p>";
+            return html(h, 300);
+        }
+        if (path == "/img/allsky.jpg") return png(m_fcSky->pixmap().toImage(), true);
+        if (path == "/img/lastframe.jpg") return png(m_aPic->pixmap().toImage(), true);
+        if (path == "/img/live.jpg") return png(m_live->image(), true);
+        if (path.startsWith("/img/stack/") && path.endsWith(".jpg")) {
+            bool ok = false; const int i = path.mid(11, path.size() - 15).toInt(&ok); if (!ok || i < 0 || i >= m_list->count()) { r.status = 404; r.type = "text/plain"; r.body = "no such stack\n"; return r; }
+            return png(QImage(m_list->item(i)->data(Qt::UserRole).toString() + "/preview.png"), true);
+        }
+        r.status = 404; r.type = "text/plain"; r.body = "not found\n"; return r;
+    }
 private:
     // ---------------------------------------------------------------- Forecast
     QWidget* buildForecast()
@@ -509,7 +605,7 @@ private:
     }
 
     Client* m_client = nullptr; QString m_dir; int m_port; double m_lat, m_lon; QTimer m_poll, m_files, m_liveTimer, m_fcTimer;
-    QDateTime m_picStamp;
+    QDateTime m_picStamp; QElapsedTimer m_webLive;
     QLabel *m_fcInfo = nullptr, *m_fcAcc = nullptr, *m_fcNow = nullptr, *m_fcSky = nullptr; QTableWidget* m_fcTable = nullptr; bool m_fcFresh = false;
     QLabel *m_conn, *m_tLink, *m_tState, *m_tMount, *m_tBatt, *m_pRaDec, *m_pAltAz, *m_pGoto, *m_pTarget, *m_fPos, *m_cExp, *m_cTemp, *m_sState, *m_sFrames, *m_sLast, *m_sCause, *m_sFocus, *m_sTiming,
            *m_aVerdict, *m_aWhy, *m_aSky, *m_aPoint, *m_aSolve, *m_aPic, *m_rLast, *m_rCount, *m_liveInfo, *m_stackInfo;
@@ -530,6 +626,18 @@ int main(int argc, char* argv[])
     for (int i = 1; i + 1 < argc; ++i) { if (QString(argv[i]) == "--lat") lat = QString(argv[i + 1]).toDouble(); if (QString(argv[i]) == "--lon") lon = QString(argv[i + 1]).toDouble(); }
     Window w(port, originDataDir(), lat, lon);
     w.show();
+    // --web-port N [--web-cert F --web-key F] [--web-bind ADDR] [--web-token-file F]: serve the window's information read-only over HTTP (HTTPS with a certificate) to private-network
+    // peers only. Run headless with: OriginWatch -platform offscreen --web-port 8443 ...
+    int webPort = 0; QString cert, key, bind, tokenFile;
+    for (int i = 1; i + 1 < argc; ++i) { const QString a = argv[i], v = argv[i + 1]; if (a == "--web-port") webPort = v.toInt(); if (a == "--web-cert") cert = v; if (a == "--web-key") key = v; if (a == "--web-bind") bind = v; if (a == "--web-token-file") tokenFile = v; }
+    WebServer* web = nullptr;
+    if (webPort > 0) {
+        QString token; if (!tokenFile.isEmpty()) { QFile tf(tokenFile); if (tf.open(QIODevice::ReadOnly)) token = QString::fromUtf8(tf.readAll()).trimmed(); else { fprintf(stderr, "cannot read %s\n", qPrintable(tokenFile)); return 2; } }
+        web = new WebServer([&w](const QString& p, const QUrlQuery& q) { return w.web(p, q); }, token, &app);
+        QString err;
+        if (!web->start(quint16(webPort), cert, key, bind.isEmpty() ? QHostAddress(QHostAddress::Any) : QHostAddress(bind), &err)) { fprintf(stderr, "web server: %s\n", qPrintable(err)); return 2; }
+        fprintf(stderr, "OriginWatch web view on %s://*:%d/ (private networks only%s)\n", web->tls() ? "https" : "http", webPort, token.isEmpty() ? "" : ", token required");
+    }
     // --shot FILE [--tab N] [--stack N]: save a screenshot after a few seconds and exit (for documentation and testing)
     QString shot; int tab = 0, stack = 0;
     for (int i = 1; i + 1 < argc; ++i) { if (QString(argv[i]) == "--shot") shot = argv[i + 1]; if (QString(argv[i]) == "--tab") tab = QString(argv[i + 1]).toInt(); if (QString(argv[i]) == "--stack") stack = QString(argv[i + 1]).toInt(); }

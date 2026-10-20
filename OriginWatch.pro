@@ -2,6 +2,7 @@
 # OriginWatch: read-only GUI that watches an OriginHeadless daemon (status, log, live stack preview, finished stacks)
 #   mkdir -p build/watch && cd build/watch && qmake6 ../../OriginWatch.pro && make
 # It sends the daemon only read-only commands (a whitelist in WatchMain.cpp) and reads the data directory.
+# With --web-port it also serves the same information to a phone over HTTP(S) (WatchWeb.hpp); see the README.
 ######################################################################
 TEMPLATE = app
 TARGET = OriginWatch
@@ -13,4 +14,4 @@ DESTDIR = build
 OBJECTS_DIR = build/obj
 MOC_DIR = build/moc
 SOURCES += WatchMain.cpp Weather.cpp
-HEADERS += DataDir.hpp Weather.hpp
+HEADERS += DataDir.hpp Weather.hpp WatchWeb.hpp
