@@ -1,5 +1,6 @@
 #include "Sequencer.hpp"
 #include <algorithm>
+#include <cmath>
 #include "DataDir.hpp"
 #include "OriginBackend.hpp"
 
@@ -45,10 +46,17 @@ QJsonObject Sequencer::start(const QJsonObject& req)
     m_cMsg = connect(m_b, &OriginBackend::messageReceived, this, &Sequencer::onMessage);
     m_hfrWin.clear(); m_hfrBase = req["focus_baseline"].toDouble(0); m_hfrMedian = 0; m_driftRun = m_drifts = 0;
     m_driftRatio = req["focus_drift"].toDouble(1.15); m_focusWin = qBound(3, req["focus_window"].toInt(8), 50); m_focusPause = req["focus_pause"].toBool(false);
+    m_auto = req["auto_exposure"].toBool(false); m_minExp = req["min_exposure"].toDouble(2); m_maxExp = req["max_exposure"].toDouble(60);
+    m_latDeg = req["lat_deg"].toDouble(52.2054); m_targetEff = std::clamp(req["target_efficiency"].toDouble(0.94), 0.5, 0.99);
+    m_readNoise = req["read_noise_adu"].toDouble(580); m_skyVarPerAdu = req["sky_var_per_adu"].toDouble(310); m_blackAdu = req["black_level"].toDouble(4985);
+    m_lastExpChangeMs = 0; m_autoInfo = QJsonObject();
+    if (m_auto && (m_minExp <= 0 || m_maxExp < m_minExp || m_maxExp > 300)) return QJsonObject{{"ok", false}, {"error", "need 0 < min_exposure <= max_exposure <= 300"}};
+    if (m_auto) m_exposure = std::clamp(m_exposure, m_minExp, m_maxExp);
     m_active = true;
     if (!req["resend_params"].toBool(true)) m_b->setResendCaptureParams(false);     // the FITS format is only kept when the parameters are resent every cycle
     m_b->setLiveStreamDisabled(true);
-    m_b->recordEvent("sequence_started", QString("exposure %1 s ISO %2, pipeline %3").arg(m_exposure).arg(m_iso).arg(m_pipeline ? "on" : "off"));
+    m_b->recordEvent("sequence_started", QString("exposure %1 s%4 ISO %2, pipeline %3").arg(m_exposure).arg(m_iso).arg(m_pipeline ? "on" : "off")
+                                             .arg(m_auto ? QString(" (auto %1-%2 s)").arg(m_minExp).arg(m_maxExp) : QString()));
     requestFrame();
     return QJsonObject{{"ok", m_active}, {"status", status()}};
 }
@@ -199,6 +207,7 @@ void Sequencer::onFocus(const QJsonObject& o)
         if (m_focusPause) { beginDrain("focus drift"); if (!m_active) return; }
     }
     if (m_draining) { checkDrained(); return; }
+    if (good && m_auto && m_state == State::Shooting) adjustExposure(o);
     if (m_state == State::Shooting && m_badRun >= m_badLimit) {
         m_state = State::Probing;
         m_b->recordEvent("sequence_cloud", QString("%1 bad frames in a row (last verdict %2): probing every %3 s").arg(m_badRun).arg(verdict).arg(m_probeMs / 1000));
@@ -212,6 +221,33 @@ void Sequencer::onFocus(const QJsonObject& o)
     }
 }
 
+void Sequencer::adjustExposure(const QJsonObject& o)
+{
+    if (!o.contains("alt_deg") || !o.contains("az_deg")) return;            // no pointing for this frame: keep the exposure
+    constexpr double kPi = 3.14159265358979323846, omega = 7.2921159e-5, rCorner = 1840.0, tolPx = 2.0;   // as Planner::maxExposure: half-diagonal of the 3056x2048 frame
+    const double alt = o["alt_deg"].toDouble() * kPi / 180, az = o["az_deg"].toDouble() * kPi / 180;
+    const double w = std::fabs(omega * std::cos(m_latDeg * kPi / 180) * std::cos(az) / std::max(std::cos(alt), 0.02));
+    const double tRot = w < 1e-12 ? 1e9 : 0.85 * tolPx / (rCorner * w);
+    const double sky = std::max(o["sky_rate"].toDouble(), 1.0);                // ADU/s above black
+    const double tSat = (32768.0 - m_blackAdu) / sky;
+    // sky variance sky*t*v against read noise rn^2: the share of the noise variance that is sky reaches eff at t = eff/(1-eff) * rn^2 / (v * sky)
+    const double tEff = m_targetEff / (1 - m_targetEff) * m_readNoise * m_readNoise / (m_skyVarPerAdu * sky);
+    struct L { double t; const char* why; } lims[] = {{tRot, "field rotation"}, {tSat, "sky level"}, {tEff, "read noise swamped"}, {m_maxExp, "max_exposure"}};
+    const L* best = &lims[0];
+    for (const L& l : lims) if (l.t < best->t) best = &l;
+    double t = std::max(m_minExp, best->t);
+    t = t >= 10 ? std::floor(t) : std::floor(t * 2) / 2;                      // whole seconds, half seconds under 10 s
+    m_autoInfo = QJsonObject{{"chosen_s", t}, {"limit", best->why}, {"rotation_s", std::round(std::min(tRot, 9999.0) * 10) / 10}, {"sky_s", std::round(tSat * 10) / 10},
+                             {"efficiency_s", std::round(tEff * 10) / 10}, {"max_s", m_maxExp}, {"alt_deg", std::round(o["alt_deg"].toDouble())}, {"az_deg", std::round(o["az_deg"].toDouble())}, {"sky_rate", std::round(sky)}};
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const bool shorter = t < m_exposure - 0.01;
+    const bool longer = t >= m_exposure * 1.15 && (m_lastExpChangeMs == 0 || now - m_lastExpChangeMs >= 180000);
+    if (!shorter && !longer) return;
+    m_b->recordEvent("sequence_exposure", QString("exposure %1 s -> %2 s (limit: %3; rotation %4 s, sky %5 s, read noise %6 s, alt %7)")
+                                              .arg(m_exposure).arg(t).arg(best->why).arg(std::min(tRot, 9999.0), 0, 'f', 0).arg(tSat, 0, 'f', 0).arg(tEff, 0, 'f', 0).arg(o["alt_deg"].toDouble(), 0, 'f', 0));
+    m_exposure = t; m_lastExpChangeMs = now;
+}
+
 QJsonObject Sequencer::status() const
 {
     const int n = m_frames;
@@ -219,6 +255,7 @@ QJsonObject Sequencer::status() const
                   {"bad_run", m_badRun}, {"probes", m_probes}, {"exposure", m_exposure}, {"iso", m_iso}, {"pipeline", m_pipeline}, {"early", m_early}, {"outstanding", m_outstanding}, {"last_verdict", m_lastVerdict},
                   {"log", m_logPath}, {"stop_reason", m_stopReason}, {"last", m_last},
                   {"focus", QJsonObject{{"baseline_px", m_hfrBase}, {"median_px", m_hfrMedian}, {"window", m_hfrWin.size()}, {"drifts", m_drifts}, {"drift_ratio", m_driftRatio}, {"pause", m_focusPause}}}};
+    if (m_auto) { QJsonObject a = m_autoInfo; a["min_s"] = m_minExp; a["max_s"] = m_maxExp; a["target_efficiency"] = m_targetEff; s["auto_exposure"] = a; }
     if (n > 0) { s["avg_capture_ms"] = m_sumCaptureMs / n; s["avg_analysis_ms"] = m_sumAnalysisMs / n; s["avg_download_ms"] = m_sumDownloadMs / n; }
     if (m_cycles > 0) { s["avg_cycle_ms"] = m_sumCycleMs / m_cycles; s["duty_cycle"] = m_exposure * 1000.0 / (m_sumCycleMs / m_cycles); }
     return s;

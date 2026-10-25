@@ -136,7 +136,10 @@ const QList<Cmd>& commands()
               O("max-frames", 'i', "stop after N frames"), O("for-minutes", 'd', "stop after N minutes"), O("until-local", 's', "stop at local HH:MM"), O("reason", 's', "stop reason"),
               O("focus-pause", 'o', "on|off stop the sequence when the focus drifts, so that focus-sweep can be run (default off: only an event is recorded)"),
               O("focus-drift", 'd', "HFR ratio over the baseline that counts as drift", "1.15"), O("focus-baseline", 'd', "baseline HFR, full-resolution px (default: the first 8 good frames)"),
-              O("focus-window", 'i', "frames in the rolling median", "8")}, true);
+              O("focus-window", 'i', "frames in the rolling median", "8"),
+              O("auto-exposure", 'o', "on|off re-choose the exposure after each good frame: the shortest of the field-rotation limit, half-full sky and read noise swamped (see Sequencer.hpp)"),
+              O("min-exposure", 'd', "auto exposure: shortest, s", "2"), O("max-exposure", 'd', "auto exposure: longest, s", "60"),
+              O("target-efficiency", 'd', "auto exposure: share of the noise variance that is sky (0.5-0.99)", "0.94"), O("lat", 'd', "site latitude for the rotation limit", "52.2054", "lat_deg")}, true);
         pass("filter", "action", "Declare the hand-inserted filter to the firmware (clear or nebula; there is no motor, it only affects exposure choices for plate solving and centring), or read the current setting when no name is given. Setting takes about 11 s.", "filter",
              {P("name", 's', "clear | nebula (default: just read)", false)});
         pass("send", "action", "Raw telescope command (server must run with --control-raw).", "send",
@@ -776,7 +779,7 @@ QJsonObject cmdFocusSweep(const Parsed& p, const Cmd& c)
 // ---------------------------------------------------------------------------------------------------------------------------------------
 struct RunState {
     Planner::Options o; QTimeZone zone; QDateTime darkEnd;
-    double maxExposure = 20; int iso = 800; double patienceMin = 10, giveUpMin = 60; QString host;
+    double maxExposure = 20, ceiling = 20; int iso = 800; double patienceMin = 10, giveUpMin = 60; QString host;   // ceiling: this block's longest exposure before field rotation (the sequencer's auto exposure works under it)
     bool isoFallbackDone = false, rain = false;
     QDateTime lastRefocus, lastForecast; QStringList tried;
     int switches = 0, refocuses = 0, restarts = 0, blocksDone = 0;
@@ -886,6 +889,7 @@ QJsonObject slewTo(const QJsonObject& t, double exposure, int iso)
 bool startSeq(double exposure, int iso, const QDateTime& endUtc, bool focusPause)
 {
     const QJsonObject r = call("sequence", {{"action", "start"}, {"exposure", exposure}, {"iso", iso}, {"pipeline", true}, {"focus_pause", focusPause},
+                                            {"auto_exposure", true}, {"min_exposure", 1.0}, {"max_exposure", std::max(g_run.ceiling, exposure)}, {"lat_deg", g_run.o.site.latDeg},
                                             {"until_local", endUtc.toTimeZone(g_run.zone).toString("HH:mm")}});
     return r["ok"].toBool() && r["status"].toObject()["active"].toBool();
 }
@@ -895,7 +899,8 @@ enum class RunResult { Done, Failed, Rain, Stopped };
 RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bool isOverride = false)
 {
     const QDateTime t0 = QDateTime::currentDateTimeUtc();
-    const double exposure = exposureFor(t, t0, endUtc);
+    const double exposure = exposureFor(t, t0, t0);      // the rotation limit now; the sequencer's auto exposure follows it through the block
+    g_run.ceiling = std::max(1.0, std::floor(g_run.maxExposure * (0.4 + 0.6 * std::clamp(t["faintness"].isDouble() ? t["faintness"].toDouble() : 1.0, 0.0, 1.0))));
     int iso = g_run.iso;
     runLog("start", {{"target", t["key"]}, {"exposure_s", exposure}, {"iso", iso}, {"until", endUtc.toTimeZone(g_run.zone).toString("HH:mm")}, {"backup", depth > 0}, {"override", isOverride}});
     const QJsonObject outer = g_run.current;
