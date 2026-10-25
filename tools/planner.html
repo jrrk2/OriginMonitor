@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Night Planner</title>
+<style>
+:root { --bg:#f6f7f9; --fg:#1c2330; --mute:#6a7385; --card:#fff; --line:#d9dde5; --ok:#2e8b57; --warn:#d98f00; --bad:#c0392b; --acc:#2b6cb0; --cell-off:#e8ebf0; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#10141b; --fg:#dfe5ef; --mute:#8b95a8; --card:#171d27; --line:#2a3342; --ok:#4cc38a; --warn:#e6a935; --bad:#ef6a5a; --acc:#6aa9ff; --cell-off:#1e2530; } }
+:root[data-theme="dark"] { --bg:#10141b; --fg:#dfe5ef; --mute:#8b95a8; --card:#171d27; --line:#2a3342; --ok:#4cc38a; --warn:#e6a935; --bad:#ef6a5a; --acc:#6aa9ff; --cell-off:#1e2530; }
+* { box-sizing:border-box; }
+body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+h1 { font-size:20px; margin:0 0 2px; } .sub { color:var(--mute); margin-bottom:12px; }
+.bar { display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; margin:10px 0; }
+.bar label { color:var(--mute); } select, button { font:inherit; color:var(--fg); background:var(--card); border:1px solid var(--line); border-radius:6px; padding:4px 8px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:12px; }
+.live { display:flex; flex-wrap:wrap; gap:6px 24px; } .live b { color:var(--mute); font-weight:500; }
+.wrap { overflow-x:auto; }
+table { border-collapse:collapse; width:100%; min-width:760px; }
+th, td { padding:0; }
+td.name { white-space:nowrap; padding:2px 10px 2px 0; position:sticky; left:0; background:var(--card); z-index:1; max-width:300px; overflow:hidden; text-overflow:ellipsis; }
+td.meta { white-space:nowrap; padding:2px 8px; color:var(--mute); font-size:12px; text-align:right; }
+tr.cur td.name { color:var(--acc); font-weight:600; }
+svg { display:block; }
+.legend span { display:inline-flex; align-items:center; gap:4px; margin-right:14px; color:var(--mute); font-size:12px; }
+.legend i { width:14px; height:10px; display:inline-block; border-radius:2px; }
+.tag { font-size:11px; padding:0 5px; border-radius:8px; border:1px solid var(--line); color:var(--mute); margin-left:4px; }
+.tag.f { color:var(--ok); border-color:var(--ok); } .tag.u { color:var(--warn); border-color:var(--warn); }
+#tip { position:fixed; pointer-events:none; background:var(--card); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:12px; display:none; z-index:9; box-shadow:0 2px 10px rgba(0,0,0,.25); }
+.err { color:var(--bad); }
+</style>
+</head>
+<body>
+<h1>Night Planner</h1>
+<div class="sub" id="sub">loading…</div>
+<div class="card live" id="live"></div>
+<div class="bar">
+  <label>Sort <select id="sort"><option value="pri">priority</option><option value="peak">time of peak</option><option value="start">window start</option><option value="name">name</option></select></label>
+  <label>Show <select id="show"><option value="obs">observable tonight</option><option value="all">all candidates</option></select></label>
+  <label>Minimum sub <select id="minsub"><option value="0">any</option><option value="5">5 s</option><option value="10" selected>10 s</option><option value="20">20 s</option></select></label>
+  <button id="reload">Reload</button><span class="sub" id="age"></span>
+</div>
+<div class="card legend">
+  <span><i style="background:var(--ok);opacity:.9"></i>observable, long subs</span>
+  <span><i style="background:var(--warn)"></i>observable, subs shorter than the minimum (field rotation)</span>
+  <span><i style="background:var(--cell-off)"></i>blocked: below the horizon, glare, Moon or outside the planner's window</span>
+  <span><i style="border:2px solid var(--acc);background:none"></i>supervisor's planned block</span>
+  <span><i style="background:var(--bad)"></i>now</span>
+</div>
+<div class="card wrap"><table id="tbl"></table></div>
+<div id="tip"></div>
+<script>
+const $ = s => document.querySelector(s);
+const tz = 'Europe/London';
+const hhmm = d => d.toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit', timeZone:tz});
+let D = null;
+async function load() {
+  try { const r = await fetch('planner.json?_=' + Date.now(), {cache:'no-store'}); if (!r.ok) throw new Error(r.status); D = await r.json(); render(); }
+  catch (e) { $('#sub').innerHTML = '<span class="err">cannot load planner.json: ' + e + '</span>'; }
+}
+function stackFlag(t) {
+  const names = Object.keys(D.stacks || {}); const k = t.key.replace(/\s+/g, '').toLowerCase();
+  const hit = names.filter(n => n.toLowerCase().replace(/[_\s]+/g, '').includes(k) || k.includes(n.toLowerCase().replace(/[_\s]+/g, '')));
+  if (!hit.length) return '';
+  const newest = hit.map(n => D.stacks[n].mtime).sort().pop();
+  return new Date(newest) > new Date('2026-10-15T17:00:00Z') ? '<span class="tag f">stack since filter</span>' : '<span class="tag u">pre-filter stack</span>';
+}
+function render() {
+  const g = new Date(D.generated), now = new Date();
+  const L = D.live || {}, seq = L.sequence || {}, tg = (L.target || {}).target || '', st = (L.target || {}).stack || {}, mt = L.mount || {};
+  $('#sub').textContent = 'night of ' + D.night + ' · dark ' + hhmm(new Date(D.dark_start)) + '–' + hhmm(new Date(D.dark_end)) + ' (UK) · Moon ' + Math.round((D.moon_illumination || 0) * 100) + '% lit · times are Europe/London';
+  $('#live').innerHTML = '<div><b>target</b> ' + (tg || '—') + '</div><div><b>capture</b> ' + (seq.active ? 'running, ' + seq.exposure + ' s ISO ' + seq.iso : 'idle') + '</div><div><b>frames</b> ' + (seq.good ?? '—') + ' good / ' + (seq.bad ?? '—') + ' bad</div><div><b>stack</b> ' + (st.frames ?? '—') + ' frames, ' + Math.round(st.total_exposure_s || 0) + ' s</div><div><b>mount</b> ' + (mt.IsAligned ? 'aligned (' + mt.NumAlignRefs + ' refs)' : 'NOT aligned') + (mt.IsTracking ? ', tracking' : ', not tracking') + '</div>';
+  $('#age').textContent = 'data from ' + hhmm(g) + ' (' + Math.round((now - g) / 60000) + ' min ago)';
+  const times = D.times.map(t => new Date(t)), n = times.length, W = 14, H = 22, minsub = +$('#minsub').value;
+  const obs = t => t.window_start && t.minutes > 0;
+  let T = D.targets.filter(t => $('#show').value === 'all' || obs(t));
+  const key = $('#sort').value;
+  T.sort((a, b) => key === 'name' ? a.name.localeCompare(b.name) : key === 'peak' ? new Date(a.peak) - new Date(b.peak) : key === 'start' ? new Date(a.window_start) - new Date(b.window_start) : (b.priority - a.priority));
+  const nowX = (now - times[0]) / (D.step_min * 60000) * W;
+  let h = '<tr><td class="name"></td><td class="meta">pri</td><td class="meta">window</td><td><svg width="' + n * W + '" height="34">';
+  times.forEach((t, i) => { if (t.getUTCMinutes() === 0) h += '<line x1="' + i * W + '" x2="' + i * W + '" y1="22" y2="34" stroke="currentColor" opacity=".35"/><text x="' + (i * W + 2) + '" y="14" font-size="11" fill="currentColor">' + hhmm(t).slice(0, 2) + '</text>'; });
+  h += '</svg></td></tr>';
+  const wx = D.weather || [];
+  h += '<tr><td class="name">forecast quality</td><td></td><td></td><td><svg width="' + n * W + '" height="10">';
+  times.forEach((t, i) => { const w = wx.filter(x => Math.abs(new Date(x.utc) - t) <= 1800000).sort((a, b) => Math.abs(new Date(a.utc) - t) - Math.abs(new Date(b.utc) - t))[0]; const q = w && w.quality != null ? w.quality : null; h += '<rect x="' + i * W + '" y="0" width="' + W + '" height="10" style="fill:' + (q == null ? 'var(--cell-off)' : q > .7 ? 'var(--ok)' : q > .4 ? 'var(--warn)' : 'var(--bad)') + ';opacity:' + (q == null ? 1 : .55) + '"/>'; });
+  h += '</svg></td></tr>';
+  for (const t of T) {
+    const ws = t.window_start ? new Date(t.window_start) : null, we = t.window_end ? new Date(t.window_end) : null;
+    const cur = tg && t.name === tg;
+    h += '<tr class="' + (cur ? 'cur' : '') + '"><td class="name" title="' + t.name + '">' + t.name + stackFlag(t) + '</td><td class="meta">' + t.priority + '</td><td class="meta">' + (ws ? hhmm(ws) + '–' + hhmm(we) : '—') + '</td><td><svg width="' + n * W + '" height="' + H + '" data-k="' + t.key + '">';
+    t.rows.forEach((r, i) => {
+      const tm = times[i], inWin = ws && tm >= ws && tm < we, alt = r[0], ts = r[2];
+      let fill = 'var(--cell-off)', op = 1;
+      if (inWin && alt > 0) { const short = ts !== null && ts < minsub; fill = short ? 'var(--warn)' : 'var(--ok)'; op = .35 + .65 * Math.min(1, alt / 70); }
+      h += '<rect x="' + i * W + '" y="2" width="' + (W - 1) + '" height="' + (H - 4) + '" rx="2" style="fill:' + fill + ';opacity:' + op + '" data-i="' + i + '"/>';
+    });
+    for (const b of D.plan || []) if (b.key === t.key || b.name === t.name) { const x0 = (new Date(b.start) - times[0]) / (D.step_min * 60000) * W, x1 = (new Date(b.end) - times[0]) / (D.step_min * 60000) * W; h += '<rect x="' + x0 + '" y="1" width="' + (x1 - x0) + '" height="' + (H - 2) + '" rx="3" style="fill:none;stroke:var(--acc);stroke-width:2"/>'; }
+    if (nowX >= 0 && nowX <= n * W) h += '<line x1="' + nowX + '" x2="' + nowX + '" y1="0" y2="' + H + '" style="stroke:var(--bad);stroke-width:2"/>';
+    h += '</svg></td></tr>';
+  }
+  $('#tbl').innerHTML = h;
+}
+const tip = $('#tip');
+document.addEventListener('mousemove', e => {
+  const r = e.target.closest && e.target.closest('rect[data-i]'); if (!r || !D) { tip.style.display = 'none'; return; }
+  const t = D.targets.find(x => x.key === r.parentNode.dataset.k), i = +r.dataset.i, row = t.rows[i], when = new Date(D.times[i]);
+  tip.innerHTML = '<b>' + t.name + '</b><br>' + hhmm(when) + ' · alt ' + row[0] + '° az ' + row[1] + '°<br>longest sub ' + (row[2] === null ? 'unlimited' : row[2] + ' s') + '<br>' + (t.novelty || '');
+  tip.style.display = 'block'; tip.style.left = Math.min(e.clientX + 12, innerWidth - 220) + 'px'; tip.style.top = (e.clientY + 14) + 'px';
+});
+['sort', 'show', 'minsub'].forEach(id => $('#' + id).addEventListener('change', () => D && render()));
+$('#reload').addEventListener('click', load);
+load(); setInterval(load, 120000);
+</script>
+</body>
+</html>

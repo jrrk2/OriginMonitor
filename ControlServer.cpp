@@ -7,6 +7,7 @@
 #include "SkyFrame.hpp"
 
 #include <QCoreApplication>
+#include <QDebug>
 #include <QDateTime>
 #include <QTimeZone>
 #include <QDir>
@@ -147,6 +148,44 @@ QJsonObject ControlServer::queryTaskController(int)
     return m_last.value("TaskController/GetStatus");
 }
 
+// The filter is inserted by hand (no motor), so the firmware only knows what it was told. ~/.config/origin/filter holds "nebula" or "clear"; when present the server declares it
+// after every connect and before every initialize, so that plate solves and centring pick exposures for the filter that is really fitted (the Celestron app does the same).
+static QString configuredFilter()
+{
+    QFile f(QDir::homePath() + "/.config/origin/filter");
+    if (!f.open(QIODevice::ReadOnly)) return QString();
+    const QString n = QString::fromUtf8(f.readAll()).trimmed().toLower();
+    return (n == "clear" || n == "nebula") ? n : QString();
+}
+
+QJsonObject ControlServer::applyFilter(const QString& name, bool force)
+{
+    if (!m_backend->isConnected()) return fail("not connected");
+    const QString declared = name == "clear" ? "Clear" : "Nebula";
+    if (!force) {
+        m_backend->sendCommand("GetFilter", "Camera");
+        const QJsonObject cur = waitResponse(m_backend->lastSequenceId(), 5000);
+        if (!cur.isEmpty() && cur["Filter"].toString() == declared) return QJsonObject{{"ok", true}, {"filter", declared}, {"set", true}, {"already", true}};
+    }
+    m_backend->sendCommand("SetFilter", "Camera", QJsonObject{{"Filter", declared}});
+    const QJsonObject set = waitResponse(m_backend->lastSequenceId(), 30000);   // the Celestron app's capture showed a reply about 11 s after the request, but that included the user's confirmation prompt in the app: the firmware's own latency is untested
+    if (set.isEmpty()) return fail("no response to SetFilter");
+    if (set["ErrorCode"].toInt() != 0) return QJsonObject{{"ok", false}, {"error", set["ErrorMessage"].toString("SetFilter failed")}, {"response", set}};
+    m_backend->sendCommand("GetFilter", "Camera");
+    const QJsonObject r = waitResponse(m_backend->lastSequenceId(), 5000);
+    if (r.isEmpty()) return fail("no response to GetFilter");
+    return QJsonObject{{"ok", true}, {"filter", r["Filter"].toString()}, {"set", declared == r["Filter"].toString()}};
+}
+
+QJsonObject ControlServer::declareConfiguredFilter()
+{
+    const QString cf = configuredFilter();
+    if (cf.isEmpty()) return QJsonObject{{"ok", true}, {"configured", false}};
+    QJsonObject r = applyFilter(cf, false); r["configured"] = cf;
+    qInfo() << "filter" << cf << (r["ok"].toBool() ? (r["already"].toBool() ? "already declared" : "declared") : "NOT declared: " + r["error"].toString());
+    return r;
+}
+
 // RunInitialize on the TaskController with an explicit site and zone ({"lat_deg","lon_deg","timezone","fake","wait","timeout"}).
 // The mount moves (it homes and aligns), so this is a deliberate action. Returns "outcome" (initialized, rejected, failed, timeout, started)
 // and "summary" in words; "steps" lists the distinct InitializationInfo.CurrentStep values seen, in order.
@@ -164,9 +203,11 @@ QJsonObject ControlServer::doInitialize(const QJsonObject& req)
                        {"Latitude", lat * 3.14159265358979323846 / 180.0}, {"Longitude", lon * 3.14159265358979323846 / 180.0},
                        {"FakeInitialize", req["fake"].toBool(false)}};
     const QJsonObject before = queryTaskController();
+    const QJsonObject filterInfo = declareConfiguredFilter();       // before the mount moves and aligns: a failure is reported but does not stop the initialize
     m_backend->sendCommand("RunInitialize", "TaskController", params);
     const QJsonObject ack = waitResponse(m_backend->lastSequenceId(), 8000);
     QJsonObject r{{"ok", false}, {"sent", params}, {"state_before", before["State"].toString()}};
+    if (filterInfo["configured"].isString()) r["filter"] = filterInfo;
     if (ack.isEmpty()) { r["outcome"] = "rejected"; r["summary"] = "no acknowledgement from RunInitialize"; r["error"] = r["summary"]; return r; }
     r["ack"] = ack;
     if (ack["ErrorCode"].toInt() != 0) {
@@ -473,7 +514,7 @@ QJsonObject ControlServer::handle(const QJsonObject& req)
     if (cmd == "commands" || cmd == "help")
         return QJsonObject{{"ok", true}, {"note", "server commands; the OriginHeadless CLI has a fuller catalogue: OriginHeadless commands"},
                            {"commands", QJsonArray{"ping", "connect", "status", "manual", "auto", "set", "snapshot", "mount_status", "goto", "focus_status", "analysis", "events", "target", "stack",
-                                                   "sky_map", "preview", "monitor", "focuser_status", "focuser_move", "focuser_settings", "initialize", "unpark", "solve", "frame_stats", "sky_note", "sequence", "send", "cache", "quit"}}};
+                                                   "sky_map", "preview", "monitor", "focuser_status", "focuser_move", "focuser_settings", "filter", "initialize", "unpark", "solve", "frame_stats", "sky_note", "sequence", "send", "cache", "quit"}}};
     int ttl = cacheTtlMs(cmd);
     if (cmd == "target" && req.contains("name")) ttl = 0;                       // that form changes the target
     if (!m_cacheOn || ttl == 0) {
@@ -509,7 +550,11 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
         QString host = req["host"].toString();
         if (host.isEmpty()) return fail("missing 'host'");
         bool ok = m_backend->connectToTelescope(host, req["port"].toInt(80));
-        return ok ? QJsonObject{{"ok", true}, {"host", host}} : fail("connection failed");
+        if (!ok) return fail("connection failed");
+        QJsonObject out{{"ok", true}, {"host", host}};
+        const QJsonObject f = declareConfiguredFilter();                // the fitted filter, before anything is solved or initialized
+        if (f["configured"].isString()) out["filter"] = f;
+        return out;
     }
 
     if (cmd == "status") {
@@ -622,6 +667,18 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
         return r.isEmpty() ? fail("no response") : QJsonObject{{"ok", true}, {"settings", r}};
     }
 
+    if (cmd == "filter") {                            // {"name":"clear|nebula"} declares the hand-inserted filter to the firmware (no motor); without "name" it reads the setting back
+        if (!m_backend->isConnected()) return fail("not connected");
+        if (req.contains("name")) {
+            const QString n = req["name"].toString().trimmed().toLower();
+            if (n != "clear" && n != "nebula") return fail("filter name must be clear or nebula");
+            return applyFilter(n, true);
+        }
+        m_backend->sendCommand("GetFilter", "Camera");
+        const QJsonObject r = waitResponse(m_backend->lastSequenceId(), 5000);
+        if (r.isEmpty()) return fail("no response to GetFilter");
+        return QJsonObject{{"ok", true}, {"filter", r["Filter"].toString()}};
+    }
     if (cmd == "send") {
         if (!m_allowRaw) return fail("raw commands disabled (start with --control-raw)");
         if (!m_backend->isConnected()) return fail("not connected");

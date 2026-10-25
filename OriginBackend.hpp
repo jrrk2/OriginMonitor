@@ -116,6 +116,10 @@ public:
     // Camera mode control
     bool setCameraManualMode();
     bool setCameraAutoMode();
+    // The live stream is never wanted: with it on, a sample capture can wait for the live frame in progress. Sent on every connect and at every sequence start (the telescope forgets it when
+    // the stream is closed; verified 2026-10-14 with GetDisableLiveStream: the reply has IsDisabled, the setter needs the parameter "Disable").
+    bool setLiveStreamDisabled(bool disable);
+    double m_lastReqExposure = 0; int m_lastReqIso = 0;      // what the latest RunSampleCapture asked for (not the live-stream settings): a frame whose header differs was taken with older settings
      
     // Camera exposure/ISO control
     bool setCameraExposure(double seconds);

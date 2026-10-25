@@ -23,6 +23,7 @@ struct WebReply {
     int status = 200;
     QByteArray type = "text/html; charset=utf-8";
     QByteArray body;
+    QByteArray location;                       // set with status 303 to redirect
 };
 
 class WebServer : public QObject {
@@ -105,9 +106,9 @@ private:
         }
         fprintf(stderr, "%s web %s %s -> %d\n", qPrintable(QDateTime::currentDateTime().toString(Qt::ISODate)), qPrintable(s->peerAddress().toString()),
                 first.size() >= 2 ? qPrintable(QString::fromLatin1(first[0]) + " " + QUrl::fromEncoded(first[1]).path()) : "(malformed)", r.status);      // access log: path only, never the query (it holds the token)
-        const char* reason = r.status == 200 ? "OK" : r.status == 403 ? "Forbidden" : r.status == 404 ? "Not Found" : r.status == 405 ? "Method Not Allowed" : "Error";
+        const char* reason = r.status == 200 ? "OK" : r.status == 403 ? "Forbidden" : r.status == 404 ? "Not Found" : r.status == 303 ? "See Other" : r.status == 503 ? "Service Unavailable" : r.status == 405 ? "Method Not Allowed" : "Error";
         s->write("HTTP/1.1 " + QByteArray::number(r.status) + " " + reason + "\r\nContent-Type: " + r.type + "\r\nContent-Length: " + QByteArray::number(r.body.size()) +
-                 "\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n" + extra + "\r\n" + r.body);
+                 "\r\n" + (r.location.isEmpty() ? QByteArray() : "Location: " + r.location + "\r\n") + "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n" + extra + "\r\n" + r.body);
         s->disconnectFromHost();
     }
     Handler m_handler; QByteArray m_token; QTcpServer* m_server = nullptr; bool m_tls = false;

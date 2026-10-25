@@ -33,7 +33,8 @@ double quality(const Hour& h);
 
 /// The cloud layers come from several models (Met Office, ECMWF, ECMWF AIFS, ICON, GFS, Meteo-France, KNMI) because single models disagree by 50 points or more
 /// for a given hour; low/mid/high are their means, quality is the mean of the per-model qualities, models/qMin/qMax keep the spread.
-/// Fetch (or read the cache of) the forecast for the next `days` days. maxAgeMin 0 forces a fresh request. On failure falls back to a cache of any age.
+/// Fetch (or read the cache of) the forecast for the next `days` days (1..16, counted from today 00:00 UTC). The full 16 days are always fetched and cached, so callers
+/// asking for different ranges share one cache. maxAgeMin 0 forces a fresh request. On failure falls back to a cache of any age.
 /// Returns {ok, source, fetched, cached, hours:[...]}; hours are also parsed into `out`.
 QJsonObject fetch(double latDeg, double lonDeg, int days, int maxAgeMin, const QString& cacheDir, QVector<Hour>* out);
 
@@ -49,5 +50,10 @@ QVector<QPair<QDateTime, double>> nowcast(double latDeg, double lonDeg, int hour
 QJsonObject metarNowcast(double latDeg, double lonDeg, const QString& cacheDir, int maxAgeMin, QVector<Hour>* hours);
 
 QJsonObject toJson(const Hour& h);
+
+/// Night cloud cover from an IoA all-sky frame (JPEG) taken at `utc`: the share of catalogue stars (V <= 3.5, altitude > 25 deg) seen at their predicted pixels.
+/// The fisheye drifts a few pixels between nights, so each frame first re-centres it on the bright stars; a fit of 12 or more stars is kept in stateDir/allsky_offset.json
+/// for frames that cannot fit (cloud). Returns {ok, cover, tested, visible, offset...}; ok=false with an error when the frame cannot be read or too few stars are up.
+QJsonObject allSkyStars(const QByteArray& jpeg, const QDateTime& utc, const QString& stateDir, bool saveOffset);
 
 }   // namespace Weather

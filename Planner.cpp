@@ -32,7 +32,7 @@ const QHash<QString, int>& priorities()
     return p;
 }
 
-struct Target { QString name, key, type, seen; double ra = 0, dec = 0, size = 0; int prio = 3; };
+struct Target { QString name, key, type, seen; double ra = 0, dec = 0, size = 0; int prio = 3; double faint = 0.5; bool boosted = false; };   // faint: 0 = bright (high surface brightness: clusters, compact nebulae), 1 = faint (extended nebulae)
 
 QMap<QString, int> g_boost;   // catalogue id -> priority added (the user's wish list, e.g. M1 +5)
 QString g_stacksDir;          // where the live stacks of earlier nights are kept; empty = no novelty preference
@@ -51,25 +51,41 @@ QString catalogId(const QString& s)
 void applyNovelty(QList<Target>& targets)
 {
     QHash<QString, QDateTime> last;
-    if (g_stacksDir.isEmpty()) { for (Target& t : targets) { const QString id = catalogId(t.key.isEmpty() ? t.name : t.key); if (g_boost.contains(id)) t.prio += g_boost[id]; } return; }
+    if (g_stacksDir.isEmpty()) { for (Target& t : targets) { const QString id = catalogId(t.key.isEmpty() ? t.name : t.key); if (g_boost.contains(id)) { t.prio += g_boost[id]; t.boosted = true; } } return; }
     for (const QFileInfo& d : QDir(g_stacksDir).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
         const QString id = catalogId(d.fileName()); if (id.isEmpty()) continue;
-        // only a real stack counts as "imaged": at least 10 minutes of exposure (state.bin: magic, width, height, frames as 32-bit ints, then the total exposure as a double).
-        // A directory with a few frames (a pointing test, a probe on the way past) must not demote a target.
+        // only a real stack counts as "imaged": at least 30 minutes of exposure (state.bin: magic, width, height, frames as 32-bit ints, then the total exposure as a double).
+        // A directory with a few frames (a pointing test, a probe on the way past, a night cut short: M1 on 2026-10-12 had 828 s) must not demote a target.
         QFile sf(d.absoluteFilePath() + "/state.bin"); double exposureS = 0;
         if (sf.open(QIODevice::ReadOnly)) { const QByteArray h = sf.read(24); if (h.size() == 24) memcpy(&exposureS, h.constData() + 16, 8); }
-        if (!(exposureS >= 600.0)) continue;
+        if (!(exposureS >= 1800.0)) continue;
         if (!last.contains(id) || d.lastModified() > last[id]) last[id] = d.lastModified();
     }
     const QDateTime now = QDateTime::currentDateTime();
     for (Target& t : targets) {
         const QString id = catalogId(t.key.isEmpty() ? t.name : t.key);
-        if (g_boost.contains(id)) t.prio += g_boost[id];                    // the user's own priority boost: it wins whenever the target is observable
+        if (g_boost.contains(id)) { t.prio += g_boost[id]; t.boosted = true; }   // the user's own priority boost: it wins whenever the target is observable (and the Moon does not adjust it)
         if (id.isEmpty() || !last.contains(id)) { t.prio += 4; t.seen = "new"; continue; }
         const double days = last[id].secsTo(now) / 86400.0;
         t.seen = QString("imaged %1 days ago").arg(days, 0, 'f', days < 10 ? 1 : 0);
         t.prio = std::max(1, t.prio + (days < 3 ? -5 : days < 30 ? -4 : 0));
     }
+}
+
+// Integrated visual magnitudes of the Messier objects (the catalogue's own "magnitude" field is the central star's, e.g. 14.1 for M27, so it cannot give a surface brightness)
+const QHash<QString, double>& integratedMagnitudes()
+{
+    static const QHash<QString, double> m = {{"M1", 8.4}, {"M2", 6.5}, {"M3", 6.2}, {"M4", 5.6}, {"M5", 5.7}, {"M6", 4.2}, {"M7", 3.3}, {"M8", 6.0}, {"M9", 7.7}, {"M10", 6.6}, {"M11", 6.3}, {"M12", 6.7}, {"M13", 5.8}, {"M14", 7.6}, {"M15", 6.2}, {"M16", 6.0}, {"M17", 6.0}, {"M18", 6.9}, {"M19", 6.8}, {"M20", 6.3}, {"M21", 5.9}, {"M22", 5.1}, {"M23", 5.5}, {"M24", 2.5}, {"M25", 4.6}, {"M26", 8.0}, {"M27", 7.4}, {"M28", 6.8}, {"M29", 6.6}, {"M30", 7.2}, {"M31", 3.4}, {"M32", 8.1}, {"M33", 5.7}, {"M34", 5.5}, {"M35", 5.3}, {"M36", 6.0}, {"M37", 5.6}, {"M38", 6.4}, {"M39", 4.6}, {"M40", 8.4}, {"M41", 4.5}, {"M42", 4.0}, {"M43", 9.0}, {"M44", 3.7}, {"M45", 1.6}, {"M46", 6.1}, {"M47", 4.4}, {"M48", 5.8}, {"M49", 8.4}, {"M50", 5.9}, {"M51", 8.4}, {"M52", 6.9}, {"M53", 7.6}, {"M54", 7.6}, {"M55", 6.3}, {"M56", 8.3}, {"M57", 8.8}, {"M58", 9.7}, {"M59", 9.6}, {"M60", 8.8}, {"M61", 9.7}, {"M62", 6.5}, {"M63", 8.6}, {"M64", 8.5}, {"M65", 9.3}, {"M66", 8.9}, {"M67", 6.1}, {"M68", 7.3}, {"M69", 7.6}, {"M70", 7.9}, {"M71", 8.2}, {"M72", 9.2}, {"M73", 9.0}, {"M74", 9.4}, {"M75", 8.5}, {"M76", 10.1}, {"M77", 8.9}, {"M78", 8.3}, {"M79", 7.7}, {"M80", 7.3}, {"M81", 6.9}, {"M82", 8.4}, {"M83", 7.6}, {"M84", 9.1}, {"M85", 9.1}, {"M86", 8.9}, {"M87", 8.6}, {"M88", 9.6}, {"M89", 9.8}, {"M90", 9.5}, {"M91", 10.2}, {"M92", 6.4}, {"M93", 6.2}, {"M94", 8.2}, {"M95", 9.7}, {"M96", 9.2}, {"M97", 9.9}, {"M98", 10.1}, {"M99", 9.9}, {"M100", 9.3}, {"M101", 7.9}, {"M102", 9.9}, {"M103", 7.4}, {"M104", 8.0}, {"M105", 9.3}, {"M106", 8.4}, {"M107", 7.9}, {"M108", 10.0}, {"M109", 9.8}, {"M110", 8.5}};
+    return m;
+}
+
+// Faintness 0..1 from the mean surface brightness (integrated magnitude plus 2.5 log10 of the area in square arcminutes, mag/arcmin^2): 12.5 or brighter -> 0, 15 or fainter -> 1.
+// M1 11.6, M45 11.6, M57 about 11, M13 12.0, M42 12.7, M31 13.3, M33 14.1, M101 14.9. Unknown magnitude or size -> 0.5.
+double faintness(double mag, double w, double h)
+{
+    if (!(mag > -5 && mag < 20) || !(w > 0)) return 0.5;
+    const double area = 0.7854 * w * (h > 0 ? h : w);
+    return std::clamp((mag + 2.5 * std::log10(std::max(area, 0.25)) - 12.5) / 2.5, 0.0, 1.0);
 }
 
 QList<Target> loadTargets()
@@ -79,22 +95,23 @@ QList<Target> loadTargets()
         Target t; t.key = m.name; t.name = m.name + (m.common_name.isEmpty() ? "" : " " + m.common_name);
         t.ra = m.sky_position.ra_deg / 15.0; t.dec = m.sky_position.dec_deg; t.size = m.size_arcmin.width();
         t.prio = priorities().value(m.name, 3); t.type = "MESSIER";
+        t.faint = faintness(integratedMagnitudes().value(m.name, 99.0), m.size_arcmin.width(), m.size_arcmin.height());
         out.append(t);
     }
     // curated non-Messier extras: RA hours, Dec degrees, size arcmin, priority
-    struct E { const char* n; double ra, dec, size; int p; };
+    struct E { const char* n; double ra, dec, size; int p; double f; };   // f: faintness estimate, 0 bright .. 1 faint
     static const E extras[] = {
-        {"NGC 7000 North America Nebula", 20.9783, 44.33, 120, 9}, {"IC 5070 Pelican Nebula", 20.8, 44.35, 60, 7},
-        {"NGC 6992 Eastern Veil", 20.9367, 31.72, 60, 9}, {"NGC 6960 Western Veil", 20.76, 30.72, 70, 8},
-        {"NGC 869/884 Double Cluster", 2.35, 57.13, 60, 8}, {"IC 1805 Heart Nebula", 2.5333, 61.45, 60, 7}, {"IC 1848 Soul Nebula", 2.8833, 60.43, 60, 6},
-        {"NGC 281 Pacman Nebula", 0.8767, 56.62, 35, 6}, {"IC 1396 Elephant Trunk", 21.65, 57.5, 170, 7}, {"NGC 7380 Wizard Nebula", 22.78, 58.1, 25, 5},
-        {"NGC 7293 Helix Nebula", 22.4947, -20.84, 25, 6}, {"NGC 891", 2.37, 42.35, 13, 5}, {"NGC 253 Sculptor Galaxy", 0.7925, -25.29, 27, 6},
-        {"NGC 1499 California Nebula", 4.0, 36.42, 145, 7}, {"NGC 2244 Rosette Nebula", 6.5333, 4.95, 80, 8}, {"NGC 7662 Blue Snowball", 23.43, 42.54, 0.5, 3},
-        {"NGC 457 Owl Cluster", 1.32, 58.3, 13, 4}, {"NGC 7822 Cepheus Nebula", 0.0, 68.0, 60, 4}, {"NGC 6888 Crescent Nebula", 20.2, 38.35, 20, 6},
-        {"NGC 7331 + Stephan Quintet", 22.62, 34.4, 10, 5}, {"NGC 6946 Fireworks Galaxy", 20.58, 60.15, 11, 5}, {"NGC 4565 Needle Galaxy", 12.6, 25.99, 16, 4},
-        {"NGC 2264 Cone/Christmas Tree", 6.68, 9.9, 60, 6}, {"Mel 20 Alpha Persei Cluster", 3.4, 49.0, 300, 4},
-        {"IC 434 Horsehead / NGC 2024 Flame", 5.6833, -2.4, 90, 8}, {"NGC 1333", 3.4, 31.4, 10, 4}, {"NGC 7789 Caroline's Rose", 23.95, 56.7, 15, 4}};
-    for (const E& e : extras) { Target t; t.name = t.key = e.n; t.ra = e.ra; t.dec = e.dec; t.size = e.size; t.prio = e.p; t.type = "EXTRA"; out.append(t); }
+        {"NGC 7000 North America Nebula", 20.9783, 44.33, 120, 9, 1.0}, {"IC 5070 Pelican Nebula", 20.8, 44.35, 60, 7, 1.0},
+        {"NGC 6992 Eastern Veil", 20.9367, 31.72, 60, 9, 0.9}, {"NGC 6960 Western Veil", 20.76, 30.72, 70, 8, 0.9},
+        {"NGC 869/884 Double Cluster", 2.35, 57.13, 60, 8, 0.0}, {"IC 1805 Heart Nebula", 2.5333, 61.45, 60, 7, 0.9}, {"IC 1848 Soul Nebula", 2.8833, 60.43, 60, 6, 0.9},
+        {"NGC 281 Pacman Nebula", 0.8767, 56.62, 35, 6, 0.8}, {"IC 1396 Elephant Trunk", 21.65, 57.5, 170, 7, 0.9}, {"NGC 7380 Wizard Nebula", 22.78, 58.1, 25, 5, 0.8},
+        {"NGC 7293 Helix Nebula", 22.4947, -20.84, 25, 6, 0.6}, {"NGC 891", 2.37, 42.35, 13, 5, 0.7}, {"NGC 253 Sculptor Galaxy", 0.7925, -25.29, 27, 6, 0.3},
+        {"NGC 1499 California Nebula", 4.0, 36.42, 145, 7, 1.0}, {"NGC 2244 Rosette Nebula", 6.5333, 4.95, 80, 8, 0.8}, {"NGC 7662 Blue Snowball", 23.43, 42.54, 0.5, 3, 0.0},
+        {"NGC 457 Owl Cluster", 1.32, 58.3, 13, 4, 0.0}, {"NGC 7822 Cepheus Nebula", 0.0, 68.0, 60, 4, 0.9}, {"NGC 6888 Crescent Nebula", 20.2, 38.35, 20, 6, 0.8},
+        {"NGC 7331 + Stephan Quintet", 22.62, 34.4, 10, 5, 0.7}, {"NGC 6946 Fireworks Galaxy", 20.58, 60.15, 11, 5, 0.7}, {"NGC 4565 Needle Galaxy", 12.6, 25.99, 16, 4, 0.6},
+        {"NGC 2264 Cone/Christmas Tree", 6.68, 9.9, 60, 6, 0.8}, {"Mel 20 Alpha Persei Cluster", 3.4, 49.0, 300, 4, 0.0},
+        {"IC 434 Horsehead / NGC 2024 Flame", 5.6833, -2.4, 90, 8, 0.9}, {"NGC 1333", 3.4, 31.4, 10, 4, 0.6}, {"NGC 7789 Caroline's Rose", 23.95, 56.7, 15, 4, 0.0}};
+    for (const E& e : extras) { Target t; t.name = t.key = e.n; t.ra = e.ra; t.dec = e.dec; t.size = e.size; t.prio = e.p; t.faint = e.f; t.type = "EXTRA"; out.append(t); }
     applyNovelty(out);
     return out;
 }
@@ -157,8 +174,22 @@ private:
     QList<QPair<int, int>> m_bins;
 };
 
+// How well the Moon suits a target over steps [i, i+m): faint targets want a dark sky, bright ones can take the glow (and should use it, leaving the dark hours of a new moon to the faint ones).
+// 1 = ideal (faint with no glow, or bright under strong glow), 0 = worst. The planner moves a priority by kMoonWeight * (fit - 0.5).
+constexpr double kMoonWeight = 8.0;
+double moonFit(double faint, const QVector<double>& glow, int i, int m)
+{
+    if (m <= 0) return 0.5;
+    double g = 0; int c = 0; for (int j = i; j < i + m && j < glow.size(); ++j) { g += glow[j]; ++c; }
+    g = c ? g / c : 0;
+    return (1 - g) * faint + g * (1 - faint);
+}
+
+// the priority change for the Moon, none for a target the user boosted
+double moonAdjust(const struct Target& t, const QVector<double>& glow, int i, int m) { return t.boosted ? 0.0 : kMoonWeight * (moonFit(t.faint, glow, i, m) - 0.5); }
+
 struct Row {
-    Target t; QVector<bool> ok; QVector<double> alt, az; int i0 = 0, i1 = 0, peak = 0; double mins = 0, score = 0;
+    Target t; QVector<bool> ok; QVector<double> alt, az, glow; int i0 = 0, i1 = 0, peak = 0; double mins = 0, score = 0;
 };
 
 QString iso(const QDateTime& t) { return t.toUTC().toString("yyyy-MM-ddTHH:mm:ssZ"); }
@@ -193,6 +224,7 @@ QDate currentNightDate(const QString& timeZone)
     return QDateTime::currentDateTimeUtc().toTimeZone(QTimeZone(timeZone.toUtf8())).addSecs(-12 * 3600).date();
 }
 
+QString catalogueId(const QString& s) { return catalogId(s); }
 void setStacksDir(const QString& dir) { g_stacksDir = dir; }
 void setBoosts(const QMap<QString, int>& boosts) { g_boost.clear(); for (auto it = boosts.begin(); it != boosts.end(); ++it) g_boost[catalogId(it.key()).isEmpty() ? it.key().toUpper() : catalogId(it.key())] = it.value(); }
 
@@ -223,12 +255,15 @@ QJsonObject schedule(const Options& o)
 
     QList<Row> rows;
     for (const Target& tg : loadTargets()) {
-        Row r; r.t = tg; r.ok.resize(n); r.alt.resize(n); r.az.resize(n);
+        if (!o.skip.isEmpty() && o.skip.contains(catalogId(tg.key.isEmpty() ? tg.name : tg.key))) continue;     // the user's "not tonight"
+        Row r; r.t = tg; r.ok.resize(n); r.alt.resize(n); r.az.resize(n); r.glow.resize(n);
         bool any = false;
         for (int i = 0; i < n; ++i) {
             const Astro::AltAz aa = Astro::altAz({tg.ra, tg.dec}, o.site, times[i]);
             r.alt[i] = aa.alt; r.az[i] = aa.az;
             const double sep = Astro::separationDeg({tg.ra, tg.dec}, moonEq[i]);
+            // sky brightening by the Moon on this target: illumination, how high the Moon is, and how close it is to the target (0 none .. 1 strong)
+            r.glow[i] = std::clamp(illum[i] * std::max(0.0, std::sin(moonAlt[i] * kPi / 180)) * (1.5 - std::min(sep, 90.0) / 90.0), 0.0, 1.0);
             r.ok[i] = dark[i] && aa.alt > hz.minAlt(aa.az) && (sep > o.moonSep || moonAlt[i] < -2) && wq[i] >= o.minQuality;
             any |= r.ok[i];
         }
@@ -240,7 +275,7 @@ QJsonObject schedule(const Options& o)
         if (bestN * o.stepMin < o.minBlockMin) continue;
         r.i0 = bestS; r.i1 = bestE; r.mins = bestN * o.stepMin;
         r.peak = bestS; for (int i = bestS; i <= bestE; ++i) if (r.alt[i] > r.alt[r.peak]) r.peak = i;
-        r.score = tg.prio * std::min(1.0, r.mins / 180) * (0.6 + 0.4 * std::min(1.0, r.alt[r.peak] / 60));
+        r.score = (tg.prio + moonAdjust(tg, r.glow, bestS, bestE - bestS + 1)) * std::min(1.0, r.mins / 180) * (0.6 + 0.4 * std::min(1.0, r.alt[r.peak] / 60));
         rows.append(r);
     }
     std::stable_sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.score > b.score; });
@@ -257,7 +292,7 @@ QJsonObject schedule(const Options& o)
             int run = 0; while (i + run < n && r.ok[i + run]) ++run;
             if (run < need) continue;
             const int m = std::min(run, cap); double mean = 0; for (int j = 0; j < m; ++j) mean += r.alt[i + j]; mean /= m;
-            const double v = r.t.prio * (0.5 + 0.5 * std::min(1.0, mean / 60)) + (run <= 1.5 * cap ? 2 : 0);
+            const double v = (r.t.prio + moonAdjust(r.t, r.glow, i, m)) * (0.5 + 0.5 * std::min(1.0, mean / 60)) + (run <= 1.5 * cap ? 2 : 0);
             if (bestRow < 0 || v > bestV) { bestV = v; bestRow = k; bestRun = run; }
         }
         if (bestRow < 0) { ++i; continue; }
@@ -266,7 +301,7 @@ QJsonObject schedule(const Options& o)
     }
 
     auto info = [&](const Row& r) {
-        return QJsonObject{{"name", r.t.name}, {"key", r.t.key}, {"ra_hours", r.t.ra}, {"dec_deg", r.t.dec}, {"priority", r.t.prio}, {"novelty", r.t.seen}, {"size_arcmin", r.t.size},
+        return QJsonObject{{"name", r.t.name}, {"key", r.t.key}, {"ra_hours", r.t.ra}, {"dec_deg", r.t.dec}, {"priority", r.t.prio}, {"novelty", r.t.seen}, {"size_arcmin", r.t.size}, {"faintness", std::round(r.t.faint * 100) / 100}, {"moon_fit", std::round(moonFit(r.t.faint, r.glow, r.i0, r.i1 - r.i0 + 1) * 100) / 100},
                            {"window_start", iso(times[r.i0])}, {"window_end", iso(times[r.i1])}, {"peak", iso(times[r.peak])}, {"peak_alt", std::round(r.alt[r.peak] * 10) / 10},
                            {"peak_az", std::round(r.az[r.peak])}, {"minutes", r.mins}};
     };
@@ -289,7 +324,7 @@ QJsonObject schedule(const Options& o)
         for (int i = 0; i < cs.size() && i < 3; ++i) {
             const Cand& k = cs[i]; const Row& r = rows[k.row];
             const RotLimit lim = maxExposure(r.t.ra, r.t.dec, o.site, times[mid], 2.0);
-            QJsonObject b{{"key", r.t.key}, {"name", r.t.name}, {"ra_hours", r.t.ra}, {"dec_deg", r.t.dec}, {"priority", r.t.prio}, {"separation_deg", std::round(k.sep)},
+            QJsonObject b{{"key", r.t.key}, {"name", r.t.name}, {"ra_hours", r.t.ra}, {"dec_deg", r.t.dec}, {"priority", r.t.prio}, {"faintness", std::round(r.t.faint * 100) / 100}, {"separation_deg", std::round(k.sep)},
                           {"alt", std::round(k.alt)}, {"az", std::round(k.az)}, {"covered_minutes", k.cov * int(o.stepMin)}};
             if (std::isfinite(lim.tMax)) b["t_max_s"] = std::round(lim.tMax * 10) / 10;
             out.append(b);
@@ -438,7 +473,7 @@ QJsonObject backupTargets(const Options& base, double raHours, double decDeg, co
 
 QJsonObject findTarget(const Options& base, const QString& name)
 {
-    Options o = base; o.minBlockMin = 0;
+    Options o = base; o.minBlockMin = 0; o.skip.clear();
     const QJsonObject s = schedule(o);
     if (!s["ok"].toBool()) return s;
     const QString n = name.toLower();

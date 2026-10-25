@@ -1,0 +1,10 @@
+# M57, the Ring Nebula, night of 2026-10-15 (Antlia triband, 20 s, ISO 800). WIN = the 840 x 840 px window of the frames around the nebula (X0 Y0 W H); the pictures show the ring only, enlarged 3x.
+# OBJ = the nebula as a disc in output px (x y radius) for the split-half test.
+NAME  ?= m57
+SEQ   ?= /mnt/fits-backup/claude/sequence_20261015.jsonl
+FROM  ?= 2026-10-15T20:48:48
+TO    ?= 2026-10-15T22:16:00
+WIN   ?= 1036 204 840 840
+OBJ   ?= 840 840 90
+CROP  ?= 690 990 690 990
+ZOOM  ?= 3

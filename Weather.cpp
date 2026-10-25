@@ -20,6 +20,8 @@ extern "C" {
 #include <jpeglib.h>
 }
 #include <QDir>
+#include "AllSkyStars.hpp"
+#include "Astro.hpp"
 
 namespace Weather {
 
@@ -41,6 +43,7 @@ QJsonObject toJson(const Hour& h)
             {"visibility_km", r1(h.visibilityM / 1000)}, {"humidity", h.humidity}, {"dew_c", h.dew}, {"temp_c", h.temp}, {"wind_ms", h.wind}, {"gust_ms", h.gust}, {"quality", std::round(h.quality * 100) / 100}, {"q_min", std::round(h.qMin * 100) / 100}, {"q_max", std::round(h.qMax * 100) / 100}, {"q_model", std::round((h.qModel >= 0 ? h.qModel : h.quality) * 100) / 100}, {"obs_weight", std::round(h.obsWeight * 100) / 100}, {"models", mj}};
 }
 
+static const int kFetchDays = 16;   // always fetched and cached in full (the longest Open-Meteo model, GFS, reaches 16 days); callers get the days they ask for
 static const QStringList kModels = {"ukmo_seamless", "ecmwf_ifs025", "ecmwf_aifs025_single", "icon_seamless", "gfs_seamless", "meteofrance_seamless", "knmi_seamless"};
 
 static bool parse(const QJsonObject& d, const QJsonObject& multi, QVector<Hour>* out)
@@ -87,9 +90,12 @@ QJsonObject fetch(double lat, double lon, int days, int maxAgeMin, const QString
     QFile cf(cachePath);
     if (cf.open(QIODevice::ReadOnly)) { cached = QJsonDocument::fromJson(cf.readAll()).object(); fetchedMs = qint64(cached["fetched_ms"].toDouble()); cf.close(); }
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const bool cacheFull = cached["days"].toInt() >= kFetchDays;      // a cache written before the full fetch holds fewer days: refresh it
+    const QDateTime until = QDateTime::currentDateTimeUtc().date().startOfDay(QTimeZone::UTC).addDays(std::max(1, std::min(days, kFetchDays)));   // Open-Meteo's forecast_days counts from today 00:00 UTC
     auto done = [&](const QJsonObject& data, const QJsonObject& multi, bool fromCache, qint64 when, const QString& note) {
         QVector<Hour> tmp; QVector<Hour>& v = out ? *out : tmp;
         if (!parse(data, multi, &v)) return QJsonObject{{"ok", false}, {"error", "forecast had no hourly data"}};
+        v.erase(std::remove_if(v.begin(), v.end(), [&](const Hour& h) { return h.utc >= until; }), v.end());
         const QJsonObject nc = metarNowcast(lat, lon, cacheDir, 15, &v);
         QJsonArray hs; for (const Hour& h : v) hs.append(toJson(h));
         QJsonObject r{{"ok", true}, {"source", multi.isEmpty() ? "Open-Meteo (open-meteo.com)" : "Open-Meteo (open-meteo.com), blend of 7 models"}, {"cached", fromCache}, {"fetched", QDateTime::fromMSecsSinceEpoch(when, QTimeZone::UTC).toString(Qt::ISODate)}, {"hours", hs}};
@@ -97,13 +103,13 @@ QJsonObject fetch(double lat, double lon, int days, int maxAgeMin, const QString
         if (nc["ok"].toBool()) r["metar"] = nc;
         return r;
     };
-    if (maxAgeMin > 0 && fetchedMs && now - fetchedMs < qint64(maxAgeMin) * 60000 && cached.contains("data")) return done(cached["data"].toObject(), cached["multi"].toObject(), true, fetchedMs, QString());
+    if (maxAgeMin > 0 && fetchedMs && cacheFull && now - fetchedMs < qint64(maxAgeMin) * 60000 && cached.contains("data")) return done(cached["data"].toObject(), cached["multi"].toObject(), true, fetchedMs, QString());
 
     QUrl url("https://api.open-meteo.com/v1/forecast");
     QUrlQuery q;
     q.addQueryItem("latitude", QString::number(lat, 'f', 4)); q.addQueryItem("longitude", QString::number(lon, 'f', 4));
     q.addQueryItem("hourly", "cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,precipitation_probability,precipitation,visibility,relative_humidity_2m,dew_point_2m,temperature_2m,wind_speed_10m,wind_gusts_10m");
-    q.addQueryItem("forecast_days", QString::number(std::max(1, std::min(days, 7)))); q.addQueryItem("past_days", "1");
+    q.addQueryItem("forecast_days", QString::number(kFetchDays)); q.addQueryItem("past_days", "1");
     q.addQueryItem("timezone", "UTC"); q.addQueryItem("wind_speed_unit", "ms");
     url.setQuery(q);
     auto get = [](const QUrl& u, QString* err) {
@@ -126,12 +132,12 @@ QJsonObject fetch(double lat, double lon, int days, int maxAgeMin, const QString
             QUrl murl("https://api.open-meteo.com/v1/forecast"); QUrlQuery mq;
             mq.addQueryItem("latitude", QString::number(lat, 'f', 4)); mq.addQueryItem("longitude", QString::number(lon, 'f', 4));
             mq.addQueryItem("hourly", "cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high"); mq.addQueryItem("models", kModels.join(","));
-            mq.addQueryItem("forecast_days", QString::number(std::max(1, std::min(days, 7)))); mq.addQueryItem("past_days", "1"); mq.addQueryItem("timezone", "UTC");
+            mq.addQueryItem("forecast_days", QString::number(kFetchDays)); mq.addQueryItem("past_days", "1"); mq.addQueryItem("timezone", "UTC");
             murl.setQuery(mq);
             QString merr; const QJsonObject multi = QJsonDocument::fromJson(get(murl, &merr)).object();
             const QJsonObject usable = (merr.isEmpty() && multi.contains("hourly")) ? multi : QJsonObject();
             QFile f(cachePath);
-            if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(QJsonObject{{"fetched_ms", double(now)}, {"data", data}, {"multi", usable}}).toJson(QJsonDocument::Compact));
+            if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(QJsonObject{{"fetched_ms", double(now)}, {"days", kFetchDays}, {"data", data}, {"multi", usable}}).toJson(QJsonDocument::Compact));
             return done(data, usable, false, now, usable.isEmpty() ? "multi-model request failed (" + merr + "); single best-match model" : QString());
         }
         err = "unexpected reply: " + data["reason"].toString();
@@ -184,9 +190,109 @@ static double sunAltitudeDeg(double latDeg, double lonDeg, const QDateTime& utc)
     return std::asin(std::sin(dec) * std::sin(lat) + std::cos(dec) * std::cos(lat) * std::cos(ha)) * 180.0 / kPi;
 }
 
-/// Cloud fraction (0..1) over the central 75% of the fisheye radius (zenith angle up to about 65 deg, which clears the dome, wall and trees at the edge), from the latest frame.
-/// Daytime/twilight method calibrated on one frame: pixels more than 25 grey levels above the 20th percentile (clear sky, capped at 90) count as cloud.
-/// Returns ok=false when the frame is stale or too dark for that method (night frames are archived under allsky/ for calibrating a night method).
+// --- night: catalogue stars ---
+// Fisheye model of the IoA camera from 447 matches of V < 2.6 stars over 25 frames, 2026-10-21 19:30-22:00 UTC (median error 0.74 px): the optical axis is tilted 9.3 deg
+// off the zenith, the pixels are 6% wider than tall (a PAL frame on its side), r = f theta (1 + k (theta/90)^2 + k2 (theta/90)^4) with theta from the axis.
+namespace {
+struct Fisheye { double cx = 291.474, cy = 361.049, f = 5.27319, rotDeg = 6.4156, k = -0.27890, k2 = 0.28957, tiltDeg = 9.27124, tiltAzDeg = -95.0409, asp = 1.06004; };
+const Astro::Site kIoA{52.2127, 0.0942};
+
+void fisheyeProject(const Fisheye& g, double dRotDeg, double altDeg, double azDeg, double* x, double* y)
+{
+    const double d2r = M_PI / 180, a = altDeg * d2r, z = azDeg * d2r, t = g.tiltDeg * d2r, p = g.tiltAzDeg * d2r;
+    const double v[3] = {std::cos(a) * std::sin(z), std::cos(a) * std::cos(z), std::sin(a)};            // east, north, up
+    const double ax[3] = {std::sin(t) * std::sin(p), std::sin(t) * std::cos(p), std::cos(t)};
+    double n[3] = {-ax[0] * ax[1], 1 - ax[1] * ax[1], -ax[2] * ax[1]}; const double nn = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);   // north, square to the axis
+    for (double& c : n) c /= nn;
+    const double e[3] = {n[1] * ax[2] - n[2] * ax[1], n[2] * ax[0] - n[0] * ax[2], n[0] * ax[1] - n[1] * ax[0]};
+    const double th = std::acos(std::clamp(v[0] * ax[0] + v[1] * ax[1] + v[2] * ax[2], -1.0, 1.0)) / d2r;
+    const double ph = std::atan2(v[0] * e[0] + v[1] * e[1] + v[2] * e[2], v[0] * n[0] + v[1] * n[1] + v[2] * n[2]) / d2r;
+    const double u = th / 90, r = g.f * th * (1 + g.k * u * u + g.k2 * u * u * u * u), ang = (ph + g.rotDeg + dRotDeg) * d2r;
+    *x = g.cx - g.asp * r * std::sin(ang); *y = g.cy - r * std::cos(ang);
+}
+
+double medianOf(std::vector<int>& v)
+{
+    const size_t m = v.size() / 2; std::nth_element(v.begin(), v.begin() + m, v.end()); const int hi = v[m];
+    if (v.size() % 2) return hi;
+    return 0.5 * (hi + *std::max_element(v.begin(), v.begin() + m));
+}
+}
+
+QJsonObject allSkyStars(const QByteArray& jpeg, const QDateTime& utc, const QString& stateDir, bool saveOffset)
+{
+    int w = 0, h = 0; std::vector<unsigned char> px;
+    if (!decodeGray(jpeg, &w, &h, &px) || w < 100 || h < 100) return {{"ok", false}, {"error", "all-sky image unreadable"}};
+    auto at = [&](int x, int y) { return int(px[size_t(y) * w + x]); };
+    // point sources: over a 9x9 median background by 4 noise sigma, the highest in their 5x5; the clock overlay (top 30 rows) is skipped
+    std::vector<int> d(size_t(w) * h, 0), win; win.reserve(81);
+    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+        win.clear();
+        for (int j = -4; j <= 4; ++j) for (int i = -4; i <= 4; ++i) win.push_back(at(std::clamp(x + i, 0, w - 1), std::clamp(y + j, 0, h - 1)));
+        d[size_t(y) * w + x] = at(x, y) - int(medianOf(win));
+    }
+    std::vector<int> tmp = d; const double dmed = medianOf(tmp); for (int& c : tmp) c = int(std::abs(c - dmed) * 2); const double sd = std::max(1.4826 * medianOf(tmp) / 2, 1.0);
+    std::vector<unsigned char> det(size_t(w) * h, 0);
+    for (int y = 32; y < h - 2; ++y) for (int x = 2; x < w - 2; ++x) {
+        const int c = d[size_t(y) * w + x]; if (c <= 4 * sd) continue;
+        bool peak = true; for (int j = -2; j <= 2 && peak; ++j) for (int i = -2; i <= 2; ++i) if (d[size_t(y + j) * w + x + i] > c) { peak = false; break; }
+        det[size_t(y) * w + x] = peak;
+    }
+    auto detNear = [&](double x, double y) {          // a point source within 2 px
+        const int xi = int(std::lround(x)), yi = int(std::lround(y));
+        for (int j = -2; j <= 2; ++j) for (int i = -2; i <= 2; ++i) { const int xx = xi + i, yy = yi + j;
+            if (xx >= 0 && yy >= 0 && xx < w && yy < h && det[size_t(yy) * w + xx] && std::hypot(xx - x, yy - y) <= 2.0) return true; }
+        return false;
+    };
+    // stars up: alt/az through Astro (J2000 precessed to the date)
+    struct Up { double alt, az, v; }; std::vector<Up> up;
+    for (int i = 0; i < AllSkyStars::kCount; ++i) {
+        const auto& s = AllSkyStars::kStars[i]; const Astro::AltAz aa = Astro::altAz({s.raHours, s.decDeg}, kIoA, utc);
+        if (aa.alt > 25) up.push_back({aa.alt, aa.az, s.v});
+    }
+    const Fisheye g;
+    // re-centre: shift (+-9 px) and turn (+-2 deg) that put the most V <= 3 stars on a point source
+    int best = 0, nBright = 0; double bx = 0, by = 0, br = 0;
+    for (double dr = -2; dr <= 2.001; dr += 0.5) {
+        std::vector<std::pair<double, double>> p0;
+        for (const Up& u : up) if (u.v <= 3.0) { double x, y; fisheyeProject(g, dr, u.alt, u.az, &x, &y); p0.push_back({x, y}); }
+        nBright = int(p0.size());
+        for (int dx = -9; dx <= 9; ++dx) for (int dy = -9; dy <= 9; ++dy) {
+            int n = 0; for (const auto& q : p0) n += detNear(q.first + dx, q.second + dy);
+            if (n > best) { best = n; bx = dx; by = dy; br = dr; }
+        }
+    }
+    const QString offPath = stateDir + "/allsky_offset.json";
+    QJsonObject off; { QFile f(offPath); if (f.open(QIODevice::ReadOnly)) off = QJsonDocument::fromJson(f.readAll()).object(); }
+    const bool fitted = best >= 12;                     // fewer is what chance alignments reach on cloud: keep the last good fit
+    if (fitted) {
+        off = QJsonObject{{"dx", bx}, {"dy", by}, {"drot", br}, {"matches", best}, {"of", nBright}, {"time", utc.toString(Qt::ISODate)}};
+        if (saveOffset) { QFile f(offPath); if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(off).toJson(QJsonDocument::Compact)); }
+    }
+    const double ox = off["dx"].toDouble(), oy = off["dy"].toDouble(), orot = off["drot"].toDouble();
+    // each V <= 3.5 star: its brightest pixel within 1 px of the prediction over the median of a 5..9 px annulus, in the annulus' noise; seen above 4
+    int tested = 0, seen = 0;
+    for (const Up& u : up) {
+        double x, y; fisheyeProject(g, orot, u.alt, u.az, &x, &y); const int xi = int(std::lround(x + ox)), yi = int(std::lround(y + oy));
+        if (xi < 10 || yi < 40 || xi >= w - 10 || yi >= h - 10) continue;
+        std::vector<int> ann; int pk = -1;
+        for (int j = -9; j <= 9; ++j) for (int i = -9; i <= 9; ++i) { const double r = std::hypot(i, j); const int c = at(xi + i, yi + j);
+            if (r >= 5 && r <= 9) ann.push_back(c);
+            if (std::abs(i) <= 1 && std::abs(j) <= 1) pk = std::max(pk, c); }
+        const double b = medianOf(ann); for (int& c : ann) c = int(std::lround(std::abs(c - b) * 2)); const double s = std::max(1.4826 * medianOf(ann) / 2, 1.0);
+        ++tested; if ((pk - b) / s > 4) ++seen;
+    }
+    if (tested < 20) return {{"ok", false}, {"error", "too few catalogue stars in the frame"}, {"tested", tested}};
+    // Clear frames show 65-85% of them (the Moon 79% up; the dome, the wall and the trees hide some for good), overcast 0-3% (11 nights, 2026-10-11..22): 75% counts as clear.
+    const double frac = double(seen) / tested, cover = std::clamp(1.0 - frac / 0.75, 0.0, 1.0);
+    return {{"ok", true}, {"method", "stars"}, {"cover", cover}, {"tested", tested}, {"visible", seen}, {"visible_frac", frac}, {"bright_matches", best}, {"bright_up", nBright},
+            {"offset_fitted", fitted}, {"offset", off}, {"noise", sd}};
+}
+
+/// Cloud fraction (0..1) from the latest frame. With the Sun below -15 deg: allSkyStars (catalogue stars seen). Otherwise, over the central 75% of the fisheye radius
+/// (zenith angle up to about 65 deg, which clears the dome, wall and trees at the edge), the daytime/twilight method calibrated on one frame: pixels more than 25 grey levels
+/// above the 20th percentile (clear sky, capped at 90) count as cloud.
+/// Returns ok=false when the frame is stale or the method cannot judge it.
 static QJsonObject allSkyCover(const QString& dir, double* cover, QDateTime* when, double sunAlt)
 {
     const QString img = dir + "/allsky_latest.jpg", meta = dir + "/allsky_latest.json";
@@ -202,12 +308,12 @@ static QJsonObject allSkyCover(const QString& dir, double* cover, QDateTime* whe
                 QFile f(img); if (f.open(QIODevice::WriteOnly)) { f.write(body); f.close(); }
                 m = QJsonObject{{"fetched_ms", double(nowMs)}, {"modified", lm.isValid() ? lm.toString(Qt::ISODate) : QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}};
                 QFile mf(meta); if (mf.open(QIODevice::WriteOnly)) mf.write(QJsonDocument(m).toJson(QJsonDocument::Compact));
-                // archive a frame every 10 minutes (3 days kept) so night frames can be used to calibrate a night method
+                // archive a frame every 10 minutes (about 80 KB each, kept for 400 days) so tools/sky_history.py can line them up with the telescope's frames, the forecast and the labels
                 QDir ad(dir + "/allsky"); ad.mkpath(".");
                 const QString stamp = QDateTime::currentDateTimeUtc().toString("yyyyMMdd_HHmm");
                 const QStringList have = ad.entryList({"*.jpg"}, QDir::Files, QDir::Name);
                 if (have.isEmpty() || QDateTime::fromString(have.last().left(13), "yyyyMMdd_HHmm").secsTo(QDateTime::currentDateTimeUtc()) >= 600) QFile::copy(img, ad.filePath(stamp + ".jpg"));
-                for (const QString& n : have) if (QDateTime::fromString(n.left(13), "yyyyMMdd_HHmm").secsTo(QDateTime::currentDateTimeUtc()) > 3 * 86400) ad.remove(n);
+                for (const QString& n : have) if (QDateTime::fromString(n.left(13), "yyyyMMdd_HHmm").secsTo(QDateTime::currentDateTimeUtc()) > 400 * 86400LL) ad.remove(n);
             }
         } else rep->abort();
         rep->deleteLater();
@@ -215,8 +321,14 @@ static QJsonObject allSkyCover(const QString& dir, double* cover, QDateTime* whe
     QFile f(img); if (!f.open(QIODevice::ReadOnly)) return {{"ok", false}, {"error", "all-sky image unavailable"}};
     const QDateTime mod = QDateTime::fromString(m["modified"].toString(), Qt::ISODate);
     if (!mod.isValid() || mod.secsTo(QDateTime::currentDateTimeUtc()) > 1200) return {{"ok", false}, {"error", "all-sky image is stale"}};
+    const QByteArray jpeg = f.readAll();
+    if (sunAlt < -15) {
+        QJsonObject r = allSkyStars(jpeg, mod, dir, true);
+        if (r["ok"].toBool()) { *cover = r["cover"].toDouble(); *when = mod; }
+        r["sun_alt"] = sunAlt; r["image_time"] = mod.toString(Qt::ISODate); return r;
+    }
     int w = 0, h = 0; std::vector<unsigned char> px;
-    if (!decodeGray(f.readAll(), &w, &h, &px)) return {{"ok", false}, {"error", "all-sky image unreadable"}};
+    if (!decodeGray(jpeg, &w, &h, &px)) return {{"ok", false}, {"error", "all-sky image unreadable"}};
     std::vector<unsigned char> v; const double cx = w / 2.0, cy = h / 2.0, rmax = 0.75 * w / 2.0;
     for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) if (std::hypot(x - cx, y - cy) < rmax) v.push_back(px[size_t(y) * w + x]);
     if (v.size() < 1000) return {{"ok", false}, {"error", "all-sky image has an unexpected size"}};
@@ -248,6 +360,7 @@ QJsonObject metarNowcast(double lat, double lon, const QString& cacheDir, int ma
         if (err.isEmpty() && !fresh.isEmpty()) {
             reports = fresh; fetchedMs = nowMs;
             QFile f(path); if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(QJsonObject{{"fetched_ms", double(nowMs)}, {"reports", reports}}).toJson(QJsonDocument::Compact));
+            QFile hf(cacheDir + "/metar_history.jsonl"); if (hf.open(QIODevice::Append)) hf.write(QJsonDocument(QJsonObject{{"fetched_ms", double(nowMs)}, {"reports", reports}}).toJson(QJsonDocument::Compact) + "\n");   // every fetch is kept: observed cover history to set against the forecast
         }
     }
     if (reports.isEmpty() || nowMs - fetchedMs > 3 * 3600 * 1000LL) return {{"ok", false}, {"error", "no METAR reports"}};
@@ -277,16 +390,18 @@ QJsonObject metarNowcast(double lat, double lon, const QString& cacheDir, int ma
         const QJsonObject r = QJsonDocument::fromJson(sf.readAll()).object(); sf.close();
         const QDateTime t = QDateTime::fromString(r["time"].toString(), Qt::ISODate);
         if (t.isValid() && t.secsTo(QDateTime::currentDateTimeUtc()) < 5400) {
-            const double w = 0.3;
+            const double w = 1.0;                                    // the observer looking at the sky outweighs the camera (0.1) and every airport (under 0.01 each)
             sw += w; sc += w * r["cover_pct"].toDouble() / 100; if (!newest.isValid() || t > newest) newest = t;
             st.append(QJsonObject{{"id", "observer"}, {"km", 0}, {"cover", r["cover_pct"].toDouble() / 100}, {"raw", "sky-report"}});
         }
     }
     { double ac = 0; QDateTime at; const double sunAlt = sunAltitudeDeg(lat, lon, QDateTime::currentDateTimeUtc());
       const QJsonObject a = allSkyCover(cacheDir, &ac, &at, sunAlt);
-      // the camera is trusted fully by day; in twilight its auto-exposed picture is a weaker guide, so its weight falls to 15% by the Sun -6 deg (the airports and models count for more)
-      const double wCam = 0.1 * std::clamp((sunAlt + 6.0) / 6.0, 0.15, 1.0);
-      if (a["ok"].toBool()) { sw += wCam; sc += wCam * ac; if (!newest.isValid() || at > newest) newest = at; st.append(QJsonObject{{"id", "allsky"}, {"km", 0}, {"cover", ac}, {"raw", "IoA all-sky camera, " + at.toString(Qt::ISODate)}}); }
+      // the camera is trusted fully by day; in twilight its auto-exposed picture is a weaker guide, so its weight falls to 15% by the Sun -6 deg (the airports and models count for more);
+      // at night the star count is trusted fully again (it saw the 2026-10-21 altocumulus clear at 19:45 UTC and the cloud arrive at 00:00, which Stansted only reported at 00:20)
+      const bool stars = a["method"].toString() == "stars";
+      const double wCam = stars ? 0.1 : 0.1 * std::clamp((sunAlt + 6.0) / 6.0, 0.15, 1.0);
+      if (a["ok"].toBool()) { sw += wCam; sc += wCam * ac; if (!newest.isValid() || at > newest) newest = at; st.append(QJsonObject{{"id", "allsky"}, {"km", 0}, {"cover", ac}, {"raw", QString(stars ? "IoA all-sky camera (%1 of %2 stars), " : "IoA all-sky camera%1%2, ").arg(stars ? QString::number(a["visible"].toInt()) : "").arg(stars ? QString::number(a["tested"].toInt()) : "") + at.toString(Qt::ISODate)}}); }
       else st.append(QJsonObject{{"id", "allsky"}, {"error", a["error"]}}); }
     if (sw <= 0) return {{"ok", false}, {"error", "no recent METAR within 60 km"}};
     const double obs = sc / sw * 100;   // % low/mid cover now

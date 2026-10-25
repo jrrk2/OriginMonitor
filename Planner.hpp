@@ -26,6 +26,7 @@ struct Options {
     QString timeZone = "Europe/London";
     QVector<Weather::Hour> weather;               // hourly forecast; empty = ignore the weather
     double minQuality = 0.5;                      // hours forecast below this (see Weather::quality) are treated as unobservable
+    QStringList skip;                             // catalogue ids ("M27") left out of the plan and the backups tonight; findTarget ignores it (an explicit request wins)
 };
 
 /// Whole-night plan as JSON: {ok, night, dark_start, dark_end, moon_illumination, horizon, plan[], targets[]} with ISO-8601 UTC times.
@@ -39,6 +40,8 @@ QJsonObject schedule(const Options& o);
 QString scheduleText(const QJsonObject& s, int top);
 /// The evening date that "now" belongs to (before noon we are still in last evening's night).
 QDate currentNightDate(const QString& timeZone);
+/// Catalogue id of a key or name: "M31", "NGC 6992 Eastern Veil" -> "M31", "NGC6992" (the Veil's halves share "VEIL"); empty when it is not a catalogue name.
+QString catalogueId(const QString& s);
 /// Look a target up by key ("M31") or name among those observable tonight (minBlockMin 0); returns the target object or {ok:false}.
 QJsonObject findTarget(const Options& o, const QString& name);
 /// Sun and Moon events for one local day: {ok, date, ephemeris, moonrise, moonset (ISO UTC or null), moon_transit{time, alt_deg}, moon_illumination (at local midnight),

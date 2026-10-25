@@ -41,6 +41,7 @@ public:
     LiveStacker& stacker() { return m_stack; }
     QJsonObject stackSummary() const;
     QString stackDirectory() const;
+    void archiveStack();                                    // save the stack and move it aside (stacks/<target>_<UTC>) so a replacement stack does not overwrite it
     bool saveStack();
 
     /// Analyse one snapshot (raw 16-bit FITS bytes) taken at the mount position (ra, dec in radians).
@@ -71,6 +72,8 @@ private:
     double m_minTransparency = 0.5;
     bool m_mountAligned = true;
     double m_fixRa = 0, m_fixDec = 0; QDateTime m_fixAt;   // latest plate-solved pointing
+    QMap<QString, QList<double>> m_darkRecent;                // the last 5 dark-sky rates (exposures of 8 s or more) per ISO, for a baseline that one frame cannot move
+    double m_refHfr = 0; int m_refStars = 0;                  // HFR and round-star count of the frame that seeded the current stack (0 when the stack was loaded from disk)
     int m_regFailRun = 0;                                   // consecutive frames with many round stars that could not register to a small stack
     qint64 m_pictureMs = 0;                                 // last time the picture of the sky was written
     QString m_target = "auto";

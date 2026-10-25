@@ -19,6 +19,11 @@ class OriginBackend;
  * Focus watchdog: the median HFR of the last `focus_window` (8) good frames with at least 30 stars is compared with a baseline (`focus_baseline`, full-resolution px,
  * else the first full window). When it stays above baseline x `focus_drift` (1.15) for 5 frames a `sequence_focus_drift` event is recorded and, with
  * `focus_pause`, the sequence stops so that the supervisor can run focus-sweep and restart.
+ * Auto exposure (`auto_exposure`): after each good frame the exposure is re-chosen as the shortest of (1) the field-rotation limit at the frame's alt/az
+ * (2 px at the frame corner, x0.85), (2) the sky filling half of the 16-bit range above black, (3) the length at which sky noise is `target_efficiency` (0.94)
+ * of the total noise variance, beyond which longer subs gain little over read noise (`read_noise_adu` 580, `sky_var_per_adu` 310, measured at ISO 800 on 2026-10-25;
+ * both scale with ISO so the length does not), and (4) `max_exposure`; never below `min_exposure`. Shorter values apply at once, longer ones only when at least
+ * 15% longer and 3 minutes after the last change. Each change is a `sequence_exposure` event.
  * Stops on: stop command, `until_local`/`for_minutes`, `max_frames`, disconnect, or a frame that never arrives (events are recorded).
  */
 class Sequencer : public QObject
@@ -31,6 +36,9 @@ public:
     QJsonObject stop(const QString& reason);
     QJsonObject status() const;
 
+signals:
+    void stopped();                                // the sequence has finished (after any in-flight frame has been taken in)
+
 private slots:
     void onImage(const QString& remotePath, const QByteArray& data, double ra, double dec, double exposure);
     void onMessage(const QJsonObject& msg);        // ImageServer NewImageReady: the exposure is done, the file is waiting on the telescope
@@ -41,6 +49,11 @@ private slots:
 private:
     enum class State { Shooting, Probing };
     void finish(const QString& reason);
+    // Pipelined captures leave the next exposure in flight while the previous frame is downloaded and analysed. A stop that is not a failure waits for them (the frame is taken in and scored),
+    // so that a goto or a refocus afterwards does not ruin an exposure and the last frame is not lost.
+    void beginDrain(const QString& reason);
+    void checkDrained();
+    bool m_draining = false; QString m_drainReason;
 
     OriginBackend* m_b;
     bool m_active = false;
@@ -66,5 +79,11 @@ private:
     double m_hfrBase = 0, m_hfrMedian = 0, m_driftRatio = 1.15;
     int m_focusWin = 8, m_driftRun = 0, m_drifts = 0;
     bool m_focusPause = false;
+    // auto exposure (see the class comment)
+    void adjustExposure(const QJsonObject& analysis);
+    bool m_auto = false;
+    double m_minExp = 2, m_maxExp = 60, m_latDeg = 52.2054, m_targetEff = 0.94, m_readNoise = 580, m_skyVarPerAdu = 310, m_blackAdu = 4985;
+    qint64 m_lastExpChangeMs = 0;
+    QJsonObject m_autoInfo;                         // the last choice and its limits, for status
     QString m_lastCause;                            // cause of the previous bad frame (obstruction | cloud | unknown), empty after a good one
 };

@@ -12,6 +12,7 @@ Then, for example:
     originctl.py focus --history 10      # HFR of the last snapshots (lower is better)
     originctl.py focuser                      # position, limits, NeedAutoFocus
     originctl.py focuser-move 18800
+    originctl.py filter [clear|nebula]        # read / declare the hand-inserted filter
     originctl.py mount                        # RA/Dec/Alt/Az, tracking, goto state
     originctl.py goto 1.78 61.23              # J2000 RA hours, Dec degrees
     originctl.py focus-sweep --span 600 --step 100 --frames 3
@@ -122,6 +123,7 @@ def main():
     for name in ("ping", "status", "manual", "auto", "focuser", "focuser-settings", "mount", "quit"):
         sub.add_parser(name)
     c = sub.add_parser("connect"); c.add_argument("host")
+    fl = sub.add_parser("filter", help="read, or declare, the hand-inserted filter (clear|nebula); no motor, only affects firmware exposure choices"); fl.add_argument("name", nargs="?", choices=["clear", "nebula"])
     an = sub.add_parser("analysis"); an.add_argument("--history", type=int, default=0)
     ev = sub.add_parser("events"); ev.add_argument("--since", type=float, default=0)
     tg = sub.add_parser("target"); tg.add_argument("name", nargs="?"); tg.add_argument("--ra-hours", type=float); tg.add_argument("--dec-deg", type=float); tg.add_argument("--reset", action="store_true")
@@ -184,6 +186,8 @@ def main():
         out = call(a.port, cmd="goto", ra_hours=a.ra_hours, dec_deg=a.dec_deg)
     elif a.cmd == "focuser-move":
         out = call(a.port, cmd="focuser_move", position=a.position, max_step=a.max_step)
+    elif a.cmd == "filter":
+        out = call(a.port, cmd="filter", **({"name": a.name} if a.name else {}))
     elif a.cmd == "connect":
         out = call(a.port, cmd="connect", host=a.host)
     elif a.cmd == "send":

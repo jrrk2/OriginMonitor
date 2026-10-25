@@ -1,13 +1,17 @@
-// OriginWatch: a read-only window onto a running OriginHeadless daemon.
+// OriginWatch: a window onto a running OriginHeadless daemon.
 //   Now      what the telescope, the sequence and the unattended supervisor are doing
 //   Log      recent telescope/daemon events and the supervisor's decisions
 //   Live     the live stack, rendered on demand
 //   Stacks   every stack in the data directory, finished or not
 //   Forecast the blended multi-model weather forecast hour by hour (Open-Meteo, cached 1 h, same cache as OriginHeadless) and how accurate it has been
-// It talks to 127.0.0.1:<port> with a whitelist of read-only commands (see allowed()) and reads <data dir> files; it cannot move or change anything.
+//   Tasks    (window only) override the target, change tonight's schedule, surveys, stop or park: see WatchTasks.hpp
+// It talks to 127.0.0.1:<port> with a whitelist of read-only commands (see allowed()) and reads <data dir> files. Only the Tasks tab changes anything, by launching
+// OriginHeadless or writing the run's control file, and only after asking; the phone view (web()) is read-only.
 #include "DataDir.hpp"
 #include "Weather.hpp"
+#include "Astro.hpp"
 #include "WatchWeb.hpp"
+#include "WatchTasks.hpp"
 
 #include <QApplication>
 #include <QBuffer>
@@ -203,9 +207,10 @@ public:
     Window(int port, const QString& dataDir, double lat, double lon) : m_dir(dataDir), m_port(port), m_lat(lat), m_lon(lon)
     {
         m_client = new Client(port, this);
-        setWindowTitle(QString("OriginWatch (read-only) - daemon port %1").arg(port));
+        setWindowTitle(QString("OriginWatch - daemon port %1").arg(port));
         auto* tabs = new QTabWidget; setCentralWidget(tabs);
         tabs->addTab(buildNow(), "Now"); tabs->addTab(buildLog(), "Log"); tabs->addTab(buildLive(), "Live stack"); tabs->addTab(buildStacks(), "Stacks"); tabs->addTab(buildForecast(), "Forecast");
+        tabs->addTab(new TasksTab(m_dir, port, [this] { return QString("pointing %1 (alt/az %2), target %3").arg(m_pRaDec->text(), m_pAltAz->text(), m_pTarget->text()); }), "Tasks");
         m_night = new QCheckBox("Night (red) mode"); statusBar()->addPermanentWidget(m_night);
         connect(m_night, &QCheckBox::toggled, this, &Window::applyNight);
         m_conn = new QLabel("daemon: connecting..."); statusBar()->addWidget(m_conn);
@@ -235,7 +240,7 @@ public:
                        "main{padding:8px 12px}h2{font-size:15px;margin:14px 0 4px;color:#9ec1ff}table{width:100%;border-collapse:collapse}td{padding:3px 6px 3px 0;vertical-align:top;border-bottom:1px solid #22222a}"
                        "td:first-child{color:#9a9aa6;width:38%}table.fc td,table.fc th{text-align:center;padding:3px 2px;font-size:12px;white-space:nowrap}table.fc td:first-child{color:inherit;width:auto}details{margin:10px 0}summary{color:#9ec1ff;padding:6px 0}img{max-width:100%;height:auto;border-radius:6px}pre{white-space:pre-wrap;font:12px ui-monospace,monospace}.dim{color:#9a9aa6}"
                        "@media (prefers-color-scheme:light){body{background:#f4f4f7;color:#111}nav{background:#e2e2ea}nav a{background:#fff;color:#1a56c4}td{border-color:#ddd}td:first-child,.dim{color:#666}h2{color:#1a56c4}}"
-                       "</style></head><body><nav><a href=/>Now</a><a href=/log>Log</a><a href=/live>Live</a><a href=/stacks>Stacks</a><a href=/forecast>Forecast</a></nav><main>%2</main></body></html>")
+                       "</style></head><body><nav><a href=/>Now</a><a href=/log>Log</a><a href=/live>Live</a><a href=/stacks>Stacks</a><a href=/forecast>Forecast</a><a href=/planner>Planner</a></nav><main>%2</main></body></html>")
             .arg(refreshS > 0 ? QString("<meta http-equiv=refresh content=%1>").arg(refreshS) : QString(), body);
     }
     QString nowHtml() const
@@ -255,10 +260,28 @@ public:
         }
         return h;
     }
-    WebReply web(const QString& path, const QUrlQuery&)
+    WebReply web(const QString& path, const QUrlQuery& q)
     {
         WebReply r; auto html = [&](const QString& body, int refresh) { r.body = webPage(body, refresh).toUtf8(); return r; };
+        {   // the pages are only shown while the telescope reports that it is on the charger (a battery night ended at 23:18 on 2026-10-16): CHARGING, or full
+            const bool fresh = m_chargerAtMs && QDateTime::currentMSecsSinceEpoch() - m_chargerAtMs < 60000;
+            const QString c = m_charger.toUpper();
+            const bool onCharger = fresh && !c.contains("DISCHARG") && (c.contains("CHARG") || c.contains("FULL"));
+            if (path == "/gate/dismiss") { m_gateDismissed = true; r.status = 303; r.type = "text/plain"; r.body = "dismissed\n"; r.location = "/"; return r; }
+            if (!onCharger && !m_gateDismissed) {
+                r.status = 503;
+                const QString why = !fresh ? "The telescope is not reporting its battery (powered off, or not connected to the daemon)."
+                                           : QString("Charger status: <b>%1</b>, battery level: <b>%2</b>.").arg(esc(m_charger.isEmpty() ? "unknown" : m_charger), esc(m_batteryLevel.isEmpty() ? "unknown" : m_batteryLevel));
+                r.body = webPage("<h2>Charger not connected</h2><p>" + why + "</p><p>These pages stay hidden until the telescope is plugged in and reports CHARGING or full. Connect the charger; this page re-checks every 10 seconds.</p><p><a href=/gate/dismiss>Dismiss this alert</a> (it returns when the telescope next starts talking after being off or out of reach)</p>", 10).toUtf8();
+                return r;
+            }
+        }
         auto png = [&](const QImage& im, bool photo = false) { if (im.isNull()) { r.status = 404; r.type = "text/plain"; r.body = "no image\n"; } else if (photo) { r.type = "image/jpeg"; r.body = jpegOf(im); } else { r.type = "image/png"; r.body = pngOf(im); } return r; };
+        if (path == "/planner" || path == "/planner.json") {        // tools/planner_data.py writes both into the data dir; static files, read-only
+            QFile f(m_dir + (path == "/planner" ? "/planner.html" : "/planner.json"));
+            if (!f.open(QIODevice::ReadOnly)) { r.status = 404; r.type = "text/plain"; r.body = "no planner data yet: run tools/planner_data.py\n"; return r; }
+            r.type = path == "/planner" ? "text/html; charset=utf-8" : "application/json"; r.body = f.readAll(); return r;
+        }
         if (path == "/" || path == "/now") return html(nowHtml(), 10);
         if (path == "/log") { const QStringList lines = m_log->toPlainText().split('\n'); return html("<pre>" + esc(lines.mid(std::max(0, int(lines.size()) - 300)).join('\n')) + "</pre>", 15); }
         if (path == "/live") {
@@ -278,15 +301,17 @@ public:
             QString h = "<h2>Forecast and nowcast</h2>";
             if (!m_fcSky->pixmap().isNull() && !m_fcSky->isHidden()) h += "<p><img src='/img/allsky.jpg' alt='all-sky camera' style='max-width:40%'></p>";
             for (QLabel* l : {m_fcInfo, m_fcNow, m_fcAcc}) if (l && !l->text().isEmpty()) { QTextDocument d; d.setHtml(l->text()); h += "<p>" + esc(d.toPlainText()).replace("\n", "<br>") + "</p>"; }   // the labels are rich text; show their words only
-            // the table as real HTML (the page scrolls as one; nothing is clipped inside a picture): the hourly columns, then the per-model columns in a fold-out
-            auto table = [&](QList<int> cols) {
+            // the tables as real HTML (the page scrolls as one; nothing is clipped inside a picture): the nights, the hourly columns, then the per-model columns in a fold-out
+            const bool day = q.queryItemValue("daylight") == "1";                  // daylight hours are left out unless asked for
+            auto table = [&](QTableWidget* tw, QList<int> cols) {
                 QString t = "<table class=fc><tr>";
-                for (int c : cols) t += "<th>" + esc(m_fcTable->horizontalHeaderItem(c) ? m_fcTable->horizontalHeaderItem(c)->text() : QString()) + "</th>";
+                for (int c : cols) t += "<th>" + esc(tw->horizontalHeaderItem(c) ? tw->horizontalHeaderItem(c)->text() : QString()) + "</th>";
                 t += "</tr>";
-                for (int r = 0; r < m_fcTable->rowCount(); ++r) {
+                for (int r = 0; r < tw->rowCount(); ++r) {
+                    if (!day && tw->item(r, 0) && tw->item(r, 0)->data(Qt::UserRole).toBool()) continue;
                     t += "<tr>";
                     for (int c : cols) {
-                        const QTableWidgetItem* it = m_fcTable->item(r, c); QString style;
+                        const QTableWidgetItem* it = tw->item(r, c); QString style;
                         if (it && it->background().style() != Qt::NoBrush) style = " style='background:" + it->background().color().name() + ";color:#fff'";
                         t += "<td" + style + ">" + esc(it ? it->text() : QString()) + "</td>";
                     }
@@ -294,8 +319,12 @@ public:
                 }
                 return t + "</table>";
             };
-            h += table({0, 1, 2, 3, 4, 5, 6, 7});
-            h += "<details><summary>Quality by model</summary>" + table({0, 8, 9, 10, 11, 12, 13, 14}) + "</details>";
+            h += "<h2>Nights ahead</h2><p>" + m_fcNext->text() + "</p>" + table(m_fcNights, {0, 1, 2, 3, 4, 5});
+            h += "<p class=dim>An outlook of when the sky might be usable again, not a prediction: dark = Sun below -12 deg, quality = mean over the dark hours, clear run = longest stretch at 0.5 or more. "
+                 "The colours fade with distance; fewer models reach that far and beyond about 5 days they have little skill.</p>";
+            h += QString("<h2>Next 48 hours</h2><p><a href='/forecast%1'>%2</a></p>").arg(day ? "" : "?daylight=1", day ? "Hide daylight hours" : "Show daylight hours");
+            h += table(m_fcTable, {0, 1, 2, 3, 4, 5, 6, 7});
+            h += "<details><summary>Quality by model</summary>" + table(m_fcTable, {0, 8, 9, 10, 11, 12, 13, 14}) + "</details>";
             h += "<p class=dim>Quality 0..1 = how much of the hour is usable. Green 0.5 or more, amber 0.3-0.5, red below.</p>";
             return html(h, 300);
         }
@@ -318,6 +347,13 @@ private:
         auto* nowBox = new QHBoxLayout; m_fcSky = new QLabel; m_fcSky->setFixedSize(130, 160); m_fcSky->setScaledContents(true); m_fcSky->hide();
         m_fcNow = new QLabel("nowcast..."); m_fcNow->setWordWrap(true); m_fcNow->setTextFormat(Qt::RichText); m_fcNow->setAlignment(Qt::AlignTop | Qt::AlignLeft);
         nowBox->addWidget(m_fcSky); nowBox->addWidget(m_fcNow, 1); v->addLayout(nowBox);
+        m_fcNext = new QLabel; m_fcNext->setWordWrap(true); m_fcNext->setTextFormat(Qt::RichText); v->addWidget(m_fcNext);
+        m_fcNights = new QTableWidget(0, 6); m_fcNights->setEditTriggers(QAbstractItemView::NoEditTriggers); m_fcNights->setSelectionMode(QAbstractItemView::NoSelection);
+        m_fcNights->setHorizontalHeaderLabels({"Night", "Dark (local)", "Quality", "Clear run", "Range", "Models"});
+        m_fcNights->verticalHeader()->hide(); m_fcNights->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+        v->addWidget(m_fcNights, 1);
+        m_fcDay = new QCheckBox("Show daylight hours"); v->addWidget(m_fcDay);
+        connect(m_fcDay, &QCheckBox::toggled, this, [this] { applyDaylight(); });
         m_fcTable = new QTableWidget(0, 15); m_fcTable->setEditTriggers(QAbstractItemView::NoEditTriggers); m_fcTable->setSelectionMode(QAbstractItemView::NoSelection);
         m_fcTable->setHorizontalHeaderLabels({"Local", "Quality", "Range", "Cloud %", "Low", "Mid", "High", "Rain %", "Met Office", "ECMWF", "AIFS", "ICON", "GFS", "M-France", "KNMI"});
         m_fcTable->verticalHeader()->hide(); m_fcTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
@@ -325,12 +361,23 @@ private:
         m_fcTable->horizontalHeader()->setMinimumSectionSize(40); m_fcTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         v->addWidget(m_fcTable, 1);
         m_fcAcc = new QLabel; m_fcAcc->setWordWrap(true); v->addWidget(m_fcAcc);
-        auto* legend = new QLabel("Quality 0..1 = how much of the hour is usable (low and mid cloud block, high cloud counts half, cut for rain, fog, dew and wind). It is the mean over 7 models; the models often disagree by 50 points, so look at the range as well. Green >= 0.5, amber 0.3-0.5, red below.");
+        auto* legend = new QLabel("Quality 0..1 = how much of the hour is usable (low and mid cloud block, high cloud counts half, cut for rain, fog, dew and wind). It is the mean over 7 models; the models often disagree by 50 points, so look at the range as well. Green >= 0.5, amber 0.3-0.5, red below. "
+                                  "Nights: dark = Sun below -12 deg; quality = mean over the dark hours; clear run = longest stretch of dark hours at 0.5 or more. A rough idea of when the sky might be usable again, not a prediction: "
+                                  "the colours fade with distance, fewer models reach that far (7 to 4.5 days, 6 to 7.5 days, 4 to 15 days) and beyond about 5 days they have little skill.");
         legend->setWordWrap(true); v->addWidget(legend);
         connect(refresh, &QPushButton::clicked, this, [this] { m_fcFresh = true; reloadForecast(); });
         return w;
     }
     static QColor tint(double q) { return q >= 0.5 ? QColor(20, 110, 40) : q >= 0.3 ? QColor(150, 110, 20) : QColor(120, 30, 30); }
+    static QColor faded(const QColor& c, int leadDays)                // towards grey with distance: the far nights are an outlook only
+    {
+        const double f = std::clamp((leadDays - 2) / 12.0, 0.0, 0.65);
+        return QColor(int(c.red() * (1 - f) + 85 * f), int(c.green() * (1 - f) + 85 * f), int(c.blue() * (1 - f) + 85 * f));
+    }
+    void applyDaylight()
+    {
+        for (int r = 0; r < m_fcTable->rowCount(); ++r) { const QTableWidgetItem* it = m_fcTable->item(r, 0); m_fcTable->setRowHidden(r, !m_fcDay->isChecked() && it && it->data(Qt::UserRole).toBool()); }
+    }
     void showNowcast(const QJsonObject& r, const QVector<Weather::Hour>& hrs, const QTimeZone& zone)
     {
         const QJsonObject mt = r["metar"].toObject();
@@ -352,16 +399,53 @@ private:
                              .arg(sky, obs, ap.isEmpty() ? "<i>none</i>" : ap.left(ap.size() - 2)).arg(mt["cover_pct"].toDouble(), 0, 'f', 0)
                              .arg(QDateTime::fromString(mt["obs_time"].toString(), Qt::ISODate).toTimeZone(zone).toString("HH:mm"), eff));
     }
+    // one row per night to the end of the forecast: when might the sky be usable again (an outlook, the forecast is not trusted for more)
+    template <typename SunAlt> void showNights(const QVector<Weather::Hour>& hrs, const QTimeZone& zone, const QDateTime& now, SunAlt sunAlt)
+    {
+        m_fcNights->setRowCount(0); QString next;
+        const QDate first = now.toTimeZone(zone).addSecs(-12 * 3600).date();          // the night we are in (until local noon)
+        for (int d = 0; d < 16; ++d) {
+            const QDate date = first.addDays(d);
+            const QDateTime noon = QDateTime(date, QTime(12, 0), zone).toUTC();
+            QDateTime darkFrom, darkTo;
+            int dark = 0, covered = 0, run = 0, best = 0, nm = 99; double sq = 0, smin = 0, smax = 0;
+            for (int k = 0; k < 25; ++k) {
+                const QDateTime t = noon.addSecs(k * 3600);
+                if (sunAlt(t.addSecs(1800)) >= -12) { run = 0; continue; }
+                if (!darkFrom.isValid()) darkFrom = t;
+                darkTo = t.addSecs(3600);
+                if (t.addSecs(3600) <= now) continue;                                   // hours already gone tonight
+                ++dark; const Weather::Hour* h = Weather::at(hrs, t);
+                if (!h || std::abs(h->utc.secsTo(t)) > 1800 || h->models.size() < 3) { run = 0; continue; }   // past ECMWF's 15 days only GFS is left: one model is no outlook
+                ++covered; sq += h->quality; smin += h->qMin; smax += h->qMax; nm = std::min(nm, int(h->models.size()));
+                run = h->quality >= 0.5 ? run + 1 : 0; best = std::max(best, run);
+            }
+            if (dark == 0 || covered * 2 < dark) { if (d == 0) continue; break; }          // night over, or past the end of the forecast
+            const double q = sq / covered; const int r = m_fcNights->rowCount(); m_fcNights->insertRow(r);
+            auto put = [&](int c, const QString& txt, const QColor& bg = QColor()) { auto* it = new QTableWidgetItem(txt); it->setTextAlignment(Qt::AlignCenter); if (bg.isValid()) { it->setBackground(faded(bg, d)); it->setForeground(Qt::white); } m_fcNights->setItem(r, c, it); };
+            put(0, d == 0 ? "Tonight" : date.toString("ddd d MMM"));
+            put(1, darkFrom.toTimeZone(zone).toString("HH:mm") + " - " + darkTo.toTimeZone(zone).toString("HH:mm"));
+            put(2, QString::number(q, 'f', 2), tint(q)); put(3, QString("%1 h").arg(best), best >= 2 ? tint(1) : best == 1 ? tint(0.4) : tint(0));
+            put(4, QString("%1 - %2").arg(smin / covered, 0, 'f', 2).arg(smax / covered, 0, 'f', 2)); put(5, QString::number(nm));
+            if (next.isEmpty() && best >= 2)
+                next = QString("<b>%1</b>: about %2 h of dark sky at quality 0.5 or more (%3 models%4).")
+                           .arg(d == 0 ? QString("Tonight might be usable") : "Next night that might be usable: " + date.toString("ddd d MMM"))
+                           .arg(best).arg(nm).arg(d >= 5 ? QString("; little skill this far ahead") : QString());
+        }
+        m_fcNext->setText(next.isEmpty() ? QString("<b>No night in the forecast reaches 2 hours of quality 0.5</b> (%1 nights ahead).").arg(m_fcNights->rowCount()) : next);
+    }
     void reloadForecast()
     {
         m_fcInfo->setText("fetching..."); qApp->processEvents();
-        QVector<Weather::Hour> hrs; const QJsonObject r = Weather::fetch(m_lat, m_lon, 3, m_fcFresh ? 0 : 60, m_dir, &hrs); m_fcFresh = false;
+        QVector<Weather::Hour> hrs; const QJsonObject r = Weather::fetch(m_lat, m_lon, 16, m_fcFresh ? 0 : 60, m_dir, &hrs); m_fcFresh = false;
         if (!r["ok"].toBool()) { m_fcInfo->setText("forecast unavailable: " + r["error"].toString()); return; }
         const QTimeZone zone("Europe/London"); const QDateTime now = QDateTime::currentDateTimeUtc();
         m_fcInfo->setText(QString("%1, fetched %2 (local). %3 Site %4 N %5 E.").arg(r["source"].toString(), QDateTime::fromString(r["fetched"].toString(), Qt::ISODate).toTimeZone(zone).toString("ddd HH:mm"),
                                                                                  r["note"].toString(), QString::number(m_lat, 'f', 2), QString::number(m_lon, 'f', 2)));
         showNowcast(r, hrs, zone);
         static const QStringList ids = {"ukmo_seamless", "ecmwf_ifs025", "ecmwf_aifs025_single", "icon_seamless", "gfs_seamless", "meteofrance_seamless", "knmi_seamless"};
+        const Astro::Site site{m_lat, m_lon};
+        auto sunAlt = [&](const QDateTime& t) { return Astro::altAz(Astro::sunPosition(t), site, t).alt; };
         m_fcTable->setRowCount(0);
         int row = 0;
         for (const Weather::Hour& h : hrs) {
@@ -369,11 +453,14 @@ private:
             m_fcTable->insertRow(row);
             auto put = [&](int c, const QString& t, const QColor& bg = QColor()) { auto* it = new QTableWidgetItem(t); it->setTextAlignment(Qt::AlignCenter); if (bg.isValid()) { it->setBackground(bg); it->setForeground(Qt::white); } m_fcTable->setItem(row, c, it); };
             put(0, h.utc.toTimeZone(zone).toString("ddd HH:mm")); put(1, QString::number(h.quality, 'f', 2), tint(h.quality));
+            m_fcTable->item(row, 0)->setData(Qt::UserRole, sunAlt(h.utc.addSecs(1800)) > 0);     // daylight: hidden unless asked for
             put(2, h.models.isEmpty() ? "-" : QString("%1 - %2").arg(h.qMin, 0, 'f', 2).arg(h.qMax, 0, 'f', 2));
             put(3, QString::number(h.cloud, 'f', 0)); put(4, QString::number(h.low, 'f', 0)); put(5, QString::number(h.mid, 'f', 0)); put(6, QString::number(h.high, 'f', 0)); put(7, QString::number(h.precipProb, 'f', 0));
             for (int i = 0; i < ids.size(); ++i) { if (h.models.contains(ids[i])) put(8 + i, QString::number(h.models[ids[i]], 'f', 2), tint(h.models[ids[i]])); else put(8 + i, "-"); }
             ++row;
         }
+        applyDaylight();
+        showNights(hrs, zone, now, sunAlt);
         QFile af(m_dir + "/forecast_accuracy.json"); QString acc = "Forecast track record: none yet (the dusk forecast is archived each night and compared with the frames the telescope takes).";
         if (af.open(QIODevice::ReadOnly)) {
             const QJsonObject s = QJsonDocument::fromJson(af.readAll()).object()["summary"].toObject(); const int n = s["hours_compared"].toInt();
@@ -515,6 +602,9 @@ private:
     {
         m_tMount->setText(QString("%1, %2").arg(m["IsTracking"].toBool() ? "tracking" : "not tracking", m["IsAligned"].toBool() ? "aligned" : "not aligned"));
         m_tBatt->setText(QString("%1 %2 V %3").arg(m["BatteryLevel"].toString()).arg(m["BatteryVoltage"].toDouble(), 0, 'f', 1).arg(m["ChargerStatus"].toString()));
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if (!m_chargerAtMs || nowMs - m_chargerAtMs >= 60000) m_gateDismissed = false;   // the telescope talks again after a silence (the gate's 60 s): a dismissed alert re-arms
+        m_charger = m["ChargerStatus"].toString(); m_batteryLevel = m["BatteryLevel"].toString(); m_chargerAtMs = nowMs;
         m_pRaDec->setText(QString("%1  %2").arg(hms(m["Ra"].toDouble() * 12 / kPi), dms(m["Dec"].toDouble() * 180 / kPi)));
         m_pAltAz->setText(QString("%1°  %2°").arg(m["Alt"].toDouble() * 180 / kPi, 0, 'f', 1).arg(m["Azm"].toDouble() * 180 / kPi, 0, 'f', 1));
         m_pGoto->setText(m["IsGotoOver"].toBool(true) ? "idle" : "SLEWING");
@@ -604,9 +694,11 @@ private:
         qApp->setStyleSheet(on ? "QWidget { background: #100000; color: #ff4040; } QGroupBox { border: 1px solid #601010; margin-top: 8px; } QPushButton, QTabBar::tab { background: #200000; border: 1px solid #601010; padding: 4px; } QListWidget::item:selected, QTabBar::tab:selected { background: #500000; }" : QString());
     }
 
+    QString m_charger, m_batteryLevel; qint64 m_chargerAtMs = 0; bool m_gateDismissed = false;       // latest ChargerStatus / BatteryLevel from the mount, and when
     Client* m_client = nullptr; QString m_dir; int m_port; double m_lat, m_lon; QTimer m_poll, m_files, m_liveTimer, m_fcTimer;
     QDateTime m_picStamp; QElapsedTimer m_webLive;
     QLabel *m_fcInfo = nullptr, *m_fcAcc = nullptr, *m_fcNow = nullptr, *m_fcSky = nullptr; QTableWidget* m_fcTable = nullptr; bool m_fcFresh = false;
+    QLabel* m_fcNext = nullptr; QTableWidget* m_fcNights = nullptr; QCheckBox* m_fcDay = nullptr;
     QLabel *m_conn, *m_tLink, *m_tState, *m_tMount, *m_tBatt, *m_pRaDec, *m_pAltAz, *m_pGoto, *m_pTarget, *m_fPos, *m_cExp, *m_cTemp, *m_sState, *m_sFrames, *m_sLast, *m_sCause, *m_sFocus, *m_sTiming,
            *m_aVerdict, *m_aWhy, *m_aSky, *m_aPoint, *m_aSolve, *m_aPic, *m_rLast, *m_rCount, *m_liveInfo, *m_stackInfo;
     QCheckBox *m_night, *m_showEv, *m_showRun, *m_follow, *m_auto; QPlainTextEdit* m_log; ImageView *m_live, *m_stackView; QListWidget* m_list;

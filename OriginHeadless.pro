@@ -48,6 +48,7 @@ HEADERS += \
     Astro.hpp \
     CoordinateUtils.hpp \
     MessierCatalog.hpp \
+    AllSkyStars.hpp \
     DataDir.hpp \
     TelescopeData.hpp \
     TelescopeDataProcessor.hpp \
