@@ -68,7 +68,9 @@ private:
     bool m_expectAnalysis = false, m_haveLastReady = false;
     QElapsedTimer m_reqT, m_anaT, m_readyT, m_dlT;
     double m_sumDownloadMs = 0, m_curDownloadMs = 0;
-    double m_sumCaptureMs = 0, m_sumAnalysisMs = 0, m_sumCycleMs = 0; int m_cycles = 0;
+    QList<double> m_reqExp;                         // the exposure of each of those requests
+    double m_curExp = 0;                            // exposure of the frame being downloaded/analysed
+    double m_sumCaptureMs = 0, m_sumAnalysisMs = 0, m_sumCycleMs = 0, m_sumCycleExpS = 0; int m_cycles = 0;
     QMetaObject::Connection m_cImg, m_cFoc, m_cMsg;
     QTimer m_watchdog, m_probeTimer;
     QString m_logPath, m_curPath, m_lastVerdict, m_stopReason;

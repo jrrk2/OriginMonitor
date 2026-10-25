@@ -26,7 +26,7 @@ QJsonObject Sequencer::start(const QJsonObject& req)
     if (!m_b->isConnected()) return QJsonObject{{"ok", false}, {"error", "not connected"}};
     m_exposure = req["exposure"].toDouble(6); m_iso = req["iso"].toInt(800); m_binning = req["binning"].toInt(1);
     m_badLimit = qMax(1, req["bad_limit"].toInt(3)); m_probeMs = int(req["probe_s"].toDouble(30) * 1000);
-    m_pipeline = req["pipeline"].toBool(true); m_early = req["early"].toBool(false); m_secondSent = false; m_reqTimes.clear(); m_maxFrames = req["max_frames"].toInt(0);
+    m_pipeline = req["pipeline"].toBool(true); m_early = req["early"].toBool(false); m_secondSent = false; m_reqTimes.clear(); m_reqExp.clear(); m_maxFrames = req["max_frames"].toInt(0);
     if (m_exposure <= 0 || m_exposure > 300) return QJsonObject{{"ok", false}, {"error", "exposure must be 0-300 s"}};
     m_untilMs = 0;
     if (req.contains("for_minutes")) m_untilMs = QDateTime::currentMSecsSinceEpoch() + qint64(req["for_minutes"].toDouble() * 60000);
@@ -37,8 +37,8 @@ QJsonObject Sequencer::start(const QJsonObject& req)
         if (u < QDateTime::currentDateTime().addSecs(-60)) u = u.addDays(1);
         m_untilMs = u.toMSecsSinceEpoch();
     }
-    m_frames = m_good = m_bad = m_badRun = m_probes = 0; m_cycles = 0; m_sumCaptureMs = m_sumAnalysisMs = m_sumCycleMs = 0;
-    m_haveLastReady = false; m_outstanding = m_awaitDl = 0; m_reqTimes.clear(); m_expectAnalysis = false; m_sumDownloadMs = 0; m_state = State::Shooting; m_stopReason.clear(); m_lastVerdict.clear(); m_last = QJsonObject();
+    m_frames = m_good = m_bad = m_badRun = m_probes = 0; m_cycles = 0; m_sumCaptureMs = m_sumAnalysisMs = m_sumCycleMs = m_sumCycleExpS = 0;
+    m_haveLastReady = false; m_outstanding = m_awaitDl = 0; m_reqTimes.clear(); m_reqExp.clear(); m_expectAnalysis = false; m_sumDownloadMs = 0; m_state = State::Shooting; m_stopReason.clear(); m_lastVerdict.clear(); m_last = QJsonObject();
     QDir().mkpath(originDataDir());
     m_logPath = originDataDir() + "/sequence_" + QDate::currentDate().toString("yyyyMMdd") + ".jsonl";
     m_cImg = connect(m_b, &OriginBackend::tiffImageDownloaded, this, &Sequencer::onImage);
@@ -104,10 +104,10 @@ void Sequencer::requestFrame()
     if (m_untilMs && QDateTime::currentMSecsSinceEpoch() >= m_untilMs) { beginDrain("end time reached"); return; }
     if (m_maxFrames && m_frames + m_awaitDl + m_outstanding >= m_maxFrames) { beginDrain("max_frames reached"); return; }
     if (!m_b->isConnected()) { finish("disconnected"); return; }
-    m_reqTimes.append(QDateTime::currentMSecsSinceEpoch()); ++m_outstanding;
+    m_reqTimes.append(QDateTime::currentMSecsSinceEpoch()); m_reqExp.append(m_exposure); ++m_outstanding;
     m_watchdog.start(int((m_exposure * 3 + 60) * 1000));
     // (an explicit setCameraBitDepth(16) here, tried 2026-10-10, disturbed the capture in progress: frames came back after 2 s with wrong levels; pipeline:false is the safe mode)
-    if (!m_b->takeSnapshot(m_exposure, m_iso, m_binning)) { --m_outstanding; m_reqTimes.removeLast(); finish("snapshot request failed"); }
+    if (!m_b->takeSnapshot(m_exposure, m_iso, m_binning)) { --m_outstanding; m_reqTimes.removeLast(); m_reqExp.removeLast(); finish("snapshot request failed"); }
 }
 
 void Sequencer::onWatchdog()
@@ -123,7 +123,7 @@ void Sequencer::onMessage(const QJsonObject& m)
     const QString src = m["Source"].toString(), cmd = m["Command"].toString(), type = m["Type"].toString();
     // the telescope refused a request (typically the early one, made while it is still saving the previous frame)
     if (src == "TaskController" && cmd == "RunSampleCapture" && type == "Response" && m["ErrorCode"].toInt() != 0) {
-        --m_outstanding; if (!m_reqTimes.isEmpty()) m_reqTimes.removeLast();
+        --m_outstanding; if (!m_reqTimes.isEmpty()) { m_reqTimes.removeLast(); m_reqExp.removeLast(); }
         if (m_early) {
             m_early = false; m_secondSent = false;
             m_b->recordEvent("sequence_early_rejected", "telescope refused an early RunSampleCapture (" + m["ErrorMessage"].toString() + "): early mode off");
@@ -139,10 +139,11 @@ void Sequencer::onMessage(const QJsonObject& m)
     if (kind != "SAMPLE_CAPTURE") return;
     --m_outstanding; ++m_awaitDl;
     m_curCaptureMs = m_reqTimes.isEmpty() ? 0 : double(QDateTime::currentMSecsSinceEpoch() - m_reqTimes.takeFirst());   // request to FITS ready
+    m_curExp = m_reqExp.isEmpty() ? m_exposure : m_reqExp.takeFirst();          // the exposure this frame was taken with (auto exposure may have moved on)
     m_secondSent = m_outstanding > 0;
     if (m_outstanding == 0) m_watchdog.stop(); else m_watchdog.start(int((m_exposure * 3 + 60) * 1000));
     m_curCycleMs = 0;
-    if (m_haveLastReady && m_state == State::Shooting) { m_curCycleMs = m_readyT.elapsed(); m_sumCycleMs += m_curCycleMs; ++m_cycles; }
+    if (m_haveLastReady && m_state == State::Shooting) { m_curCycleMs = m_readyT.elapsed(); m_sumCycleMs += m_curCycleMs; m_sumCycleExpS += m_curExp; ++m_cycles; }
     m_readyT.start(); m_haveLastReady = true; m_dlT.start();
     // this notification arrives before the backend starts the download: start the next exposure now so download and analysis overlap it
     if (m_pipeline && m_state == State::Shooting) requestFrame();
@@ -170,7 +171,7 @@ void Sequencer::onFocus(const QJsonObject& o)
         m_b->recordEvent("sequence_settling", o["reasons"].toArray().first().toString());
         QFile slog(m_logPath);
         if (slog.open(QIODevice::Append)) slog.write(QJsonDocument(QJsonObject{{"time", QDateTime::currentDateTime().toString(Qt::ISODateWithMs)}, {"state", "settling"}, {"file", m_curPath}, {"verdict", verdict}, {"reasons", o["reasons"]},
-                                                                                {"exposure", m_exposure}, {"cycle_ms", 0}}).toJson(QJsonDocument::Compact) + "\n");
+                                                                                {"exposure", m_curExp}, {"cycle_ms", 0}}).toJson(QJsonDocument::Compact) + "\n");
         if (m_draining) checkDrained(); else if (m_outstanding == 0 && m_state == State::Shooting) requestFrame();
         return;
     }
@@ -181,7 +182,7 @@ void Sequencer::onFocus(const QJsonObject& o)
     QJsonObject rec{{"time", QDateTime::currentDateTime().toString(Qt::ISODateWithMs)}, {"state", m_state == State::Shooting ? "shooting" : "probing"},
                     {"file", m_curPath}, {"verdict", verdict}, {"stars", o["stars"].toInt()}, {"hfr_px", o["hfr_px"].toDouble()}, {"sky_rate", o["sky_rate"].toDouble()},
                     {"cause", o["cause"].toString()}, {"reasons", o["reasons"]}, {"transparency", reg["transparency"].toDouble()}, {"stacked", reg["stacked"].toBool()}, {"frames_in_stack", reg["frames_in_stack"].toInt()},
-                    {"capture_ms", m_curCaptureMs}, {"download_ms", m_curDownloadMs}, {"analysis_ms", analysisMs}, {"cycle_ms", m_curCycleMs}, {"exposure", m_exposure}};
+                    {"capture_ms", m_curCaptureMs}, {"download_ms", m_curDownloadMs}, {"analysis_ms", analysisMs}, {"cycle_ms", m_curCycleMs}, {"exposure", m_curExp}};
     bool drift = false;
     const double hfr = o["hfr_px"].toDouble();
     if (good && o["stars"].toInt() >= 30 && hfr > 0) {
@@ -257,6 +258,6 @@ QJsonObject Sequencer::status() const
                   {"focus", QJsonObject{{"baseline_px", m_hfrBase}, {"median_px", m_hfrMedian}, {"window", m_hfrWin.size()}, {"drifts", m_drifts}, {"drift_ratio", m_driftRatio}, {"pause", m_focusPause}}}};
     if (m_auto) { QJsonObject a = m_autoInfo; a["min_s"] = m_minExp; a["max_s"] = m_maxExp; a["target_efficiency"] = m_targetEff; s["auto_exposure"] = a; }
     if (n > 0) { s["avg_capture_ms"] = m_sumCaptureMs / n; s["avg_analysis_ms"] = m_sumAnalysisMs / n; s["avg_download_ms"] = m_sumDownloadMs / n; }
-    if (m_cycles > 0) { s["avg_cycle_ms"] = m_sumCycleMs / m_cycles; s["duty_cycle"] = m_exposure * 1000.0 / (m_sumCycleMs / m_cycles); }
+    if (m_cycles > 0) { s["avg_cycle_ms"] = m_sumCycleMs / m_cycles; s["duty_cycle"] = m_sumCycleExpS * 1000.0 / m_sumCycleMs; }   // exposure time over wall time: the exposure changes under auto exposure
     return s;
 }
