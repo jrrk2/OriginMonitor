@@ -359,7 +359,8 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
             // a reference must be a sharp, round-star frame: a trailed or defocused one would make every later good frame fail to register
             o["registration"] = QJsonObject{{"reference_frame", false}, {"stacked", false}, {"frames_in_stack", 0}};
             verdict = "unknown"; reasons << QString("not a good reference frame (%1 round stars, HFR %2 px)").arg(focus.stars).arg(focus.hfrPx, 0, 'f', 1);
-        } else if (excess > 2.0) {
+        } else if (excess > 2.0 && (moonAlt < 0 || focus.stars < 60)) {
+            // the baseline is learned with the Moon down: moonlight alone put a clear sky 330% above it (2026-10-21, Moon 79%, 111 round stars), so with the Moon up only a star-poor frame is cloud
             o["registration"] = QJsonObject{{"reference_frame", false}, {"stacked", false}, {"frames_in_stack", 0}};
             verdict = "cloudy"; reasons << QString("sky %1% above the dark baseline: not used as the stack reference").arg(int(excess * 100));
         } else {

@@ -16,9 +16,11 @@
 #include "Ephemeris.hpp"
 
 #include <QCoreApplication>
+#include <QSaveFile>
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QDir>
@@ -159,11 +161,16 @@ const QList<Cmd>& commands()
                        QList<Arg> pa = plannerArgs();
                        for (Arg& x : pa) if (x.name == "min-quality") x.help += " (run default 0.2: the forecast is a soft prior, the sky monitor decides)";
                        return a + pa; }()});
+        v.append({"allsky-stars", "planning", "Night cloud cover from an IoA all-sky camera frame by catalogue stars: the share of V <= 3.5 stars above 25 deg seen at their predicted pixels (75% or more reads as clear). For checking archived frames (allsky/ in the data directory); does not change the stored fisheye offset.", "", false, false,
+                  {P("file", 's', "all-sky JPEG"), O("time", 's', "frame time, ISO UTC (default: from a yyyyMMdd_HHmm file name, plus 30 s)")}});
         v.append({"sky-report", "planning", "Tell the forecast what the sky looks like now: percent of the sky covered by low/mid cloud (0 clear .. 100 overcast). Counts as an observation at the site (heavier than any airport METAR) for 90 minutes and steers the model blend; its influence fades over about 3 hours.", "", false, true,
                   {O("cover", 'd', "cloud cover now, percent")}});
         v.append({"survey", "action", "Twilight obstruction survey: while waiting for darkness, point at a sample of the places the night's plan will use (places the obstruction map has never seen first, then random) (block start, middle, end, backups), take a very short frame at each, and judge whether the view is blocked (trees, roofs) from the sky level and the spread of the frame. Needs an aligned mount and the Sun below --sun-limit. Records evidence in the learned obstruction map, writes survey_<night>.json and a picture per sample.",
                   "", true, false, [] { QList<Arg> a = {O("samples", 'i', "places to sample", "8"), O("target", 's', "instead of random places, sample this target's own track across its window tonight (e.g. M1)"), O("seed", 'i', "random seed for the order within equally-visited places (default: the night's date)"), O("sun-limit", 'd', "Sun altitude it must be below, deg", "-7"), O("max-minutes", 'd', "stop after this long", "35"),
                                                    O("dry-run", 'b', "list the sample points, do nothing"), O("iso", 'i', "ISO", "800")}; return a + plannerArgs(); }()});
+        v.append({"sky-survey", "action", "Sky brightness survey: point at a fixed grid of places (near the zenith, four at 65 deg, eight at 45 deg; those under the horizon profile are left out), take a frame at each and measure the sky level and the stars. Reports each place's sky brightness relative to the darkest one (delta mag; 0 = darkest) and, with --zero-point, in mag/arcsec^2. The star count is a transparency hint. Needs an aligned mount, the Sun below --sun-limit and no unattended run. Writes sky_survey_<night>.json.",
+                  "", true, false, [] { QList<Arg> a = {O("exposure", 'd', "starting exposure, s (adapted when the frame is too bright or too faint)", "5"), O("iso", 'i', "ISO", "800"), O("sun-limit", 'd', "Sun altitude it must be below, deg", "-15"), O("max-minutes", 'd', "stop after this long", "30"),
+                                                   O("zero-point", 'd', "magnitude that gives 1 ADU/s at this ISO (instrument calibration; without it only relative values are reported)"), O("dry-run", 'b', "list the places, do nothing")}; return a + plannerArgs(); }()});
         v.append({"flats", "action", "Take flat frames of a uniformly lit sky (an overcast deck, or twilight near the zenith) at the pointing the tube has now and analyse them: vignetting, dust shadows, colour, gradient, noise. Adapts the exposure to put the sky --target-adu above black, writes master_flat_<tag>.fits and two pictures to <data dir>/flats/. Does not move the telescope.",
                   "", true, false, {O("frames", 'i', "frames to take", "16"), O("iso", 'i', "ISO (use the ISO of the lights)", "800"), O("target-adu", 'd', "sky level above black to aim for, ADU", "20000"), O("max-exposure", 'd', "longest exposure, s", "2"), O("tag", 's', "name for the outputs (default: iso and time)"), O("no-keep", 'b', "delete the raw frames after the analysis")}});
         v.append({"flat-analyze", "analysis", "Analyse existing raw flat frames (see flats): --dir with snapshot_*.fits, or --files a.fits,b.fits.", "", false, true,
@@ -321,6 +328,14 @@ Planner::Options plannerOptions(const Parsed& p, const Cmd& c)
         if (p.v.contains("boost")) for (const QString& kv : str(p, "boost").split(',', Qt::SkipEmptyParts)) { const QStringList a = kv.split('='); if (a.size() == 2) boosts[a[0].trimmed()] = a[1].toInt(); }
         Planner::setBoosts(boosts);
     }
+    {   // tonight's "not this one" list (OriginWatch's Tasks tab): ~/.config/origin/target_skip.json {"night": "YYYY-MM-DD", "skip": ["M27"]}; another night's list is ignored
+        QFile sf(QDir::homePath() + "/.config/origin/target_skip.json");
+        if (sf.open(QIODevice::ReadOnly)) {
+            const QJsonObject j = QJsonDocument::fromJson(sf.readAll()).object();
+            if (j["night"].toString() == Planner::currentNightDate(o.timeZone).toString(Qt::ISODate))
+                for (const QJsonValue& v : j["skip"].toArray()) { const QString id = Planner::catalogueId(v.toString()); o.skip << (id.isEmpty() ? v.toString().toUpper() : id); }
+        }
+    }
     g_wx = QJsonObject();
     if (str(p, "weather", "on") != "off") {
         o.minQuality = num(p, c, "min-quality");
@@ -440,7 +455,7 @@ QJsonObject forecastAccuracy()
                 const QJsonObject o = QJsonDocument::fromJson(sf.readLine()).object(); const QString v = o["verdict"].toString();
                 if (v == "unreadable" || v.isEmpty() || o["cause"].toString() == "obstruction") continue;
                 QDateTime t = QDateTime::fromString(o["time"].toString(), Qt::ISODateWithMs); if (!t.isValid()) continue;
-                frames.append({t.toUTC(), v == "clear" || v == "hazy"});
+                frames.append({t.toUTC(), v == "clear" || v == "hazy" || v == "moon_glow" || v == "twilight"});
             }
         }
         std::sort(frames.begin(), frames.end(), [](const Fr& a, const Fr& b) { return a.t < b.t; });
@@ -756,6 +771,7 @@ QJsonObject cmdFocusSweep(const Parsed& p, const Cmd& c)
 //   focus drift                         -> narrow focus sweep (at most every 20 min), apply the best position, resume
 //   rain forecast within the hour       -> stop, park, end the night
 //   sequence/connection failure         -> reconnect and restart (3 tries), then park
+//   a request from OriginWatch's Tasks tab -> see "run control" below (override the target, end the override, replan, stop)
 // Every decision is logged to stderr and to <data dir>/run_<date>.jsonl. The night ends parked on Polaris.
 // ---------------------------------------------------------------------------------------------------------------------------------------
 struct RunState {
@@ -765,6 +781,10 @@ struct RunState {
     QDateTime lastRefocus, lastForecast; QStringList tried;
     int switches = 0, refocuses = 0, restarts = 0, blocksDone = 0;
     QString logPath; QJsonArray decisions;
+    Parsed args; const Cmd* cmd = nullptr;                  // the run's own options, to plan again after a schedule change
+    QString night; QJsonArray plan; int block = -1;         // tonight's plan and the block being run (for run_state.json)
+    QJsonObject current;                                    // what is being observed now: {key, until, override}
+    qint64 controlDone = 0; bool replan = false, stop = false;
 };
 RunState g_run;
 
@@ -774,6 +794,59 @@ void runLog(const QString& what, QJsonObject extra = {})
     note(extra); g_run.decisions.append(extra);
     QFile f(g_run.logPath);
     if (f.open(QIODevice::Append)) f.write(QJsonDocument(extra).toJson(QJsonDocument::Compact) + "\n");
+}
+
+// ---- run control. OriginWatch (Tasks tab) writes <data dir>/run_control.json: {"id": N, "action": ..., ...}; each id is acted on once, on the supervisor's 20 s tick:
+//   override {name | ra_hours+dec_deg, minutes}  stop the current block, observe that target for `minutes` (to its setting or dawn at most; cloud does not send it to a backup),
+//                                                then resume the interrupted block if it has time left
+//   end_override                                 end an override early and resume the plan
+//   replan                                       plan the rest of the night again (after the boosts or tonight's skip list changed)
+//   stop {park}                                  end the run (and park, the default)
+// The supervisor reports in <data dir>/run_state.json: pid, night, updated, current target, the plan with the block being run, the last request id handled.
+struct Control { qint64 id = 0; QString action; QJsonObject req; };
+QString controlPath() { return originDataDir() + "/run_control.json"; }
+QJsonObject readJsonFile(const QString& path) { QFile f(path); return f.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(f.readAll()).object() : QJsonObject(); }
+
+void writeRunState(const QString& phase = "running")
+{
+    QJsonObject st{{"pid", double(QCoreApplication::applicationPid())}, {"night", g_run.night}, {"phase", phase}, {"updated", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
+                   {"current", g_run.current}, {"block", g_run.block}, {"plan", g_run.plan}, {"control_done", double(g_run.controlDone)}, {"log", g_run.logPath}};
+    QSaveFile f(originDataDir() + "/run_state.json");
+    if (f.open(QIODevice::WriteOnly)) { f.write(QJsonDocument(st).toJson()); f.commit(); }
+}
+
+bool takeControl(Control* out)
+{
+    const QJsonObject j = readJsonFile(controlPath());
+    const qint64 id = qint64(j["id"].toDouble());
+    if (id <= g_run.controlDone) return false;
+    g_run.controlDone = id; out->id = id; out->action = j["action"].toString(); out->req = j;
+    runLog("control", {{"id", double(id)}, {"action", out->action}, {"request", j}});
+    writeRunState();
+    return true;
+}
+
+// the target of an override request, or {ok:false, error}
+QJsonObject overrideTarget(const QJsonObject& req)
+{
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    QJsonObject t; QDateTime until = now.addSecs(qint64(std::clamp(req["minutes"].toDouble(60), 5.0, 600.0) * 60));
+    if (req.contains("ra_hours") && req.contains("dec_deg")) {
+        const double ra = req["ra_hours"].toDouble(), dec = req["dec_deg"].toDouble();
+        const Astro::AltAz aa = Astro::altAz({ra, dec}, g_run.o.site, now);
+        if (aa.alt < 25) return failure(QString("RA %1 h Dec %2 deg is at altitude %3 deg now; refusing").arg(ra, 0, 'f', 3).arg(dec, 0, 'f', 2).arg(aa.alt, 0, 'f', 0));
+        t = {{"ok", true}, {"key", req["name"].toString(QString("RA%1_Dec%2").arg(ra, 0, 'f', 2).arg(dec, 0, 'f', 1))}, {"ra_hours", ra}, {"dec_deg", dec}};
+    } else {
+        Planner::Options o = g_run.o; o.weather.clear();
+        t = Planner::findTarget(o, req["name"].toString());
+        if (!t["ok"].toBool()) return failure("not observable tonight: " + req["name"].toString());
+        const QDateTime w1 = parseZ(t["window_end"].toString());
+        if (!(parseZ(t["window_start"].toString()) <= now && now < w1)) return failure(QString("%1 is outside its observable window now").arg(t["key"].toString()));
+        until = std::min(until, w1);
+    }
+    until = std::min(until, g_run.darkEnd);
+    t["override_until"] = until.toString(Qt::ISODate);
+    return t;
 }
 
 bool rainSoon()
@@ -817,14 +890,16 @@ bool startSeq(double exposure, int iso, const QDateTime& endUtc, bool focusPause
     return r["ok"].toBool() && r["status"].toObject()["active"].toBool();
 }
 
-enum class RunResult { Done, Failed, Rain };
+enum class RunResult { Done, Failed, Rain, Stopped };
 
-RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth)
+RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bool isOverride = false)
 {
     const QDateTime t0 = QDateTime::currentDateTimeUtc();
     const double exposure = exposureFor(t, t0, endUtc);
     int iso = g_run.iso;
-    runLog("start", {{"target", t["key"]}, {"exposure_s", exposure}, {"iso", iso}, {"until", endUtc.toTimeZone(g_run.zone).toString("HH:mm")}, {"backup", depth > 0}});
+    runLog("start", {{"target", t["key"]}, {"exposure_s", exposure}, {"iso", iso}, {"until", endUtc.toTimeZone(g_run.zone).toString("HH:mm")}, {"backup", depth > 0}, {"override", isOverride}});
+    const QJsonObject outer = g_run.current;
+    g_run.current = {{"key", t["key"]}, {"name", t["name"]}, {"until", endUtc.toString(Qt::ISODate)}, {"override", isOverride}, {"backup", depth > 0}}; writeRunState();
     QJsonObject r = slewTo(t, exposure, iso);
     if (!r["ok"].toBool()) { runLog("slew_failed", {{"target", t["key"]}, {"error", r["error"]}}); return RunResult::Failed; }
     if (!startSeq(exposure, iso, endUtc, true)) { runLog("sequence_start_failed", {{"target", t["key"]}}); return RunResult::Failed; }
@@ -834,7 +909,25 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth)
     while (true) {
         sleepMs(20000);
         const QDateTime now = QDateTime::currentDateTimeUtc();
-        if (now >= endUtc.addSecs(300) || now >= g_run.darkEnd) { call("sequence", {{"action", "stop"}, {"reason", "block end"}}); runLog("block_end", {{"target", t["key"]}}); return RunResult::Done; }
+        writeRunState();
+        if (Control k; takeControl(&k)) {
+            if (k.action == "stop") { call("sequence", {{"action", "stop"}, {"reason", "stopped from OriginWatch"}}); call("stack", {}, 60000); g_run.stop = true; g_run.current = outer; return RunResult::Stopped; }
+            if (k.action == "replan") { call("sequence", {{"action", "stop"}, {"reason", "replanning"}}); call("stack", {}, 60000); g_run.replan = true; g_run.current = outer; return RunResult::Done; }
+            if (k.action == "end_override" && isOverride) { call("sequence", {{"action", "stop"}, {"reason", "override ended"}}); call("stack", {}, 60000); runLog("override_end", {{"target", t["key"]}, {"why", "ended from OriginWatch"}}); g_run.current = outer; return RunResult::Done; }
+            if (k.action == "override") {
+                const QJsonObject ot = overrideTarget(k.req);
+                if (!ot["ok"].toBool()) runLog("override_refused", {{"why", ot["error"]}});
+                else {
+                    call("sequence", {{"action", "stop"}, {"reason", "override: " + ot["key"].toString()}}); call("stack", {}, 60000);
+                    if (isOverride) { g_run.current = outer; return runTarget(ot, parseZ(ot["override_until"].toString()), depth, true); }     // a new override replaces this one
+                    const RunResult rr = runTarget(ot, parseZ(ot["override_until"].toString()), depth, true);
+                    if (rr != RunResult::Done || g_run.replan || g_run.stop) { g_run.current = outer; return rr; }
+                    if (QDateTime::currentDateTimeUtc() < endUtc && QDateTime::currentDateTimeUtc() < g_run.darkEnd) { runLog("resume", {{"target", t["key"]}}); g_run.current = outer; return runTarget(t, endUtc, depth); }
+                    g_run.current = outer; return RunResult::Done;
+                }
+            }
+        }
+        if (now >= endUtc.addSecs(isOverride ? 0 : 300) || now >= g_run.darkEnd) { call("sequence", {{"action", "stop"}, {"reason", isOverride ? "override end" : "block end"}}); runLog(isOverride ? "override_end" : "block_end", {{"target", t["key"]}}); g_run.current = outer; return RunResult::Done; }
         if (!g_run.lastForecast.isValid() || g_run.lastForecast.secsTo(now) > 1200) {
             g_run.lastForecast = now;
             if (rainSoon()) { call("sequence", {{"action", "stop"}, {"reason", "rain forecast"}}); runLog("rain_forecast", {{"target", t["key"]}}); g_run.rain = true; return RunResult::Rain; }
@@ -908,7 +1001,11 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth)
         QString reason;
         if (obstructed) reason = "obstruction";
         else if (cloudSince.isValid() && cloudSince.secsTo(now) / 60.0 >= g_run.patienceMin) reason = QString("cloud for %1 min").arg(int(cloudSince.secsTo(now) / 60));
-        if (cloudMinTotal >= g_run.giveUpMin && reason.isEmpty()) { call("sequence", {{"action", "stop"}, {"reason", "cloud give-up"}}); runLog("give_up", {{"target", t["key"]}, {"cloud_min", cloudMinTotal}}); return RunResult::Done; }
+        if (isOverride && !reason.isEmpty()) {                                          // the user chose this target: wait out cloud; an obstruction will not clear
+            if (!obstructed) { cloudSince = now; continue; }
+            call("sequence", {{"action", "stop"}, {"reason", "override: obstructed"}}); runLog("override_end", {{"target", t["key"]}, {"why", "obstruction"}}); g_run.current = outer; return RunResult::Done;
+        }
+        if (!isOverride && cloudMinTotal >= g_run.giveUpMin && reason.isEmpty()) { call("sequence", {{"action", "stop"}, {"reason", "cloud give-up"}}); runLog("give_up", {{"target", t["key"]}, {"cloud_min", cloudMinTotal}}); return RunResult::Done; }
         if (reason.isEmpty()) continue;
 
         // switch: pick a backup far from here in the sky
@@ -964,29 +1061,75 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
     g_run.maxExposure = num(p, c, "max-exposure"); g_run.iso = int(num(p, c, "iso")); g_run.patienceMin = num(p, c, "cloud-patience"); g_run.giveUpMin = num(p, c, "give-up");
     g_run.host = p.v.contains("connect") ? str(p, "connect") : call("status", {}, 10000)["host"].toString();
     g_run.logPath = originDataDir() + "/run_" + S["night"].toString().remove('-') + ".jsonl";
+    g_run.args = p; g_run.cmd = &c; g_run.night = S["night"].toString(); g_run.plan = S["plan"].toArray();
+    g_run.controlDone = qint64(readJsonFile(controlPath())["id"].toDouble());       // requests written before this run are not for it
     runLog("run_start", {{"night", S["night"]}, {"blocks", S["plan"].toArray().size()}, {"iso", g_run.iso}, {"max_exposure", g_run.maxExposure}});
+    writeRunState("starting");
+
+    // a request that arrives between blocks (waiting for a block to start, or for dusk)
+    auto between = [&]() -> RunResult {
+        Control k; if (!takeControl(&k)) return RunResult::Done;
+        if (k.action == "stop") { g_run.stop = true; return RunResult::Stopped; }
+        if (k.action == "replan") { g_run.replan = true; return RunResult::Done; }
+        if (k.action == "override") {
+            if (!tooEarlyToSlew(str(p, "not-before", "dusk"), g_run.o.site).isEmpty()) { runLog("override_refused", {{"why", "too early to slew"}}); return RunResult::Done; }
+            const QJsonObject ot = overrideTarget(k.req);
+            if (!ot["ok"].toBool()) { runLog("override_refused", {{"why", ot["error"]}}); return RunResult::Done; }
+            return runTarget(ot, parseZ(ot["override_until"].toString()), 0, true);
+        }
+        return RunResult::Done;
+    };
+    auto idle = [&](const QString& why) { g_run.current = {{"waiting", why}}; writeRunState("waiting"); };
 
     RunResult res = RunResult::Done;
-    for (const QJsonValue& bv : S["plan"].toArray()) {
-        const QJsonObject b = bv.toObject();
+    for (int i = 0; i < g_run.plan.size() && !g_run.stop; ++i) {
+        if (g_run.replan) {                                                            // the boosts or the skip list changed: plan the rest of the night again
+            g_run.replan = false;
+            Planner::Options no = plannerOptions(g_run.args, *g_run.cmd); no.date = Planner::currentNightDate(no.timeZone);
+            if (!g_run.args.v.contains("min-quality")) no.minQuality = 0.2;
+            const QJsonObject NS = Planner::schedule(no);
+            if (NS["ok"].toBool()) {
+                QJsonArray rest; const QDateTime now = QDateTime::currentDateTimeUtc();
+                for (const QJsonValue& bv : NS["plan"].toArray()) if (parseZ(bv.toObject()["end"].toString()) > now) rest.append(bv);
+                g_run.o = no; g_run.plan = rest; i = 0;
+                runLog("replanned", {{"blocks", rest.size()}, {"skip", QJsonArray::fromStringList(no.skip)}});
+                if (rest.isEmpty()) break;
+            } else runLog("replan_failed", {{"error", NS["error"]}});
+        }
+        g_run.block = i;
+        const QJsonObject b = g_run.plan[i].toObject();
         const QDateTime start = parseZ(b["start"].toString()), end = parseZ(b["end"].toString()).addSecs(300);
         QDateTime now = QDateTime::currentDateTimeUtc();
         if (now >= end) continue;
-        while (now < start && now < g_run.darkEnd) { sleepMs(30000); now = QDateTime::currentDateTimeUtc(); }
+        bool restart = false;
+        while (now < start && now < g_run.darkEnd) {
+            idle(QString("next block %1 at %2").arg(b["key"].toString(), start.toTimeZone(g_run.zone).toString("HH:mm")));
+            sleepMs(30000); res = between(); now = QDateTime::currentDateTimeUtc();
+            if (g_run.stop || g_run.replan || res == RunResult::Rain || res == RunResult::Failed) { restart = true; break; }
+        }
+        if (restart) { if (g_run.replan) { --i; continue; } break; }
         { const QString early = tooEarlyToSlew(str(p, "not-before", "dusk"), g_run.o.site);
-          if (!early.isEmpty()) { runLog("too_early", {{"why", early}}); while (!tooEarlyToSlew(str(p, "not-before", "dusk"), g_run.o.site).isEmpty() && QDateTime::currentDateTimeUtc() < g_run.darkEnd) sleepMs(30000); now = QDateTime::currentDateTimeUtc(); } }
+          if (!early.isEmpty()) { runLog("too_early", {{"why", early}}); idle("too early: " + early);
+                                  while (!tooEarlyToSlew(str(p, "not-before", "dusk"), g_run.o.site).isEmpty() && QDateTime::currentDateTimeUtc() < g_run.darkEnd) { sleepMs(30000); between(); if (g_run.stop || g_run.replan) break; }
+                                  now = QDateTime::currentDateTimeUtc(); } }
+        if (g_run.stop) break;
+        if (g_run.replan) { --i; continue; }
         if (now >= g_run.darkEnd) break;
         g_run.tried = QStringList{b["key"].toString()};
         res = runTarget(b, end, 0);
         ++g_run.blocksDone;
-        if (res == RunResult::Rain || res == RunResult::Failed) break;
+        if (res == RunResult::Rain || res == RunResult::Failed || res == RunResult::Stopped) break;
+        if (g_run.replan) { --i; continue; }
         g_run.tried.clear();
     }
-    const QJsonObject park = cmdPark();
-    runLog("parked", {{"ok", park["ok"]}, {"outcome", res == RunResult::Done ? "complete" : res == RunResult::Rain ? "rain" : "failed"}});
-    if (p.v.contains("mail")) mailRunSummary(res == RunResult::Done ? "complete" : res == RunResult::Rain ? "stopped for rain" : "stopped after a failure", S["night"].toString());
-    return {{"ok", res != RunResult::Failed}, {"outcome", res == RunResult::Done ? "complete" : res == RunResult::Rain ? "stopped: rain forecast" : "stopped: failure"}, {"blocks_run", g_run.blocksDone},
-            {"switches", g_run.switches}, {"refocuses", g_run.refocuses}, {"log", g_run.logPath}, {"parked", park["ok"]}};
+    const bool parkIt = !g_run.stop || readJsonFile(controlPath())["park"].toBool(true);
+    const QJsonObject park = parkIt ? cmdPark() : QJsonObject{{"ok", true}, {"skipped", "stopped from OriginWatch without parking"}};
+    const QString outcome = g_run.stop ? "stopped" : res == RunResult::Done ? "complete" : res == RunResult::Rain ? "rain" : "failed";
+    runLog("parked", {{"ok", park["ok"]}, {"outcome", outcome}, {"parked", parkIt}});
+    g_run.current = {{"finished", outcome}}; writeRunState("finished");
+    if (p.v.contains("mail")) mailRunSummary(g_run.stop ? "stopped from OriginWatch" : res == RunResult::Done ? "complete" : res == RunResult::Rain ? "stopped for rain" : "stopped after a failure", S["night"].toString());
+    return {{"ok", res != RunResult::Failed}, {"outcome", g_run.stop ? "stopped from OriginWatch" : res == RunResult::Done ? "complete" : res == RunResult::Rain ? "stopped: rain forecast" : "stopped: failure"}, {"blocks_run", g_run.blocksDone},
+            {"switches", g_run.switches}, {"refocuses", g_run.refocuses}, {"log", g_run.logPath}, {"parked", parkIt && park["ok"].toBool()}};
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------
@@ -1134,6 +1277,16 @@ QJsonObject cmdFlatAnalyze(const Parsed& p, const Cmd&)
 // the bright twilight sky: either the whole frame is much darker than the other samples (blocked) or the frame is far from uniform (partly blocked). Evidence goes to the
 // learned obstruction map (which the planner already uses once a bin has been bad on two nights), to survey_<night>.json, and as one picture per sample.
 // ---------------------------------------------------------------------------------------------------------------------------------------
+bool pidAlive(qint64 pid);
+// true while an unattended run reports itself in run_state.json (its process is alive and it wrote the file in the last 3 minutes)
+bool runActive()
+{
+    const QJsonObject st = readJsonFile(originDataDir() + "/run_state.json");
+    if (st["phase"].toString() == "finished") return false;
+    const QDateTime upd = parseZ(st["updated"].toString());
+    return upd.isValid() && upd.secsTo(QDateTime::currentDateTimeUtc()) < 180 && pidAlive(qint64(st["pid"].toDouble()));
+}
+
 QJsonObject cmdSurvey(const Parsed& p, const Cmd& c)
 {
     Planner::Options o = plannerOptions(p, c); o.date = Planner::currentNightDate(o.timeZone);
@@ -1195,6 +1348,7 @@ QJsonObject cmdSurvey(const Parsed& p, const Cmd& c)
     if (!call("status", {}, 10000)["connected"].toBool()) return failure("the daemon is not connected to the telescope");
     if (!call("mount_status", {}, 15000)["mount"].toObject()["IsAligned"].toBool()) return failure("the mount is not aligned; initialize first");
     if (call("sequence", {{"action", "status"}}, 10000)["status"].toObject()["active"].toBool()) return failure("a sequence is running");
+    if (runActive()) return failure("an unattended run is in progress; it holds the telescope");
 
     const QString dir = originDataDir() + "/survey/" + night; QDir().mkpath(dir);
     QJsonArray results; QList<double> rates;
@@ -1238,6 +1392,94 @@ QJsonObject cmdSurvey(const Parsed& p, const Cmd& c)
     }
     QJsonObject res{{"ok", true}, {"night", night}, {"sun_alt_start", sunNow}, {"sampled", int(rates.size())}, {"obstructed", blocked}, {"median_sky_rate", ref}, {"samples", out}, {"pictures", dir}};
     QFile f(originDataDir() + "/survey_" + QString(night).remove('-') + ".json"); if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) f.write(QJsonDocument(res).toJson());
+    return res;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------
+// sky-survey: how bright is the sky, and where. A fixed grid of places (not the plan's), one frame each; the sky rate (ADU/s) gives the brightness relative to the darkest
+// place, and in mag/arcsec^2 when the instrument's zero point is given. Stars per frame hint at transparency. The Moon's separation is recorded with each place.
+// ---------------------------------------------------------------------------------------------------------------------------------------
+double horizonMinAlt(const QString& file, double az, double flat)
+{
+    const QJsonArray pts = readJsonFile(file)["points"].toArray();
+    if (pts.size() < 2) return flat;
+    QList<QPair<double, double>> v; for (const QJsonValue& q : pts) v.append({q.toArray()[0].toDouble(), q.toArray()[1].toDouble()});
+    std::sort(v.begin(), v.end());
+    for (int i = 0; i < v.size(); ++i) {
+        const auto a = v[i], b = i + 1 < v.size() ? v[i + 1] : qMakePair(v[0].first + 360, v[0].second);
+        double x = az; if (x < a.first) x += 360;
+        if (x >= a.first && x <= b.first) return a.second + (b.second - a.second) * (x - a.first) / std::max(1e-9, b.first - a.first);
+    }
+    return v[0].second;
+}
+
+QJsonObject cmdSkySurvey(const Parsed& p, const Cmd& c)
+{
+    Planner::Options o = plannerOptions(p, c); o.date = Planner::currentNightDate(o.timeZone);
+    const QString night = o.date.toString(Qt::ISODate);
+    struct Pt { double alt, az; };
+    QList<Pt> grid = {{80, 180}};
+    for (double az : {45.0, 135.0, 225.0, 315.0}) grid.append({65, az});
+    for (double az = 0; az < 360; az += 45) grid.append({45, az});
+    QList<Pt> pts; QJsonArray skipped;
+    for (const Pt& q : grid) {
+        const double lim = horizonMinAlt(o.horizonFile, q.az, o.minAlt);
+        if (q.alt < lim + 3) skipped.append(QJsonObject{{"alt", q.alt}, {"az", q.az}, {"why", QString("below the horizon profile (%1 deg)").arg(lim, 0, 'f', 0)}}); else pts.append(q);
+    }
+    std::sort(pts.begin(), pts.end(), [](const Pt& a, const Pt& b) { return a.alt != b.alt ? a.alt > b.alt : a.az < b.az; });
+    QJsonArray plan; for (const Pt& q : pts) plan.append(QJsonObject{{"alt", q.alt}, {"az", q.az}});
+    if (p.v.contains("dry-run")) return {{"ok", true}, {"dry_run", true}, {"night", night}, {"places", plan}, {"skipped", skipped}};
+
+    const QDateTime t0 = QDateTime::currentDateTimeUtc();
+    const double sunNow = Astro::altAz(Astro::sunPosition(t0), o.site, t0).alt;
+    if (sunNow > num(p, c, "sun-limit")) return failure(QString("too early: the Sun is at %1 deg (the sky survey needs it below %2)").arg(sunNow, 0, 'f', 1).arg(num(p, c, "sun-limit"), 0, 'f', 0));
+    { QProcess pg; pg.start("pgrep", {"-x", "CelestronOrigin"}); pg.waitForFinished(3000); if (pg.exitCode() == 0) return failure("the GUI app is running; it holds the telescope"); }
+    if (!call("status", {}, 10000)["connected"].toBool()) return failure("the daemon is not connected to the telescope");
+    if (!call("mount_status", {}, 15000)["mount"].toObject()["IsAligned"].toBool()) return failure("the mount is not aligned; initialize first");
+    if (call("sequence", {{"action", "status"}}, 10000)["status"].toObject()["active"].toBool()) return failure("a sequence is running");
+    if (runActive()) return failure("an unattended run is in progress; it holds the telescope");
+
+    const int iso = int(num(p, c, "iso")); double expo = num(p, c, "exposure");
+    QJsonArray out; QList<double> rates;
+    call("manual", {}, 15000);
+    for (const Pt& q : pts) {
+        if (t0.secsTo(QDateTime::currentDateTimeUtc()) > num(p, c, "max-minutes") * 60) { note({{"sky_survey", "out of time; stopping"}}); break; }
+        QJsonObject r{{"alt", q.alt}, {"az", q.az}};
+        const QJsonObject g = gotoAltAz(q.alt, q.az, o.site, 240);
+        if (!g["ok"].toBool()) { r["error"] = "goto failed: " + g["error"].toString(); out.append(r); note({{"sky_survey", "goto failed"}, {"at", r}}); continue; }
+        QJsonObject fs;
+        for (int k = 0; k < 3; ++k) {                                       // an exposure that neither saturates nor starves the frame
+            fs = call("frame_stats", {{"exposure", expo}, {"iso", iso}, {"binning", 1}}, 120000);
+            const QString v = fs["verdict"].toString();
+            if ((v == "too_bright" || v == "too_short") && std::abs(std::log10(fs["suggested_exposure_s"].toDouble(expo) / expo)) > 0.15) { expo = std::clamp(fs["suggested_exposure_s"].toDouble(expo), 0.5, 30.0); continue; }
+            break;
+        }
+        if (!fs["ok"].toBool()) { r["error"] = fs["error"]; out.append(r); continue; }
+        const QDateTime now = QDateTime::currentDateTimeUtc();
+        const Astro::Equatorial here = [&] { const QJsonObject m = call("mount_status", {}, 15000)["mount"].toObject(); return Astro::Equatorial{m["Ra"].toDouble() * 12 / M_PI, m["Dec"].toDouble() * 180 / M_PI}; }();
+        const double rate = fs["sky_rate_adu_per_s"].toDouble();
+        r["exposure_s"] = expo; r["sky_rate"] = rate; r["stars"] = fs["stars"]; r["stars_sigma10"] = fs["stars_sigma10"]; r["saturated"] = fs["saturated_fraction"];
+        r["moon_sep_deg"] = std::round(Astro::moonSeparationDeg(here, now)); r["moon_alt_deg"] = std::round(Astro::moonAltitude(o.site, now));
+        r["sun_alt_deg"] = std::round(Astro::altAz(Astro::sunPosition(now), o.site, now).alt * 10) / 10; r["utc"] = now.toString(Qt::ISODate);
+        if (rate > 0) rates.append(rate);
+        out.append(r); note({{"sky_survey", "sampled"}, {"at", r}});
+    }
+    if (rates.isEmpty()) return failure("no place could be measured");
+    const double darkest = *std::min_element(rates.begin(), rates.end());
+    const double pixArea = 1.478 * 1.478;                                    // arcsec^2 per pixel (335 mm, 2.4 um)
+    const bool abs = p.v.contains("zero-point"); const double zp = abs ? num(p, c, "zero-point") : 0;
+    QJsonArray samples;
+    for (const QJsonValue& v : out) {
+        QJsonObject r = v.toObject();
+        if (r["sky_rate"].toDouble() > 0) {
+            r["delta_mag"] = std::round(-2.5 * std::log10(r["sky_rate"].toDouble() / darkest) * 100) / 100;      // 0 = darkest place; negative = brighter
+            if (abs) r["mag_per_arcsec2"] = std::round((zp - 2.5 * std::log10(r["sky_rate"].toDouble() / pixArea)) * 100) / 100;
+        }
+        samples.append(r);
+    }
+    QJsonObject res{{"ok", true}, {"night", night}, {"iso", iso}, {"sampled", int(rates.size())}, {"darkest_sky_rate", darkest}, {"zero_point", abs ? QJsonValue(zp) : QJsonValue()},
+                    {"note", abs ? "mag_per_arcsec2 from the given zero point" : "relative only: delta_mag is against the darkest place (give --zero-point for mag/arcsec^2)"}, {"samples", samples}, {"skipped", skipped}};
+    QFile f(originDataDir() + "/sky_survey_" + QString(night).remove('-') + ".json"); if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) f.write(QJsonDocument(res).toJson());
     return res;
 }
 
@@ -1513,9 +1755,18 @@ int main(int argc, char* argv[])
     else if (cmd->name == "run") out = cmdRun(p, *cmd);
     else if (cmd->name == "autorun") out = cmdAutorun(p, *cmd);
     else if (cmd->name == "survey") out = cmdSurvey(p, *cmd);
+    else if (cmd->name == "sky-survey") out = cmdSkySurvey(p, *cmd);
     else if (cmd->name == "flats") out = cmdFlats(p, *cmd);
     else if (cmd->name == "flat-analyze") out = cmdFlatAnalyze(p, *cmd);
     else if (cmd->name == "forecast-accuracy") out = forecastAccuracy();
+    else if (cmd->name == "allsky-stars") {
+        const QString file = str(p, "file", ""); QFile f(file);
+        QDateTime t = QDateTime::fromString(str(p, "time", ""), Qt::ISODate);
+        if (!t.isValid()) { t = QDateTime::fromString(QFileInfo(file).fileName().left(13), "yyyyMMdd_HHmm"); t.setTimeZone(QTimeZone::UTC); t = t.addSecs(30); }
+        if (!f.open(QIODevice::ReadOnly)) out = QJsonObject{{"ok", false}, {"error", "cannot read " + file}};
+        else if (!t.isValid()) out = QJsonObject{{"ok", false}, {"error", "no --time and the file name is not yyyyMMdd_HHmm"}};
+        else { out = Weather::allSkyStars(f.readAll(), t.toUTC(), originDataDir(), false); out["time"] = t.toUTC().toString(Qt::ISODate); }
+    }
     else if (cmd->name == "sky-report") {
         const double cv = std::max(0.0, std::min(100.0, num(p, *cmd, "cover")));
         QFile f(originDataDir() + "/sky_report.json");

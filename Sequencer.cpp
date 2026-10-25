@@ -166,7 +166,7 @@ void Sequencer::onFocus(const QJsonObject& o)
         if (m_draining) checkDrained(); else if (m_outstanding == 0 && m_state == State::Shooting) requestFrame();
         return;
     }
-    const bool good = verdict == "clear" || verdict == "hazy";
+    const bool good = verdict == "clear" || verdict == "hazy" || verdict == "moon_glow" || verdict == "twilight";   // as SkyMonitor's "good": moonlit frames stack (2026-10-21)
     ++m_frames; good ? ++m_good : ++m_bad; m_badRun = good ? 0 : m_badRun + 1; m_lastVerdict = verdict;
     m_sumCaptureMs += m_curCaptureMs; m_sumAnalysisMs += analysisMs;
     const QJsonObject reg = o["registration"].toObject();

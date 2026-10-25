@@ -51,4 +51,9 @@ QJsonObject metarNowcast(double latDeg, double lonDeg, const QString& cacheDir, 
 
 QJsonObject toJson(const Hour& h);
 
+/// Night cloud cover from an IoA all-sky frame (JPEG) taken at `utc`: the share of catalogue stars (V <= 3.5, altitude > 25 deg) seen at their predicted pixels.
+/// The fisheye drifts a few pixels between nights, so each frame first re-centres it on the bright stars; a fit of 12 or more stars is kept in stateDir/allsky_offset.json
+/// for frames that cannot fit (cloud). Returns {ok, cover, tested, visible, offset...}; ok=false with an error when the frame cannot be read or too few stars are up.
+QJsonObject allSkyStars(const QByteArray& jpeg, const QDateTime& utc, const QString& stateDir, bool saveOffset);
+
 }   // namespace Weather

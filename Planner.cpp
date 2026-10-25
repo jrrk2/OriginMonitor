@@ -224,6 +224,7 @@ QDate currentNightDate(const QString& timeZone)
     return QDateTime::currentDateTimeUtc().toTimeZone(QTimeZone(timeZone.toUtf8())).addSecs(-12 * 3600).date();
 }
 
+QString catalogueId(const QString& s) { return catalogId(s); }
 void setStacksDir(const QString& dir) { g_stacksDir = dir; }
 void setBoosts(const QMap<QString, int>& boosts) { g_boost.clear(); for (auto it = boosts.begin(); it != boosts.end(); ++it) g_boost[catalogId(it.key()).isEmpty() ? it.key().toUpper() : catalogId(it.key())] = it.value(); }
 
@@ -254,6 +255,7 @@ QJsonObject schedule(const Options& o)
 
     QList<Row> rows;
     for (const Target& tg : loadTargets()) {
+        if (!o.skip.isEmpty() && o.skip.contains(catalogId(tg.key.isEmpty() ? tg.name : tg.key))) continue;     // the user's "not tonight"
         Row r; r.t = tg; r.ok.resize(n); r.alt.resize(n); r.az.resize(n); r.glow.resize(n);
         bool any = false;
         for (int i = 0; i < n; ++i) {
@@ -471,7 +473,7 @@ QJsonObject backupTargets(const Options& base, double raHours, double decDeg, co
 
 QJsonObject findTarget(const Options& base, const QString& name)
 {
-    Options o = base; o.minBlockMin = 0;
+    Options o = base; o.minBlockMin = 0; o.skip.clear();
     const QJsonObject s = schedule(o);
     if (!s["ok"].toBool()) return s;
     const QString n = name.toLower();

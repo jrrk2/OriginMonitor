@@ -1,14 +1,17 @@
-// OriginWatch: a read-only window onto a running OriginHeadless daemon.
+// OriginWatch: a window onto a running OriginHeadless daemon.
 //   Now      what the telescope, the sequence and the unattended supervisor are doing
 //   Log      recent telescope/daemon events and the supervisor's decisions
 //   Live     the live stack, rendered on demand
 //   Stacks   every stack in the data directory, finished or not
 //   Forecast the blended multi-model weather forecast hour by hour (Open-Meteo, cached 1 h, same cache as OriginHeadless) and how accurate it has been
-// It talks to 127.0.0.1:<port> with a whitelist of read-only commands (see allowed()) and reads <data dir> files; it cannot move or change anything.
+//   Tasks    (window only) override the target, change tonight's schedule, surveys, stop or park: see WatchTasks.hpp
+// It talks to 127.0.0.1:<port> with a whitelist of read-only commands (see allowed()) and reads <data dir> files. Only the Tasks tab changes anything, by launching
+// OriginHeadless or writing the run's control file, and only after asking; the phone view (web()) is read-only.
 #include "DataDir.hpp"
 #include "Weather.hpp"
 #include "Astro.hpp"
 #include "WatchWeb.hpp"
+#include "WatchTasks.hpp"
 
 #include <QApplication>
 #include <QBuffer>
@@ -204,9 +207,10 @@ public:
     Window(int port, const QString& dataDir, double lat, double lon) : m_dir(dataDir), m_port(port), m_lat(lat), m_lon(lon)
     {
         m_client = new Client(port, this);
-        setWindowTitle(QString("OriginWatch (read-only) - daemon port %1").arg(port));
+        setWindowTitle(QString("OriginWatch - daemon port %1").arg(port));
         auto* tabs = new QTabWidget; setCentralWidget(tabs);
         tabs->addTab(buildNow(), "Now"); tabs->addTab(buildLog(), "Log"); tabs->addTab(buildLive(), "Live stack"); tabs->addTab(buildStacks(), "Stacks"); tabs->addTab(buildForecast(), "Forecast");
+        tabs->addTab(new TasksTab(m_dir, port, [this] { return QString("pointing %1 (alt/az %2), target %3").arg(m_pRaDec->text(), m_pAltAz->text(), m_pTarget->text()); }), "Tasks");
         m_night = new QCheckBox("Night (red) mode"); statusBar()->addPermanentWidget(m_night);
         connect(m_night, &QCheckBox::toggled, this, &Window::applyNight);
         m_conn = new QLabel("daemon: connecting..."); statusBar()->addWidget(m_conn);
@@ -263,13 +267,12 @@ public:
             const bool fresh = m_chargerAtMs && QDateTime::currentMSecsSinceEpoch() - m_chargerAtMs < 60000;
             const QString c = m_charger.toUpper();
             const bool onCharger = fresh && !c.contains("DISCHARG") && (c.contains("CHARG") || c.contains("FULL"));
-            if (onCharger) m_gateDismissed = false;                    // on the charger again: the alert re-arms for the next battery night
             if (path == "/gate/dismiss") { m_gateDismissed = true; r.status = 303; r.type = "text/plain"; r.body = "dismissed\n"; r.location = "/"; return r; }
             if (!onCharger && !m_gateDismissed) {
                 r.status = 503;
                 const QString why = !fresh ? "The telescope is not reporting its battery (powered off, or not connected to the daemon)."
                                            : QString("Charger status: <b>%1</b>, battery level: <b>%2</b>.").arg(esc(m_charger.isEmpty() ? "unknown" : m_charger), esc(m_batteryLevel.isEmpty() ? "unknown" : m_batteryLevel));
-                r.body = webPage("<h2>Charger not connected</h2><p>" + why + "</p><p>These pages stay hidden until the telescope is plugged in and reports CHARGING or full. Connect the charger; this page re-checks every 10 seconds.</p><p><a href=/gate/dismiss>Dismiss and disable this alert</a> (until the telescope next reports CHARGING)</p>", 10).toUtf8();
+                r.body = webPage("<h2>Charger not connected</h2><p>" + why + "</p><p>These pages stay hidden until the telescope is plugged in and reports CHARGING or full. Connect the charger; this page re-checks every 10 seconds.</p><p><a href=/gate/dismiss>Dismiss this alert</a> (it returns when the telescope next starts talking after being off or out of reach)</p>", 10).toUtf8();
                 return r;
             }
         }
@@ -599,7 +602,9 @@ private:
     {
         m_tMount->setText(QString("%1, %2").arg(m["IsTracking"].toBool() ? "tracking" : "not tracking", m["IsAligned"].toBool() ? "aligned" : "not aligned"));
         m_tBatt->setText(QString("%1 %2 V %3").arg(m["BatteryLevel"].toString()).arg(m["BatteryVoltage"].toDouble(), 0, 'f', 1).arg(m["ChargerStatus"].toString()));
-        m_charger = m["ChargerStatus"].toString(); m_batteryLevel = m["BatteryLevel"].toString(); m_chargerAtMs = QDateTime::currentMSecsSinceEpoch();
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if (!m_chargerAtMs || nowMs - m_chargerAtMs >= 60000) m_gateDismissed = false;   // the telescope talks again after a silence (the gate's 60 s): a dismissed alert re-arms
+        m_charger = m["ChargerStatus"].toString(); m_batteryLevel = m["BatteryLevel"].toString(); m_chargerAtMs = nowMs;
         m_pRaDec->setText(QString("%1  %2").arg(hms(m["Ra"].toDouble() * 12 / kPi), dms(m["Dec"].toDouble() * 180 / kPi)));
         m_pAltAz->setText(QString("%1°  %2°").arg(m["Alt"].toDouble() * 180 / kPi, 0, 'f', 1).arg(m["Azm"].toDouble() * 180 / kPi, 0, 'f', 1));
         m_pGoto->setText(m["IsGotoOver"].toBool(true) ? "idle" : "SLEWING");
