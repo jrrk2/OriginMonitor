@@ -38,6 +38,7 @@ svg { display:block; }
   <label>Sort <select id="sort"><option value="pri">priority</option><option value="peak">time of peak</option><option value="start">window start</option><option value="name">name</option></select></label>
   <label>Show <select id="show"><option value="obs">observable tonight</option><option value="all">all candidates</option></select></label>
   <label>Minimum sub <select id="minsub"><option value="0">any</option><option value="5">5 s</option><option value="10" selected>10 s</option><option value="20">20 s</option></select></label>
+  <label>Filter fitted <select id="filter"><option value="clear">none (clear)</option><option value="nebula">nebula (quad-band)</option></select></label><span class="sub" id="fmsg"></span>
   <button id="reload">Reload</button><span class="sub" id="age"></span>
 </div>
 <div class="card legend">
@@ -65,8 +66,22 @@ function stackFlag(t) {
   const newest = hit.map(n => D.stacks[n].mtime).sort().pop();
   return new Date(newest) > new Date('2026-10-15T17:00:00Z') ? '<span class="tag f">stack since filter</span>' : '<span class="tag u">pre-filter stack</span>';
 }
+// The filter is inserted by hand; this tells the planner (and the firmware) which one is in. Emission targets come first under the nebula filter.
+async function setFilter(name) {
+  const msg = $('#fmsg'); msg.textContent = 'saving…';
+  try {
+    const r = await fetch('filter?name=' + encodeURIComponent(name), {method:'POST', headers:{'X-Origin-Watch':'1'}, cache:'no-store'});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || r.status);
+    msg.textContent = 'saved; re-planning…';
+    const before = D.generated;
+    for (let i = 0; i < 20; i++) { await new Promise(res => setTimeout(res, 3000)); await load(); if (D.generated !== before && D.filter === name) { msg.textContent = 'plan updated for ' + name; return; } }
+    msg.textContent = 'saved; the plan updates within 5 minutes';
+  } catch (e) { msg.innerHTML = '<span class="err">not saved: ' + e.message + '</span>'; $('#filter').value = D.filter || 'clear'; }
+}
 function render() {
   const g = new Date(D.generated), now = new Date();
+  if (document.activeElement !== $('#filter')) $('#filter').value = D.filter || 'clear';
   const L = D.live || {}, seq = L.sequence || {}, tg = (L.target || {}).target || '', st = (L.target || {}).stack || {}, mt = L.mount || {};
   $('#sub').textContent = 'night of ' + D.night + ' · dark ' + hhmm(new Date(D.dark_start)) + '–' + hhmm(new Date(D.dark_end)) + ' (UK) · Moon ' + Math.round((D.moon_illumination || 0) * 100) + '% lit · times are Europe/London';
   $('#live').innerHTML = '<div><b>target</b> ' + (tg || '—') + '</div><div><b>capture</b> ' + (seq.active ? 'running, ' + seq.exposure + ' s ISO ' + seq.iso : 'idle') + '</div><div><b>frames</b> ' + (seq.good ?? '—') + ' good / ' + (seq.bad ?? '—') + ' bad</div><div><b>stack</b> ' + (st.frames ?? '—') + ' frames, ' + Math.round(st.total_exposure_s || 0) + ' s</div><div><b>mount</b> ' + (mt.IsAligned ? 'aligned (' + mt.NumAlignRefs + ' refs)' : 'NOT aligned') + (mt.IsTracking ? ', tracking' : ', not tracking') + '</div>';
@@ -109,6 +124,7 @@ document.addEventListener('mousemove', e => {
 });
 ['sort', 'show', 'minsub'].forEach(id => $('#' + id).addEventListener('change', () => D && render()));
 $('#reload').addEventListener('click', load);
+$('#filter').addEventListener('change', e => setFilter(e.target.value));
 load(); setInterval(load, 120000);
 </script>
 </body>

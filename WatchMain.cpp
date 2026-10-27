@@ -38,6 +38,8 @@
 #include <QListWidget>
 #include <QMainWindow>
 #include <QPainter>
+#include <QProcess>
+#include <QSaveFile>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QQueue>
@@ -259,6 +261,26 @@ public:
             if (g->title().startsWith("Sky") && !m_aPic->pixmap().isNull()) h += QString("<p><img src='/img/lastframe.jpg?v=%1' alt='last frame'></p>").arg(m_picStamp.toSecsSinceEpoch());
         }
         return h;
+    }
+    // The only settings the web pages may change. POST /filter?name=clear|nebula: the hand-fitted filter. Writes ~/.config/origin/filter (the planner reads it: emission
+    // targets first under the nebula filter; the daemon declares it to the firmware after each connect), then in the background: declare it now (no motion), ask a live
+    // unattended run to replan, and rebuild planner.json so the page shows the new plan.
+    WebReply webPost(const QString& path, const QUrlQuery& q)
+    {
+        WebReply r; r.type = "application/json";
+        if (path != "/filter") { r.status = 404; r.body = "{\"ok\":false,\"error\":\"no such setting\"}\n"; return r; }
+        const QString name = q.queryItemValue("name");
+        if (name != "clear" && name != "nebula") { r.status = 400; r.body = "{\"ok\":false,\"error\":\"name must be clear or nebula\"}\n"; return r; }
+        const QString cfg = QDir::homePath() + "/.config/origin"; QDir().mkpath(cfg);
+        QSaveFile f(cfg + "/filter");
+        if (!f.open(QIODevice::WriteOnly) || f.write(name.toUtf8() + "\n") < 0 || !f.commit()) { r.status = 500; r.body = "{\"ok\":false,\"error\":\"cannot write the filter file\"}\n"; return r; }
+        fprintf(stderr, "%s filter set to %s from the web page\n", qPrintable(QDateTime::currentDateTime().toString(Qt::ISODate)), qPrintable(name));
+        const QString root = QDir(QCoreApplication::applicationDirPath() + "/../../..").canonicalPath();     // build/watch/build -> the checkout
+        const QString oh = root + "/build/headless/build/OriginHeadless";
+        const QString sh = QString("cd '%1' && { '%2' filter %3; python3 tools/run_control.py send replan; python3 tools/planner_data.py; } >> \"$HOME/.cache/origin-planner.log\" 2>&1").arg(root, oh, name);
+        QProcess::startDetached("/bin/sh", {"-c", sh});
+        r.body = QString("{\"ok\":true,\"filter\":\"%1\",\"note\":\"saved; the plan is being rebuilt (about 30 s)\"}\n").arg(name).toUtf8();
+        return r;
     }
     WebReply web(const QString& path, const QUrlQuery& q)
     {
@@ -727,6 +749,7 @@ int main(int argc, char* argv[])
     if (webPort > 0) {
         QString token; if (!tokenFile.isEmpty()) { QFile tf(tokenFile); if (tf.open(QIODevice::ReadOnly)) token = QString::fromUtf8(tf.readAll()).trimmed(); else { fprintf(stderr, "cannot read %s\n", qPrintable(tokenFile)); return 2; } }
         web = new WebServer([&w](const QString& p, const QUrlQuery& q) { return w.web(p, q); }, token, &app);
+        web->setPostHandler([&w](const QString& p, const QUrlQuery& q) { return w.webPost(p, q); });
         QString err;
         if (!web->start(quint16(webPort), cert, key, bind.isEmpty() ? QHostAddress(QHostAddress::Any) : QHostAddress(bind), &err)) { fprintf(stderr, "web server: %s\n", qPrintable(err)); return 2; }
         fprintf(stderr, "OriginWatch web view on %s://*:%d/ (private networks only%s)\n", web->tls() ? "https" : "http", webPort, token.isEmpty() ? "" : ", token required");
