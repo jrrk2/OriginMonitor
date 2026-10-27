@@ -30,10 +30,10 @@ export ORIGIN_WEB_PIDFILE := $(WPID)
 UNITDIR := $(HOME)/.config/systemd/user
 DUNIT   := origin-daemon.service
 WUNIT   := origin-watch-web.service
-# systemctl --user needs these; a desktop terminal has them, cron and ssh shells often do not (without the bus address it fell back to a socket that failed intermittently)
-export XDG_RUNTIME_DIR ?= /run/user/$(shell id -u)
-export DBUS_SESSION_BUS_ADDRESS ?= unix:path=$(XDG_RUNTIME_DIR)/bus
-SCTL    := systemctl --user
+# systemctl --user talks to the user manager on $XDG_RUNTIME_DIR/bus. Name that bus explicitly: cron and ssh shells often have no XDG_RUNTIME_DIR, and a shell
+# under dbus-launch has DBUS_SESSION_BUS_ADDRESS pointing at a separate bus without systemd ("Process org.freedesktop.systemd1 exited with status 1").
+RUNDIR  := $(or $(XDG_RUNTIME_DIR),/run/user/$(shell id -u))
+SCTL    := env XDG_RUNTIME_DIR=$(RUNDIR) DBUS_SESSION_BUS_ADDRESS=unix:path=$(RUNDIR)/bus systemctl --user
 enabled  = $(SCTL) is-enabled -q $(1) 2>/dev/null
 
 # The daemon in the foreground (Type=simple); SIGTERM from systemctl stop saves the live stack. Before it starts: wait up to 3 minutes for the data
