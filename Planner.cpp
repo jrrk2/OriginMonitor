@@ -79,7 +79,7 @@ void applyNovelty(QList<Target>& targets)
 }
 
 // Narrowband filter (~/.config/origin/filter = "nebula": the hand-fitted Antlia quad-band passes H-alpha, H-beta, OIII and SII and blocks most moonlight and continuum).
-// Emission targets keep their priority and feel the Moon half as much; everything else (clusters, reflection nebulae, galaxies with little H-alpha) loses kFilterPenalty.
+// Emission targets keep their priority; everything else (clusters, reflection nebulae, galaxies with little H-alpha) loses kFilterPenalty.
 const int kFilterPenalty = 5;
 bool emissionTarget(const QString& id)
 {
@@ -104,6 +104,23 @@ void applyFilter(QList<Target>& targets)
         if (t.boosted || emissionTarget(catalogId(t.key.isEmpty() ? t.name : t.key))) continue;
         t.prio = std::max(1, t.prio - kFilterPenalty); t.seen += t.seen.isEmpty() ? "no emission (filter)" : "; no emission (filter)";
     }
+}
+
+// Size: prefer targets that fill a good part of the field (75' x 50' at 1.48"/px, 3056 x 2048 px). Priority change by the major axis in arcmin, linear in log size
+// between these points: 1' (40 px) -3, 3' (120 px) -2, 6' (240 px) 0, 12' to 60' (500-2400 px) +2, 100' (larger than the field) +1, 200' 0. Unknown size: 0.
+double sizeAdjust(double arcmin)
+{
+    static const double pts[][2] = {{1, -3}, {3, -2}, {6, 0}, {12, 2}, {60, 2}, {100, 1}, {200, 0}};
+    if (!(arcmin > 0)) return 0;
+    const double x = std::log(arcmin);
+    if (x <= std::log(pts[0][0])) return pts[0][1];
+    for (size_t i = 1; i < std::size(pts); ++i)
+        if (x <= std::log(pts[i][0])) { const double f = (x - std::log(pts[i - 1][0])) / (std::log(pts[i][0]) - std::log(pts[i - 1][0])); return pts[i - 1][1] + f * (pts[i][1] - pts[i - 1][1]); }
+    return pts[std::size(pts) - 1][1];
+}
+void applySize(QList<Target>& targets)
+{
+    for (Target& t : targets) if (!t.boosted) t.prio = std::max(1, int(std::lround(t.prio + sizeAdjust(t.size))));
 }
 
 // Integrated visual magnitudes of the Messier objects (the catalogue's own "magnitude" field is the central star's, e.g. 14.1 for M27, so it cannot give a surface brightness)
@@ -148,6 +165,7 @@ QList<Target> loadTargets()
     for (const E& e : extras) { Target t; t.name = t.key = e.n; t.ra = e.ra; t.dec = e.dec; t.size = e.size; t.prio = e.p; t.faint = e.f; t.type = "EXTRA"; out.append(t); }
     applyNovelty(out);
     applyFilter(out);
+    applySize(out);
     return out;
 }
 
@@ -224,8 +242,7 @@ double moonFit(double faint, const QVector<double>& glow, int i, int m)
 double moonAdjust(const struct Target& t, const QVector<double>& glow, int i, int m)
 {
     if (t.boosted) return 0.0;
-    const double w = t.narrowband && emissionTarget(catalogId(t.key.isEmpty() ? t.name : t.key)) ? 0.5 : 1.0;   // the filter blocks most moonlight for emission targets
-    return w * kMoonWeight * (moonFit(t.faint, glow, i, m) - 0.5);
+    return kMoonWeight * (moonFit(t.faint, glow, i, m) - 0.5);          // full weight even under the nebula filter: faint nebulae still suffer at full moon
 }
 
 struct Row {
@@ -303,7 +320,8 @@ QJsonObject schedule(const Options& o)
             r.alt[i] = aa.alt; r.az[i] = aa.az;
             const double sep = Astro::separationDeg({tg.ra, tg.dec}, moonEq[i]);
             // sky brightening by the Moon on this target: illumination, how high the Moon is, and how close it is to the target (0 none .. 1 strong)
-            r.glow[i] = std::clamp(illum[i] * std::max(0.0, std::sin(moonAlt[i] * kPi / 180)) * (1.5 - std::min(sep, 90.0) / 90.0), 0.0, 1.0);
+            // a bright Moon lights the whole sky: full strength once it is 30 deg up, wherever the target is; closeness adds the rest (x0.7 at 90 deg or more, x1 next to it)
+            r.glow[i] = std::clamp(illum[i] * std::min(1.0, std::max(0.0, std::sin(moonAlt[i] * kPi / 180)) / 0.5) * (1.0 - 0.3 * std::min(sep, 90.0) / 90.0), 0.0, 1.0);
             r.ok[i] = dark[i] && aa.alt > hz.minAlt(aa.az) && (sep > o.moonSep || moonAlt[i] < -2) && wq[i] >= o.minQuality;
             any |= r.ok[i];
         }
