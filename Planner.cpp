@@ -1,6 +1,7 @@
 #include "Planner.hpp"
 #include <QRegularExpression>
 #include <QHash>
+#include <QSet>
 #include "Ephemeris.hpp"
 #include "MessierCatalog.hpp"
 
@@ -32,7 +33,7 @@ const QHash<QString, int>& priorities()
     return p;
 }
 
-struct Target { QString name, key, type, seen; double ra = 0, dec = 0, size = 0; int prio = 3; double faint = 0.5; bool boosted = false; };   // faint: 0 = bright (high surface brightness: clusters, compact nebulae), 1 = faint (extended nebulae)
+struct Target { QString name, key, type, seen; double ra = 0, dec = 0, size = 0; int prio = 3; double faint = 0.5; bool boosted = false, narrowband = false; };   // faint: 0 = bright (high surface brightness: clusters, compact nebulae), 1 = faint (extended nebulae)
 
 QMap<QString, int> g_boost;   // catalogue id -> priority added (the user's wish list, e.g. M1 +5)
 QString g_stacksDir;          // where the live stacks of earlier nights are kept; empty = no novelty preference
@@ -46,19 +47,22 @@ QString catalogId(const QString& s)
     return m.hasMatch() ? m.captured(1).toUpper() + m.captured(2) : QString();
 }
 
-// Novelty: the user prefers targets not imaged before. A target with a saved stack is worth less, the more recently it was imaged; a new one is worth more.
-//   never imaged: +4   imaged over 30 days ago: +0   within 30 days: -4   within 3 days: -5   (priority never below 1)
+// Novelty: the user prefers new material and targets with too little of it. Enough depends on surface brightness: 15 min for the brightest (faintness 0: clusters,
+// compact planetaries) up to an hour for the faintest extended nebulae (faintness 1), linear between. A target's coverage is the exposure of all its stacks added up;
+// copies are left out (names with "_final_" or "backup", or ending in a _YYYYMMDD_HHMMSS timestamp: saved before a reset or a backup, not new data).
+//   under its need (or never imaged): +4   enough, last imaged over 30 days ago: +0   within 30 days: -4   within 3 days: -5   (priority never below 1)
 void applyNovelty(QList<Target>& targets)
 {
-    QHash<QString, QDateTime> last;
+    static const QRegularExpression copy("_final_|backup|_\\d{8}_\\d{6}$", QRegularExpression::CaseInsensitiveOption);
+    QHash<QString, QDateTime> last; QHash<QString, double> covered;
     if (g_stacksDir.isEmpty()) { for (Target& t : targets) { const QString id = catalogId(t.key.isEmpty() ? t.name : t.key); if (g_boost.contains(id)) { t.prio += g_boost[id]; t.boosted = true; } } return; }
     for (const QFileInfo& d : QDir(g_stacksDir).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
-        const QString id = catalogId(d.fileName()); if (id.isEmpty()) continue;
-        // only a real stack counts as "imaged": at least 30 minutes of exposure (state.bin: magic, width, height, frames as 32-bit ints, then the total exposure as a double).
-        // A directory with a few frames (a pointing test, a probe on the way past, a night cut short: M1 on 2026-10-12 had 828 s) must not demote a target.
+        const QString id = catalogId(d.fileName()); if (id.isEmpty() || copy.match(d.fileName()).hasMatch()) continue;
+        // state.bin: magic, width, height, frames as 32-bit ints, then the total exposure as a double
         QFile sf(d.absoluteFilePath() + "/state.bin"); double exposureS = 0;
         if (sf.open(QIODevice::ReadOnly)) { const QByteArray h = sf.read(24); if (h.size() == 24) memcpy(&exposureS, h.constData() + 16, 8); }
-        if (!(exposureS >= 1800.0)) continue;
+        if (!(exposureS > 0)) continue;
+        covered[id] += exposureS;
         if (!last.contains(id) || d.lastModified() > last[id]) last[id] = d.lastModified();
     }
     const QDateTime now = QDateTime::currentDateTime();
@@ -66,9 +70,39 @@ void applyNovelty(QList<Target>& targets)
         const QString id = catalogId(t.key.isEmpty() ? t.name : t.key);
         if (g_boost.contains(id)) { t.prio += g_boost[id]; t.boosted = true; }   // the user's own priority boost: it wins whenever the target is observable (and the Moon does not adjust it)
         if (id.isEmpty() || !last.contains(id)) { t.prio += 4; t.seen = "new"; continue; }
+        const double need = 900.0 + 2700.0 * std::clamp(t.faint, 0.0, 1.0);
+        if (covered[id] < need) { t.prio += 4; t.seen = QString("%1 of %2 min").arg(covered[id] / 60, 0, 'f', 0).arg(need / 60, 0, 'f', 0); continue; }   // under-covered counts as new
         const double days = last[id].secsTo(now) / 86400.0;
         t.seen = QString("imaged %1 days ago").arg(days, 0, 'f', days < 10 ? 1 : 0);
         t.prio = std::max(1, t.prio + (days < 3 ? -5 : days < 30 ? -4 : 0));
+    }
+}
+
+// Narrowband filter (~/.config/origin/filter = "nebula": the hand-fitted Antlia quad-band passes H-alpha, H-beta, OIII and SII and blocks most moonlight and continuum).
+// Emission targets keep their priority and feel the Moon half as much; everything else (clusters, reflection nebulae, galaxies with little H-alpha) loses kFilterPenalty.
+const int kFilterPenalty = 5;
+bool emissionTarget(const QString& id)
+{
+    static const QSet<QString> ids = {
+        // H II regions, supernova remnants and planetaries
+        "M1", "M8", "M16", "M17", "M20", "M27", "M42", "M43", "M57", "M76", "M97", "NGC7000", "IC5070", "VEIL", "IC1805", "IC1848", "NGC281", "IC1396", "NGC7380",
+        "NGC7293", "NGC1499", "NGC2244", "NGC7662", "NGC7822", "NGC6888", "NGC2264", "IC434", "IC405", "NGC2174",
+        // galaxies with significant H-alpha: starburst winds and big H II regions
+        "M82", "M33", "M51", "M101", "M106", "M83", "NGC6946"};
+    return ids.contains(id);
+}
+bool narrowbandFilter()
+{
+    QFile f(QDir::homePath() + "/.config/origin/filter");
+    return f.open(QIODevice::ReadOnly) && f.readAll().trimmed().toLower() == "nebula";
+}
+void applyFilter(QList<Target>& targets)
+{
+    if (!narrowbandFilter()) return;
+    for (Target& t : targets) {
+        t.narrowband = true;
+        if (t.boosted || emissionTarget(catalogId(t.key.isEmpty() ? t.name : t.key))) continue;
+        t.prio = std::max(1, t.prio - kFilterPenalty); t.seen += t.seen.isEmpty() ? "no emission (filter)" : "; no emission (filter)";
     }
 }
 
@@ -113,6 +147,7 @@ QList<Target> loadTargets()
         {"IC 434 Horsehead / NGC 2024 Flame", 5.6833, -2.4, 90, 8, 0.9}, {"NGC 1333", 3.4, 31.4, 10, 4, 0.6}, {"NGC 7789 Caroline's Rose", 23.95, 56.7, 15, 4, 0.0}};
     for (const E& e : extras) { Target t; t.name = t.key = e.n; t.ra = e.ra; t.dec = e.dec; t.size = e.size; t.prio = e.p; t.faint = e.f; t.type = "EXTRA"; out.append(t); }
     applyNovelty(out);
+    applyFilter(out);
     return out;
 }
 
@@ -186,7 +221,12 @@ double moonFit(double faint, const QVector<double>& glow, int i, int m)
 }
 
 // the priority change for the Moon, none for a target the user boosted
-double moonAdjust(const struct Target& t, const QVector<double>& glow, int i, int m) { return t.boosted ? 0.0 : kMoonWeight * (moonFit(t.faint, glow, i, m) - 0.5); }
+double moonAdjust(const struct Target& t, const QVector<double>& glow, int i, int m)
+{
+    if (t.boosted) return 0.0;
+    const double w = t.narrowband && emissionTarget(catalogId(t.key.isEmpty() ? t.name : t.key)) ? 0.5 : 1.0;   // the filter blocks most moonlight for emission targets
+    return w * kMoonWeight * (moonFit(t.faint, glow, i, m) - 0.5);
+}
 
 struct Row {
     Target t; QVector<bool> ok; QVector<double> alt, az, glow; int i0 = 0, i1 = 0, peak = 0; double mins = 0, score = 0;

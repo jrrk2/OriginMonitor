@@ -73,7 +73,7 @@ QList<Arg> plannerArgs()
             O("step", 'd', "time step, minutes", "5"), O("sky-map", 'b', "also use the obstruction bins learned in <data dir>/sky_map.json"),
             O("lat", 'd', "site latitude, deg north", "52.2054"), O("lon", 'd', "site longitude, deg east", "0.1218"), O("top", 'i', "targets to list", "25"), O("text", 'b', "human-readable table instead of JSON"),
             O("boost", 's', "priority boosts, e.g. M1=5,M31=2 (added to ~/.config/origin/target_boost.json); a boosted target wins whenever it is observable"),
-            O("novelty", 'o', "on|off prefer targets not imaged before: a target with a saved stack in <data dir>/stacks loses priority (-4, or -5 within 3 days), a new one gains +4", "on"),
+            O("novelty", 'o', "on|off prefer new and under-covered targets: less stacked exposure in <data dir>/stacks than its surface brightness needs (15 min for clusters up to 60 min for the faintest nebulae; sessions added up, copies left out) gains +4, more than that loses priority if imaged recently (-4 within 30 days, -5 within 3)", "on"),
             O("weather", 'o', "on|off drop hours the Open-Meteo forecast calls cloudy, wet or foggy (cached 1 h in the data dir; ignored if the request fails)", "on"),
             O("min-quality", 'd', "forecast quality 0..1 below which an hour is unobservable", "0.5")};
 }
