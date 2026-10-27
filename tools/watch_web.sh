@@ -3,10 +3,10 @@
 #   tools/watch_web.sh start|stop|restart|status
 # Default: plain HTTP on 127.0.0.1:8480 for nginx to proxy (contrib/nginx/origin-watch.conf; phone address https://origin.kimmitt.uk/?t=TOKEN, then a cookie).
 # Direct HTTPS instead (no nginx): ORIGIN_WEB_TLS=1 serves https on all addresses at port $ORIGIN_WEB_PORT (default 8443) with ~/.config/origin/web/{fullchain,key}.pem.
-# Access token: ~/.config/origin/web.token.
+# Access token: ~/.config/origin/web.token. ORIGIN_WEB_PIDFILE moves the pidfile (default ~/.cache/origin-watch-web.pid).
 # For cron (starts it when it is not running):   */10 * * * * ~/OriginMonitor/tools/watch_web.sh start >/dev/null 2>&1
 HERE="$(cd "$(dirname "$0")/.." && pwd)"; BIN="$HERE/build/watch/build/OriginWatch"
-CFG="$HOME/.config/origin"; PIDF="$HOME/.cache/origin-watch-web.pid"; LOG="$HOME/.cache/origin-watch-web.log"; PORT="${ORIGIN_WEB_PORT:-8480}"; [ -n "$ORIGIN_WEB_TLS" ] && PORT="${ORIGIN_WEB_PORT:-8443}"
+CFG="$HOME/.config/origin"; PIDF="${ORIGIN_WEB_PIDFILE:-$HOME/.cache/origin-watch-web.pid}"; LOG="$HOME/.cache/origin-watch-web.log"; PORT="${ORIGIN_WEB_PORT:-8480}"; [ -n "$ORIGIN_WEB_TLS" ] && PORT="${ORIGIN_WEB_PORT:-8443}"
 alive() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
 case "$1" in
   start)
