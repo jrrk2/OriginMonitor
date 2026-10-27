@@ -437,7 +437,7 @@ Broken cloud; the unattended supervisor ran the night while I fixed what it show
 mkdir -p build/headless && cd build/headless && qmake6 ../../OriginHeadless.pro && make
 B=build/OriginHeadless
 $B serve --connect 192.168.1.195                       # foreground
-$B serve --connect 192.168.1.195 --daemon --pidfile /run/user/1000/oh.pid --log-file ~/originheadless.log
+$B serve --connect 192.168.1.195 --daemon --pidfile /run/user/$(id -u)/oh.pid --log-file ~/originheadless.log
 $B status | $B mount | $B goto 1.78 61.23 | $B schedule --text | $B now | $B go M31 | $B park
 $B commands                                            # machine-readable catalogue (arguments, which commands move hardware)
 ```
