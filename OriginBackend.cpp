@@ -1255,7 +1255,10 @@ void OriginBackend::setCameraConnected(bool connected)
 // focus_log.csv next to the snapshots and announced by focusEvaluated(). The decision what to do about it is left to the caller.
 void OriginBackend::evaluateSnapshotFocus(const QString& filePath, const QByteArray& imageData, double ra, double dec, double exposure)
 {
-    QJsonObject o = m_sky.process(imageData, exposure, m_currentISO, ra, dec, QDateTime::currentDateTimeUtc());
+    // the frame's own ISO (header ISOSPEED), not the last one the camera confirmed: the stack's transparency is normalised by it
+    const double hIso = fitsHeaderNumber(imageData, "ISOSPEED");
+    const int iso = std::isfinite(hIso) && hIso > 0 ? int(hIso + 0.5) : m_currentISO;
+    QJsonObject o = m_sky.process(imageData, exposure, iso, ra, dec, QDateTime::currentDateTimeUtc());
     o["file"] = filePath; o["ra_rad"] = ra; o["dec_rad"] = dec;
     m_focusHistory.append(o);
     while (m_focusHistory.size() > 500) m_focusHistory.removeFirst();

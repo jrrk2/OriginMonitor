@@ -229,11 +229,11 @@ static Image16 vlStretchToImage(std::vector<float> col[3], int w, int h)
 
 void LiveStacker::reset()
 {
-    m_w = m_h = m_frames = 0; m_totalExposure = m_refExposure = m_bestRaw = 0; m_recentRaw.clear(); m_haveLast = false; m_refStars.clear();
+    m_w = m_h = m_frames = m_refIso = 0; m_totalExposure = m_refExposure = m_bestRaw = 0; m_recentRaw.clear(); m_haveLast = false; m_refStars.clear();
     for (int c = 0; c < 3; ++c) { m_sx[c].clear(); m_sx2[c].clear(); m_sw[c].clear(); }
 }
 
-LiveStacker::Report LiveStacker::registerFrame(const SkyFrame& f, double exposureS, Similarity* Tout) const
+LiveStacker::Report LiveStacker::registerFrame(const SkyFrame& f, double exposureS, int iso, Similarity* Tout) const
 {
     Report rep;
     if (!f.valid) { rep.reason = "unreadable frame"; return rep; }
@@ -243,16 +243,25 @@ LiveStacker::Report LiveStacker::registerFrame(const SkyFrame& f, double exposur
     rep.inliers = rr.inliers; rep.rms = rr.rms;
     if (!rr.ok) { rep.reason = "no star-pattern match"; return rep; }
     rep.rotationDeg = rr.T.rotationDeg(); rep.shiftPx = std::hypot(rr.T.tx, rr.T.ty);
-    // Transparency: exposure-normalised flux of matched stars relative to the reference's
+    // Transparency: flux of matched stars per second and per unit of ISO gain, relative to the reference's. Without the ISO term a frame at ISO 200 against an ISO 800 reference read
+    // transparency 0.25 on a clear sky, and the supervisor's ISO fallback turned every frame "cloudy" (2026-10-27 21:00)
+    const double expGain = exposureS * isoScale(iso);
     std::vector<double> ratios; int found = 0, brightest = 0;
     for (const SkyStar& r : m_refStars) {
         if (++brightest > 60) break;
         const SkyStar* hit = nullptr; double bd = 2.5;
         for (const SkyStar& t : f.stars) { double x, y; rr.T.apply(t.x, t.y, x, y); const double d = std::hypot(r.x - x, r.y - y); if (d < bd) { bd = d; hit = &t; } }
-        if (hit && r.flux > 0) { ++found; ratios.push_back((hit->flux / exposureS) / (r.flux / m_refExposure)); }
+        if (hit && r.flux > 0) { ++found; ratios.push_back((hit->flux / expGain) / (r.flux / m_refExposure)); }
     }
     rep.matchedFraction = brightest ? double(found) / std::min<int>(60, int(m_refStars.size())) : 0;
-    for (const SkyStar& r : m_refStars) {                    // per-tile expectation, all reference stars
+    // per-tile expectation: the reference stars that fall inside this frame. After a fresh goto the field can be shifted and rotated against the reference (2026-10-27: 346 px, 22 deg on the Heart);
+    // stars outside the frame cannot be seen, and counting them made two corner tiles look empty, "patchy" on a clear sky, which set off the run's ISO fallback
+    const double c2 = rr.T.a * rr.T.a + rr.T.b * rr.T.b;
+    for (const SkyStar& r : m_refStars) {
+        if (c2 > 0) {
+            const double qx = r.x - rr.T.tx, qy = r.y - rr.T.ty, fx = (rr.T.a * qx + rr.T.b * qy) / c2, fy = (-rr.T.b * qx + rr.T.a * qy) / c2;
+            if (fx < 8 || fy < 8 || fx >= f.width - 8 || fy >= f.height - 8) continue;
+        }
         const int tx = std::clamp(int(r.x * Report::kTilesX / m_w), 0, Report::kTilesX - 1), ty = std::clamp(int(r.y * Report::kTilesY / m_h), 0, Report::kTilesY - 1);
         ++rep.tileExpected[ty * Report::kTilesX + tx];
         for (const SkyStar& t : f.stars) { double x, y; rr.T.apply(t.x, t.y, x, y); if (std::hypot(r.x - x, r.y - y) < 2.5) { ++rep.tileFound[ty * Report::kTilesX + tx]; break; } }
@@ -263,15 +272,15 @@ LiveStacker::Report LiveStacker::registerFrame(const SkyFrame& f, double exposur
     return rep;
 }
 
-LiveStacker::Report LiveStacker::assess(const SkyFrame& f, double exposureS) const
+LiveStacker::Report LiveStacker::assess(const SkyFrame& f, double exposureS, int iso) const
 {
-    Report r = registerFrame(f, exposureS, nullptr);
+    Report r = registerFrame(f, exposureS, iso, nullptr);
     if (r.accepted && m_bestRaw > 0) r.transparency = r.rawTransparency / std::max(m_bestRaw, r.rawTransparency);
     r.frames = m_frames;
     return r;
 }
 
-LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double minTransparency)
+LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double minTransparency, int iso)
 {
     Report rep;
     if (!f.valid) { rep.reason = "unreadable frame"; return rep; }
@@ -282,7 +291,7 @@ LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double
 
     if (m_frames == 0) {                                           // first frame defines the grid and the reference stars
         if (f.stars.size() < 12) { rep.reason = "too few stars for a reference"; return rep; }
-        m_w = w; m_h = h; m_refExposure = exposureS;
+        m_w = w; m_h = h; m_refExposure = exposureS; m_refIso = std::max(0, iso);
         m_refStars.assign(f.stars.begin(), f.stars.begin() + std::min<size_t>(f.stars.size(), 150));
         for (int c = 0; c < 3; ++c) { m_sx[c].assign(size_t(w) * h, 0.0); m_sx2[c].assign(size_t(w) * h, 0.0); m_sw[c].assign(size_t(w) * h, 0.0); }
         T = Similarity();
@@ -307,13 +316,13 @@ LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double
         }
         if (gr.size() >= 8) { m_wbR = medianOf(gr); m_wbB = medianOf(gb); }
     } else {
-        rep = registerFrame(f, exposureS, &T);
+        rep = registerFrame(f, exposureS, iso, &T);
         if (!rep.accepted) { rep.frames = m_frames; return rep; }
         if (rep.rawTransparency <= 0) { rep.accepted = false; rep.reason = "stars too faint to measure transparency"; rep.frames = m_frames; return rep; }
         m_bestRaw = std::max(m_bestRaw, rep.rawTransparency);
         rep.transparency = rep.rawTransparency / m_bestRaw;
         if (rep.transparency < minTransparency) { rep.accepted = false; rep.reason = QString("transparency %1 below %2").arg(rep.transparency, 0, 'f', 2).arg(minTransparency); rep.frames = m_frames; return rep; }
-        scaleFactor = m_refExposure / (exposureS * rep.rawTransparency);
+        scaleFactor = m_refExposure / (exposureS * isoScale(iso) * rep.rawTransparency);
         m_last = T; m_haveLast = true;
     }
 
@@ -376,7 +385,7 @@ Image16 LiveStacker::preview() const
 
 QJsonObject LiveStacker::summary() const
 {
-    return QJsonObject{{"frames", m_frames}, {"total_exposure_s", m_totalExposure}, {"width", m_w}, {"height", m_h}, {"best_raw_transparency", m_bestRaw}};
+    return QJsonObject{{"frames", m_frames}, {"total_exposure_s", m_totalExposure}, {"width", m_w}, {"height", m_h}, {"best_raw_transparency", m_bestRaw}, {"reference_iso", m_refIso}};
 }
 
 namespace {
@@ -389,8 +398,8 @@ bool LiveStacker::save(const QString& dir) const
     if (m_frames == 0) return false;
     QDir().mkpath(dir);
     QByteArray b; b.reserve(qsizetype(m_w) * m_h * 3 * 3 * 4 + 4096);
-    put(b, quint32(0x4C535431));                                     // "LST1"
-    put(b, qint32(m_w)); put(b, qint32(m_h)); put(b, qint32(m_frames));
+    put(b, quint32(0x4C535432));                                     // "LST2": LST1 plus the reference ISO
+    put(b, qint32(m_w)); put(b, qint32(m_h)); put(b, qint32(m_frames)); put(b, qint32(m_refIso));
     put(b, m_totalExposure); put(b, m_refExposure); put(b, m_bestRaw); put(b, m_wbR); put(b, m_wbB);
     put(b, qint32(m_refStars.size())); for (const SkyStar& s : m_refStars) { put(b, s.x); put(b, s.y); put(b, s.flux); put(b, s.peak); put(b, s.hfr); put(b, s.sigma); put(b, qint8(s.isolated)); }
     for (int c = 0; c < 3; ++c) for (size_t i = 0; i < m_sw[c].size(); ++i) { put(b, float(m_sx[c][i])); put(b, float(m_sx2[c][i])); put(b, float(m_sw[c][i])); }
@@ -409,7 +418,11 @@ bool LiveStacker::load(const QString& dir)
     const QByteArray b = f.readAll(); qsizetype pos = 0;
     quint32 magic = 0; qint32 w = 0, h = 0, n = 0, ns = 0;
     LiveStacker t;
-    if (!get(b, pos, magic) || magic != 0x4C535431 || !get(b, pos, w) || !get(b, pos, h) || !get(b, pos, n)) return false;
+    if (!get(b, pos, magic) || (magic != 0x4C535431 && magic != 0x4C535432) || !get(b, pos, w) || !get(b, pos, h) || !get(b, pos, n)) return false;
+    // LST1 (before 2026-10-28) had no ISO: those stacks were seeded at ISO 800, the run's ISO (frames from the ISO-200 fallback all read cloudy and were never stacked)
+    qint32 refIso = 800;
+    if (magic == 0x4C535432 && !get(b, pos, refIso)) return false;
+    t.m_refIso = std::max(0, int(refIso));
     if (w <= 0 || h <= 0 || w > 8000 || h > 8000) return false;
     if (!get(b, pos, t.m_totalExposure) || !get(b, pos, t.m_refExposure) || !get(b, pos, t.m_bestRaw) || !get(b, pos, t.m_wbR) || !get(b, pos, t.m_wbB) || !get(b, pos, ns) || ns < 0 || ns > 10000) return false;
     for (qint32 i = 0; i < ns; ++i) { SkyStar s; qint8 iso = 0; if (!get(b, pos, s.x) || !get(b, pos, s.y) || !get(b, pos, s.flux) || !get(b, pos, s.peak) || !get(b, pos, s.hfr) || !get(b, pos, s.sigma) || !get(b, pos, iso)) return false; s.isolated = iso; t.m_refStars.push_back(s); }
