@@ -5,6 +5,8 @@
 #include <QTcpSocket>
 #include <QJsonObject>
 #include <QHash>
+#include <QTimer>
+#include <QDateTime>
 
 class OriginBackend;
 class Sequencer;
@@ -16,7 +18,8 @@ class Sequencer;
  * Reply:    {"ok": true, ...}\n   or   {"ok": false, "error": "..."}\n
  *
  * Commands: ping, connect, status, manual, auto, set, snapshot, mount_status, goto,
- *           focus_status, analysis, events, target, stack, sky_map, monitor, focuser_status, focuser_move, focuser_settings, filter, send (only with allowRaw), quit.
+ *           focus_status, analysis, events, target, stack, sky_map, monitor, focuser_status, focuser_move, focuser_settings, filter, reboot, send (only with allowRaw), quit.
+ * A telescope link that drops without being asked to (the telescope rebooting, Wi-Fi) is reconnected by the server itself: first after 5 s, then every 15 s, every 60 s after 5 minutes.
  * Many clients (AI sessions, scripts) may be connected at once. Read-only queries are answered from a short-lived cache (status 2 s, focus/analysis 1 s,
  * sky map 30 s ...) so polling clients do not each hit the telescope; the reply then carries "cached":true and "age_ms". Any other command (goto, set,
  * snapshot, ...) clears the cache. Add "fresh":true to a request to bypass it. {"cmd":"cache"} reports hit statistics, {"cmd":"cache","clear":true} flushes.
@@ -56,6 +59,7 @@ private:
     static QJsonObject frameStats(const QString& path, double exposureS, int bins, double maxExposureS, double targetAdu = 6000.0);
     double tiltAltitude(double* ageSec) const;                  // OrientationSensor altitude (deg, whole degrees) and the age of that reading
     QJsonObject queryTaskController(int timeoutMs = 3000);
+    void tryReconnect();                                        // one attempt to reopen the lost telescope link; reschedules itself while it fails
     static QJsonObject fail(const QString& message);
 
     struct CacheEntry { QJsonObject reply; qint64 atMs = 0; };
@@ -77,4 +81,9 @@ private:
     void recordSolve(const QJsonObject& r);
     int m_focuserLower = 1975;                  // travel limits, updated from telescope status
     int m_focuserUpper = 37527;
+    QTimer m_reconnect;                         // single-shot: the next reconnect attempt
+    bool m_wantLink = false;                    // the link was up and nobody asked for it to be closed
+    bool m_reconnecting = false;                // tryReconnect() is waiting for the socket (a nested event loop)
+    QDateTime m_linkLost;                       // when the link dropped
+    int m_reconnectTries = 0;
 };

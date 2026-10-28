@@ -144,6 +144,8 @@ const QList<Cmd>& commands()
              {P("name", 's', "clear | nebula (default: just read)", false)});
         pass("cancel-capture", "action", "Cancel a capture the camera never finished (CancelImaging) and wait for the TaskController to leave SAMPLE_CAPTURE. Refuses while a sequence runs. No motion.", "cancel_capture",
              {O("wait", 'i', "seconds to wait for the telescope to report the capture ended", "20"), O("command", 's', "CancelImaging or AbortAll", "CancelImaging"), O("destination", 's', "TaskController, MountTaskController, Camera, ImageServer or System", "TaskController")}, true);
+        pass("reboot", "action", "Reboot the telescope (Reboot to System): the recovery for a camera stuck in a capture. Accepted even mid-exposure; the telescope is off the network for about 25 s, the server reconnects by itself, and the mount comes back NOT aligned (initialize again). Refuses while a sequence runs.", "reboot",
+             {O("reason", 's', "recorded in the event log", "requested")}, true);
         pass("send", "action", "Raw telescope command (server must run with --control-raw).", "send",
              {P("command", 's', "command name"), P("destination", 's', "destination, e.g. Camera"), O("params", 'j', "JSON object of parameters", "{}"), O("timeout", 'i', "seconds", "10")}, true);
         // --- orchestrated
@@ -775,7 +777,8 @@ QJsonObject cmdFocusSweep(const Parsed& p, const Cmd& c)
 //                                          after --give-up minutes of cloud on one block, move on to the next block
 //   focus drift                         -> narrow focus sweep (at most every 20 min), apply the best position, resume
 //   rain forecast within the hour       -> stop, park, end the night
-//   sequence/connection failure         -> reconnect and restart (3 tries), then park
+//   sequence/connection failure         -> wait for the server's own reconnect (else connect), restart the sequence (6 restarts), then park
+//   camera stuck in a capture           -> cancel twice; still stuck: reboot the telescope, wait for the link, initialize, go back to the target, resume (twice a night)
 //   a request from OriginWatch's Tasks tab -> see "run control" below (override the target, end the override, replan, stop)
 // Every decision is logged to stderr and to <data dir>/run_<date>.jsonl. The night ends parked on Polaris.
 // ---------------------------------------------------------------------------------------------------------------------------------------
@@ -784,7 +787,7 @@ struct RunState {
     double maxExposure = 20, ceiling = 20; int iso = 800; double patienceMin = 10, giveUpMin = 60; QString host;   // ceiling: this block's longest exposure before field rotation (the sequencer's auto exposure works under it)
     bool isoFallbackDone = false, rain = false;
     QDateTime lastRefocus, lastForecast; QStringList tried;
-    int switches = 0, refocuses = 0, restarts = 0, blocksDone = 0;
+    int switches = 0, refocuses = 0, restarts = 0, blocksDone = 0, reboots = 0;
     QString logPath; QJsonArray decisions;
     Parsed args; const Cmd* cmd = nullptr;                  // the run's own options, to plan again after a schedule change
     QString night; QJsonArray plan; int block = -1;         // tonight's plan and the block being run (for run_state.json)
@@ -896,6 +899,49 @@ bool startSeq(double exposure, int iso, const QDateTime& endUtc, bool focusPause
     return r["ok"].toBool() && r["status"].toObject()["active"].toBool();
 }
 
+// the link to the telescope is up again (the server reconnects by itself after a drop); falls back to asking it to connect after `nudgeS`
+bool waitLink(int timeoutS, int nudgeS)
+{
+    QElapsedTimer t; t.start(); bool nudged = false;
+    while (t.elapsed() < timeoutS * 1000LL) {
+        if (call("status", {{"fresh", true}}, 20000)["connected"].toBool()) return true;
+        if (!nudged && t.elapsed() > nudgeS * 1000LL && !g_run.host.isEmpty()) { nudged = true; call("connect", {{"host", g_run.host}}, 60000); continue; }
+        sleepMs(5000);
+    }
+    return false;
+}
+
+// A camera that stays in SAMPLE_CAPTURE after two cancels (2026-10-28 00:53) ignores every capture until the telescope restarts; the official app has no recovery for it.
+// Reboot (System) clears it, also mid-exposure (tested 2026-10-28 12:57 idle, 13:01 during a 60 s exposure: link back in 25-45 s, camera IDLE, captures fine) but leaves the mount unaligned.
+// So: reboot, wait for the link, wait for the camera to report IDLE, initialize (it aligns on stars from wherever the tube points, so cloud can fail it), check alignment.
+// Returns "" on success, else why it failed. The caller goes back to the target. At most two per night: a camera that keeps hanging needs a person.
+QString rebootRecover(const QJsonObject& t)
+{
+    if (g_run.reboots >= 2) return "already rebooted twice tonight";
+    ++g_run.reboots;
+    const QJsonObject rb = call("reboot", {{"reason", "camera stuck in a capture"}}, 30000);
+    runLog("telescope_reboot", {{"target", t["key"]}, {"ok", rb["ok"]}, {"error", rb["error"]}, {"count", g_run.reboots}});
+    if (!rb["ok"].toBool()) return "reboot refused: " + rb["error"].toString();
+    sleepMs(15000);                                                              // the link drops at once; the telescope leaves the network for ~15-25 s
+    if (!waitLink(300, 120)) return "the telescope did not come back within 5 minutes of the reboot";
+    QString tc;
+    for (int i = 0; i < 24; ++i) {                                               // up to 2 minutes for a fresh TaskController status
+        tc = call("status", {{"fresh", true}}, 20000)["last"].toObject()["TaskController/GetStatus"].toObject()["State"].toString();
+        if (tc == "IDLE") break;
+        sleepMs(5000);
+    }
+    runLog("reboot_link_up", {{"target", t["key"]}, {"task_controller", tc}});
+    if (tc == "SAMPLE_CAPTURE") return "the camera is still in a capture after the reboot";
+    QJsonObject r;
+    for (int k = 0; k < 2; ++k) {
+        r = call("initialize", {{"lat_deg", g_run.o.site.latDeg}, {"lon_deg", g_run.o.site.lonDeg}, {"timezone", g_run.o.timeZone}, {"wait", true}, {"timeout", 300}}, 360000);
+        const bool aligned = call("mount_status", {{"fresh", true}}, 15000)["mount"].toObject()["IsAligned"].toBool();
+        runLog("reboot_initialize", {{"target", t["key"]}, {"ok", r["ok"]}, {"outcome", r["outcome"]}, {"summary", r["summary"]}, {"aligned", aligned}, {"attempt", k + 1}});
+        if (aligned) return QString();
+    }
+    return "initialize after the reboot did not align the mount: " + r["summary"].toString() + r["error"].toString();
+}
+
 enum class RunResult { Done, Failed, Rain, Stopped };
 
 RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bool isOverride = false)
@@ -958,8 +1004,14 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
             } else {
                 runLog("sequence_stopped", {{"target", t["key"]}, {"reason", why}});
                 if (++g_run.restarts > 6) return RunResult::Failed;
-                const QJsonObject stt = call("status", {}, 20000);
-                if (!stt["connected"].toBool() && !g_run.host.isEmpty()) { call("connect", {{"host", g_run.host}}, 60000); sleepMs(30000); runLog("reconnect", {{"host", g_run.host}}); }
+                const QJsonObject stt = call("status", {{"fresh", true}}, 20000);
+                if (!stt["connected"].toBool()) {
+                    // the server reconnects by itself (5 s after the drop, then every 15 s); ask it directly only if that has not worked within 90 s
+                    const bool up = waitLink(180, 90);
+                    runLog("reconnect", {{"host", g_run.host}, {"ok", up}});
+                    if (!up) return RunResult::Failed;
+                    sleepMs(10000);                                              // let the first statuses arrive before the next capture
+                }
                 else if (why == "frame never arrived") {
                     // the camera hung mid-capture with the link up (2026-10-28): it ignores new captures until cancelled. Cancel and check; a camera that stays stuck needs a power cycle
                     bool cleared = false;
@@ -968,7 +1020,14 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
                         cleared = cc["cleared"].toBool();
                         runLog("capture_cancel", {{"target", t["key"]}, {"cleared", cleared}, {"state_before", cc["state_before"]}, {"state_now", cc["state_now"]}, {"attempt", k + 1}});
                     }
-                    if (!cleared) { runLog("camera_hung", {{"target", t["key"]}, {"why", "the telescope still reports a capture in progress after two cancels: power-cycle the telescope"}}); return RunResult::Failed; }
+                    if (!cleared) {
+                        runLog("camera_hung", {{"target", t["key"]}, {"why", "the telescope still reports a capture in progress after two cancels: rebooting it"}});
+                        const QString bad = rebootRecover(t);
+                        if (!bad.isEmpty()) { runLog("reboot_recovery_failed", {{"target", t["key"]}, {"why", bad + "; power-cycle the telescope"}}); return RunResult::Failed; }
+                        r = slewTo(t, exposure, iso);
+                        runLog("reboot_recovered", {{"target", t["key"]}, {"goto_ok", r["ok"]}, {"error", r["error"]}});
+                        if (!r["ok"].toBool()) return RunResult::Failed;
+                    }
                 }
             }
             if (!startSeq(exposure, iso, endUtc, !(why == "focus drift"))) { runLog("sequence_restart_failed", {{"target", t["key"]}}); return RunResult::Failed; }
@@ -1045,8 +1104,8 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
 // the morning summary of an unattended night, from the decision log and the stacks the server reports
 void mailRunSummary(const QString& outcome, const QString& night)
 {
-    QString body = QString("Unattended night %1: %2.\n\nBlocks run: %3, target switches: %4, refocuses: %5, restarts: %6.\n\nWhat it did (local time):\n")
-                       .arg(night, outcome).arg(g_run.blocksDone).arg(g_run.switches).arg(g_run.refocuses).arg(g_run.restarts);
+    QString body = QString("Unattended night %1: %2.\n\nBlocks run: %3, target switches: %4, refocuses: %5, restarts: %6, telescope reboots: %7.\n\nWhat it did (local time):\n")
+                       .arg(night, outcome).arg(g_run.blocksDone).arg(g_run.switches).arg(g_run.refocuses).arg(g_run.restarts).arg(g_run.reboots);
     for (const QJsonValue& v : g_run.decisions) {
         const QJsonObject d = v.toObject(); QStringList bits;
         for (auto it = d.constBegin(); it != d.constEnd(); ++it)
