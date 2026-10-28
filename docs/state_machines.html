@@ -1,0 +1,382 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Origin Control State Machines</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap">
+<style>
+/* Layout: a single reading column of charts, a sticky index of machines, each chart a numbered section (the numbers are the cross-reference keys) */
+:root {
+  --bg: #f5f6f8; --panel: #ffffff; --fg: #1b2230; --muted: #5a6476; --rule: #d9dde5;
+  --accent: #2f5fb3; --err: #c23b3b; --rec: #23804f; --cmd: #6a4fb0; --warn: #a86a12;
+  --display: "Fraunces", Georgia, serif; --body: "IBM Plex Sans", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0f1420; --panel: #161d2c; --fg: #e3e7ef; --muted: #9aa4b6; --rule: #2a3346;
+  --accent: #7ea6ec; --err: #ef7a7a; --rec: #6cc994; --cmd: #b39cf0; --warn: #e3ad5c; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0f1420; --panel: #161d2c; --fg: #e3e7ef; --muted: #9aa4b6; --rule: #2a3346;
+  --accent: #7ea6ec; --err: #ef7a7a; --rec: #6cc994; --cmd: #b39cf0; --warn: #e3ad5c; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font-family: var(--body); line-height: 1.55; }
+.wrap { max-width: 1180px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 28px 64px; }
+header h1 { font-family: var(--display); font-weight: 600; font-size: clamp(1.7rem, 3.6vw, 2.4rem); margin: 0 0 6px; text-wrap: balance; }
+header p { margin: 0; color: var(--muted); max-width: 70ch; }
+nav { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); border-bottom: 1px solid var(--rule); margin: 22px 0 8px; padding: 8px 0; display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.9rem; }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg); }
+nav a { color: var(--accent); text-decoration: none; font-family: var(--mono); font-size: 0.82rem; }
+nav a:hover, nav a:focus-visible { text-decoration: underline; outline: none; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 0.85rem; color: var(--muted); margin: 14px 0 6px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 14px; height: 14px; border-radius: 3px; border: 2px solid; display: inline-block; }
+.sw.cmd { border-color: var(--cmd); } .sw.err { border-color: var(--err); } .sw.rec { border-color: var(--rec); } .sw.link { border-color: var(--accent); border-style: dashed; } .sw.wait { border-color: var(--warn); }
+section { margin-top: 38px; scroll-margin-top: 60px; }
+section h2 { font-family: var(--display); font-weight: 500; font-size: 1.45rem; margin: 0 0 4px; display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+section h2 .key { font-family: var(--mono); font-size: 0.85rem; color: var(--accent); border: 1px solid var(--rule); border-radius: 4px; padding: 1px 6px; }
+section h2 .where { font-family: var(--mono); font-size: 0.78rem; color: var(--muted); font-weight: 400; }
+.lede { color: var(--muted); max-width: 78ch; margin: 0 0 12px; }
+.chart { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 14px; overflow-x: auto; }
+.chart pre.mermaid { margin: 0; background: transparent; min-width: 640px; text-align: center; }
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px 22px; margin-top: 12px; font-size: 0.9rem; }
+.notes div { min-width: 0; }
+.notes b { font-weight: 600; }
+.links { margin-top: 10px; font-size: 0.88rem; color: var(--muted); }
+.links a { color: var(--accent); font-family: var(--mono); font-size: 0.82rem; }
+code { font-family: var(--mono); font-size: 0.86em; }
+.tag { font-family: var(--mono); font-size: 0.78rem; padding: 0 5px; border-radius: 3px; border: 1px solid var(--rule); }
+.untested { color: var(--warn); border-color: var(--warn); }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+html { scroll-behavior: smooth; }
+</style>
+
+</head><body>
+<div class="wrap">
+<header>
+  <h1>Origin control state machines</h1>
+  <p>How OriginHeadless drives the Celestron Origin through a night: the cron launcher, the unattended supervisor, the in-daemon sequencer, the link keeper, and the telescope's own controllers. Each chart shows the outline commands sent, the errors that come back, and what is done about them. Numbers in square brackets point to the other charts. State as of 28 Oct 2026 (branch <code>forecast-outlook</code>, uncommitted reboot recovery and auto-reconnect included).</p>
+</header>
+
+<nav aria-label="Machines">
+  <a href="#overview">[0] overview</a><a href="#autorun">[1] autorun</a><a href="#run">[2] run supervisor</a><a href="#block">[3] block loop</a><a href="#reboot">[4] reboot recovery</a><a href="#sequencer">[5] sequencer</a><a href="#link">[6] link keeper</a><a href="#telescope">[7] telescope</a>
+</nav>
+
+<div class="legend">
+  <span><i class="sw cmd"></i>command to the daemon or telescope</span>
+  <span><i class="sw err"></i>error / failure</span>
+  <span><i class="sw rec"></i>recovery action</span>
+  <span><i class="sw wait"></i>waiting / idle until next tick</span>
+  <span><i class="sw link"></i>hands over to another chart</span>
+</div>
+
+<section id="overview">
+  <h2><span class="key">[0]</span> Overview <span class="where">processes and who talks to whom</span></h2>
+  <p class="lede">Three processes. Cron runs <code>autorun</code> every 5 minutes; it starts the daemon and, once the mount is aligned, launches <code>run</code>. Both talk to the daemon over JSON on 127.0.0.1:8765; only the daemon holds the WebSocket to the telescope.</p>
+  <div class="chart"><pre class="mermaid">
+flowchart LR
+  cron(["cron, every 5 min"]) --> AR["[1] autorun<br/>dusk launcher"]
+  AR -- "start daemon, connect,<br/>unpark, solve, initialize" --> D
+  AR -- "launch detached" --> RUN["[2] run --unattended<br/>night supervisor"]
+  RUN -- "goto, sequence, cancel_capture,<br/>reboot, initialize, focus sweep" --> D
+  W["OriginWatch / phone view"] -- "run_control.json<br/>override, stop, replan" --> RUN
+  subgraph D ["OriginHeadless serve (daemon, port 8765)"]
+    CS["ControlServer<br/>command handler + cache"]
+    SEQ["[5] Sequencer<br/>exposure loop"]
+    LK["[6] link keeper<br/>auto-reconnect"]
+    SM["SkyMonitor + LiveStacker<br/>verdicts, stacks"]
+    CS --> SEQ
+    SEQ --> SM
+  end
+  D == "WebSocket ws://192.168.1.195/SmartScope-1.0" ==> T["[7] telescope<br/>Mount, Camera, TaskController,<br/>ImageServer, Focuser, System"]
+  classDef link stroke-dasharray: 5 4,stroke-width:2px
+  class AR,RUN,SEQ,LK,T link
+  click AR href "#autorun"
+  click RUN href "#run"
+  click SEQ href "#sequencer"
+  click LK href "#link"
+  click T href "#telescope"
+  </pre></div>
+</section>
+
+<section id="autorun">
+  <h2><span class="key">[1]</span> autorun <span class="where">HeadlessMain.cpp cmdAutorun</span></h2>
+  <p class="lede">Each cron tick does the next missing step and returns. Any gate that fails ends the tick quietly ("idle"); the next tick, 5 minutes later, tries again. Nothing moves before the Sun is below the probe altitude (−7°), and the run itself waits for −12°.</p>
+  <div class="chart"><pre class="mermaid">
+flowchart TD
+  T0(["cron tick"]) --> G1{"autorun.off?<br/>too early / too late?"}
+  G1 -- yes --> I1["idle"]:::wait
+  G1 -- no --> G2{"run already launched<br/>tonight?"}
+  G2 -- "pid alive" --> I2["idle: run in progress"]:::wait
+  G2 -- "parked" --> I3["idle: night finished"]:::wait
+  G2 -- "died before parking" --> G2b{"launched 3 times?"}
+  G2b -- yes --> E0["give up tonight"]:::err
+  G2b -- no --> G3
+  G2 -- "not yet" --> G3{"plan empty?<br/>rain within 1 h?"}
+  G3 -- yes --> I4["idle"]:::wait
+  G3 -- no --> D1{"daemon answers ping?"}
+  D1 -- no --> D2{"GUI app running?"}
+  D2 -- yes --> I5["idle: one instance only"]:::wait
+  D2 -- no --> D3["start daemon"]:::cmd
+  D3 --> C1
+  D1 -- yes --> C1{"connected?"}
+  C1 -- no --> C2["connect 192.168.1.195"]:::cmd
+  C2 --> C3{"connected?"}
+  C3 -- no --> I6["idle: telescope not out / off"]:::wait
+  C3 -- yes --> M1
+  C1 -- yes --> M1{"mount aligned?"}
+  M1 -- yes --> L1
+  M1 -- no --> M2{"3 init attempts used?"}
+  M2 -- yes --> E1["idle: needs a look"]:::err
+  M2 -- no --> TL{"tube low<br/>(tilt sensor)?"}
+  TL -- yes --> UP["unpark"]:::cmd
+  UP -- fails --> E2["idle; 3 tries max"]:::err
+  UP -- ok --> SV
+  TL -- no --> SV["manual mode, frame_stats,<br/>solve (exposure scaled to sky)"]:::cmd
+  SV -- solved --> IN
+  SV -- "no solution, Sun above −12°<br/>or fewer than 2 fails" --> I7["idle: retry next tick"]:::wait
+  SV -- "2 fails in the dark,<br/>METAR overcast" --> I8["idle: not spending an init on cloud"]:::wait
+  SV -- "2 fails in the dark, not overcast" --> IN
+  IN["initialize (wait, 300 s)"]:::cmd --> IR{"outcome"}
+  IR -- "not enough stars" --> I9["idle; does not use an attempt<br/>(12 a night max)"]:::wait
+  IR -- "other failure" --> FB{"--init-fallback fake-init?"}
+  FB -- "off (default)" --> I10["idle: retry"]:::err
+  FB -- on --> FK["fake-init, goto other side<br/>of meridian"]:::rec
+  FK --> I11["idle: real init next tick"]:::wait
+  IR -- ok --> AL{"IsAligned?"}
+  AL -- no --> I12["idle: retry"]:::err
+  AL -- yes --> L1["launch run --unattended --mail"]:::cmd
+  L1 --> MAIL["e-mail: run started"] --> R2(["[2] run supervisor"]):::link
+  classDef cmd stroke:#6a4fb0,stroke-width:2px
+  classDef err stroke:#c23b3b,stroke-width:2px
+  classDef rec stroke:#23804f,stroke-width:2px
+  classDef wait stroke:#a86a12,stroke-width:2px
+  classDef link stroke:#2f5fb3,stroke-dasharray: 5 4,stroke-width:2px
+  click R2 href "#run"
+  </pre></div>
+  <div class="links">Hands over to <a href="#run">[2] run supervisor</a>. Uses the daemon's <code>connect</code>, which the <a href="#link">[6] link keeper</a> takes over after a drop.</div>
+</section>
+
+<section id="run">
+  <h2><span class="key">[2]</span> run supervisor: the night <span class="where">HeadlessMain.cpp cmdRun</span></h2>
+  <p class="lede">Plans the night, then walks the plan block by block. Between blocks it reads OriginWatch requests every 30 s. A block is run by the block loop [3]; Rain, Failed or Stopped ends the night, which always ends with a park on Polaris and a summary e-mail.</p>
+  <div class="chart"><pre class="mermaid">
+flowchart TD
+  S0(["run --unattended"]) --> P1["Planner::schedule (forecast as soft prior)"]
+  P1 -- "nothing observable" --> E0["fail: stay parked"]:::err
+  P1 --> P2{"daemon ping"}
+  P2 -- fails --> E1["fail"]:::err
+  P2 -- ok --> B0{"next block"}
+  B0 -- "none left / dawn" --> PK
+  B0 --> RP{"replan requested?"}
+  RP -- yes --> RP2["plan the rest of the night again"]:::rec --> B0
+  RP -- no --> W1{"block start reached?"}
+  W1 -- no --> W2["wait 30 s, read run_control.json"]:::wait
+  W2 -- "override" --> OV(["[3] block loop for the override target"]):::link
+  W2 -- "stop" --> PK
+  W2 --> W1
+  W1 -- yes --> GD{"Sun below −12°?<br/>(slew guard)"}
+  GD -- no --> W3["wait for dusk"]:::wait --> GD
+  GD -- yes --> BL(["[3] block loop"]):::link
+  BL -- Done --> B0
+  BL -- "Rain / Failed / Stopped" --> PK
+  OV --> B0
+  PK["stack save, goto Polaris (park)"]:::cmd --> ML["morning e-mail: decisions,<br/>restarts, refocuses, reboots"]
+  classDef cmd stroke:#6a4fb0,stroke-width:2px
+  classDef err stroke:#c23b3b,stroke-width:2px
+  classDef rec stroke:#23804f,stroke-width:2px
+  classDef wait stroke:#a86a12,stroke-width:2px
+  classDef link stroke:#2f5fb3,stroke-dasharray: 5 4,stroke-width:2px
+  click BL href "#block"
+  click OV href "#block"
+  </pre></div>
+  <div class="links">Runs <a href="#block">[3] block loop</a>. If the mount came back unaligned from a failed <a href="#reboot">[4] reboot recovery</a>, the park goto is expected to fail too: the e-mail then asks for a power cycle.</div>
+</section>
+
+<section id="block">
+  <h2><span class="key">[3]</span> block loop: one target <span class="where">HeadlessMain.cpp runTarget</span></h2>
+  <p class="lede">Slew, start the sequencer [5], then a 20 s supervision tick that reads the sequence status and events. Each kind of trouble has its own response and its own limit, so one fault cannot loop all night.</p>
+  <div class="chart"><pre class="mermaid">
+flowchart TD
+  A0(["block: target, end time"]) --> SL["monitor, target, goto,<br/>wait idle, set exposure"]:::cmd
+  SL -- fails --> F1["slew_failed: Failed"]:::err
+  SL --> SQ["sequence start (pipeline,<br/>auto exposure, focus pause)"]:::cmd
+  SQ -- fails --> F2["sequence_start_failed: Failed"]:::err
+  SQ --> TK{"20 s tick"}
+  TK -- "OriginWatch stop / replan /<br/>override" --> CT["stop sequence, save stack"]:::cmd
+  CT --> X1(["Stopped / Done / nested block"])
+  TK -- "block end or dawn" --> X2(["Done"])
+  TK -- "rain within 1 h<br/>(checked every 15 min)" --> X3(["Rain"])
+  TK -- "status call fails 3×" --> F3["server_lost: Failed"]:::err
+  TK -- "sequence stopped" --> WH{"stop reason"}
+  WH -- "end time / block end" --> X2
+  WH -- "focus drift<br/>(20 min apart)" --> FS["focus sweep ±300, apply best"]:::rec --> RS
+  WH -- "other, 7th restart" --> F4["Failed"]:::err
+  WH -- "disconnected" --> RC["wait for link, 180 s<br/>(connect after 90 s)"]:::rec
+  RC -- "not back" --> F5["Failed"]:::err
+  RC -- back --> RS
+  WH -- "frame never arrived,<br/>link up" --> CC["cancel_capture × 2"]:::cmd
+  CC -- cleared --> RS
+  CC -- "still SAMPLE_CAPTURE" --> HB(["camera_hung → [4] reboot recovery"]):::link
+  HB -- recovered --> RG["goto target again"]:::cmd --> RS
+  HB -- "failed: power-cycle" --> F6["Failed"]:::err
+  WH -- "capture refused /<br/>snapshot request failed" --> RS
+  RS["restart sequence"]:::cmd --> TK
+  TK -- "verdict trailed × 2" --> RT["re-goto (3 per block)"]:::rec --> TK
+  TK -- "verdict defocused × 3,<br/>sky &lt; 60% cloud" --> RT
+  RT -- "still defocused after a re-goto" --> WF["focus sweep ±900"]:::rec --> TK
+  TK -- "probing (cloud)" --> CL{"cloud for 10 min?"}
+  CL -- "no" --> TK
+  CL -- "60 min on this block" --> X4(["give up: Done, next block"])
+  CL -- yes --> BK["backup target ≥ 40° away,<br/>≥ 45 min left"]:::rec
+  TK -- "obstructed (tree, building)" --> BK
+  BK -- found --> A0
+  BK -- "none" --> TK
+  classDef cmd stroke:#6a4fb0,stroke-width:2px
+  classDef err stroke:#c23b3b,stroke-width:2px
+  classDef rec stroke:#23804f,stroke-width:2px
+  classDef wait stroke:#a86a12,stroke-width:2px
+  classDef link stroke:#2f5fb3,stroke-dasharray: 5 4,stroke-width:2px
+  click HB href "#reboot"
+  </pre></div>
+  <div class="notes">
+    <div><b>Why “frame never arrived”.</b> The sequencer's watchdog [5] fires at 3 × exposure + 60 s with no image. It has already sent one <code>CancelImaging</code>; the supervisor sends two more and checks the TaskController state each time.</div>
+    <div><b>Disconnects.</b> The supervisor no longer reconnects on a fixed sleep; it waits for the daemon's own link keeper [6] and only sends <code>connect</code> itself after 90 s.</div>
+    <div><b>Limits.</b> 6 sequence restarts a night, 3 re-gotos a block, refocus at most every 20 min and 6 times, 2 reboots a night.</div>
+  </div>
+  <div class="links">See <a href="#sequencer">[5] sequencer</a> for where the stop reasons come from and <a href="#reboot">[4] reboot recovery</a> for <code>camera_hung</code>.</div>
+</section>
+
+<section id="reboot">
+  <h2><span class="key">[4]</span> reboot recovery <span class="where">HeadlessMain.cpp rebootRecover</span> <span class="tag untested">new, not yet exercised by a real hang</span></h2>
+  <p class="lede">For a camera stuck in <code>SAMPLE_CAPTURE</code> that ignores cancels (28 Oct, 00:53). <code>Reboot</code> to <code>System</code> clears it, idle or mid-exposure; tested twice by hand on 28 Oct. The mount comes back unaligned, so recovery has to initialize again, which needs stars.</p>
+  <div class="chart"><pre class="mermaid">
+flowchart TD
+  H0(["camera_hung"]) --> N1{"2 reboots already tonight?"}
+  N1 -- yes --> FX["reboot_recovery_failed:<br/>power-cycle the telescope"]:::err
+  N1 -- no --> RB["reboot (System), refused while a sequence runs"]:::cmd
+  RB -- "not accepted" --> FX
+  RB --> WT["wait 15 s: link drops at once,<br/>telescope off the network ~15–25 s"]:::wait
+  WT --> LK{"link back within 5 min?<br/>(daemon reconnects itself;<br/>connect after 2 min)"}
+  LK -- no --> FX
+  LK -- yes --> TC{"TaskController IDLE<br/>within 2 min?"}
+  TC -- "still SAMPLE_CAPTURE" --> FX
+  TC -- "IDLE (or no status)" --> IN["initialize (wait, 300 s)"]:::cmd
+  IN --> AL{"IsAligned?"}
+  AL -- no, 1st try --> IN
+  AL -- "no, 2nd try" --> FX
+  AL -- yes --> OK(["recovered → [3] goto target, restart sequence"]):::link
+  classDef cmd stroke:#6a4fb0,stroke-width:2px
+  classDef err stroke:#c23b3b,stroke-width:2px
+  classDef rec stroke:#23804f,stroke-width:2px
+  classDef wait stroke:#a86a12,stroke-width:2px
+  classDef link stroke:#2f5fb3,stroke-dasharray: 5 4,stroke-width:2px
+  click OK href "#block"
+  </pre></div>
+  <div class="notes">
+    <div><b>Measured.</b> 12:57 idle: pings lost 7–20 s after the command. 13:01 during a 60 s exposure: link closed at once, pings lost 22–44 s. 13:10 with the new link keeper: back after 24 s, one attempt. Camera IDLE and captures normal each time.</div>
+    <div><b>Failure modes.</b> Cloud at the moment of the hang will fail the initialize; the run then ends and the park goto fails on an unaligned mount.</div>
+  </div>
+  <div class="links">Relies on <a href="#link">[6] link keeper</a> and the telescope behaviour in <a href="#telescope">[7]</a>.</div>
+</section>
+
+<section id="sequencer">
+  <h2><span class="key">[5]</span> Sequencer <span class="where">Sequencer.cpp, inside the daemon</span></h2>
+  <p class="lede">The exposure loop. Pipelined: the next <code>RunSampleCapture</code> goes out at the telescope's <code>NewImageReady</code>, so the download and analysis overlap the next exposure. Every stop is a reason string that the block loop [3] reads.</p>
+  <div class="chart"><pre class="mermaid">
+flowchart TD
+  ST(["sequence start"]) --> SH["SHOOTING"]
+  SH --> RQ["request frame:<br/>RunSampleCapture (exposure, ISO)"]:::cmd
+  RQ -- "not connected" --> S1["stop: disconnected"]:::err
+  RQ -- "request fails" --> S2["stop: snapshot request failed"]:::err
+  RQ -- "TaskController refuses" --> S3["stop: capture refused"]:::err
+  RQ --> WD{"image within<br/>3 × exposure + 60 s?"}
+  WD -- no --> CN["CancelImaging (TaskController),<br/>clear snapshot flag"]:::rec --> S4["stop: frame never arrived"]:::err
+  WD -- "NewImageReady" --> NX["pipeline: request the next frame now"]:::cmd
+  NX --> DL["download FITS, save, append to sequence log"]
+  DL --> AN["SkyMonitor verdict + LiveStacker add"]
+  AN --> V{"verdict"}
+  V -- "clear / hazy" --> FW{"median HFR > 1.15 × baseline<br/>for 5 frames?"}
+  FW -- "yes, focus_pause" --> S5["stop: focus drift"]:::err
+  FW -- no --> AE["auto exposure: rotation, half-full sky,<br/>read-noise limit, max"] --> SH
+  V -- "obstructed" --> EV1["event sequence_obstructed"] --> SH
+  V -- "bad × bad_limit (3)" --> PR["PROBING: one frame every probe_s"]:::wait
+  PR -- "probe clear / hazy" --> SH
+  PR -- "probe bad" --> PR
+  SH -- "until / max frames /<br/>stop command" --> DR["DRAINING: wait for frames in flight"]:::wait
+  DR -- "all in" --> S6["stop: end time reached / reason"]
+  DR -- timeout --> S6
+  classDef cmd stroke:#6a4fb0,stroke-width:2px
+  classDef err stroke:#c23b3b,stroke-width:2px
+  classDef rec stroke:#23804f,stroke-width:2px
+  classDef wait stroke:#a86a12,stroke-width:2px
+  classDef link stroke:#2f5fb3,stroke-dasharray: 5 4,stroke-width:2px
+  </pre></div>
+  <div class="notes">
+    <div><b>Verdicts</b> from SkyMonitor: clear, hazy, moon_glow, twilight, cloudy, patchy, unknown, off_target, defocused, trailed, no_pointing, unreadable. Trailed and defocused are acted on by the block loop, not here.</div>
+    <div><b>Stack side effects.</b> A frame whose filter differs from the stack's archives the old stack and starts a new one. Repeated registration failures replace a bad reference (not in offline restacks).</div>
+  </div>
+  <div class="links">Stop reasons go to <a href="#block">[3] block loop</a>. A disconnect here is followed by <a href="#link">[6] link keeper</a>.</div>
+</section>
+
+<section id="link">
+  <h2><span class="key">[6]</span> link keeper <span class="where">ControlServer.cpp tryReconnect</span> <span class="tag">new, tested 28 Oct 13:10</span></h2>
+  <p class="lede">Keeps the daemon's WebSocket up. It acts only on a drop nobody asked for; <code>quit</code> switches it off. Before this, a rebooted telescope left the daemon disconnected until a client sent <code>connect</code>.</p>
+  <div class="chart"><pre class="mermaid">
+flowchart TD
+  C0(["connect (start-up, autorun, client)"]) --> UP["CONNECTED<br/>status timer, keep-alive ping 10 s,<br/>16-bit, live stream off"]
+  UP -- "quit / shutdown" --> OFF(["stopped: no reconnect"])
+  UP -- "remote closed, error,<br/>telescope reboot" --> DN["LINK LOST<br/>event disconnected; sequence stops"]:::err
+  DN --> W5["wait 5 s"]:::wait
+  W5 --> AT["open WebSocket (wait 10 s)"]:::cmd
+  AT -- "socket connects<br/>(even after the wait gave up)" --> RE["event reconnected (down s, attempts),<br/>clear stale statuses and cache,<br/>declare filter"]:::rec
+  RE --> UP
+  AT -- fails --> NX{"down < 5 min?"}
+  NX -- yes --> W15["wait 15 s"]:::wait --> AT
+  NX -- no --> W60["wait 60 s"]:::wait --> AT
+  CL["client connect while an attempt runs"] -. "waits for it, up to 20 s" .-> AT
+  classDef cmd stroke:#6a4fb0,stroke-width:2px
+  classDef err stroke:#c23b3b,stroke-width:2px
+  classDef rec stroke:#23804f,stroke-width:2px
+  classDef wait stroke:#a86a12,stroke-width:2px
+  classDef link stroke:#2f5fb3,stroke-dasharray: 5 4,stroke-width:2px
+  </pre></div>
+  <div class="notes">
+    <div><b>Visible in <code>status</code></b> while down: <code>reconnecting</code>, <code>reconnect_attempts</code>, <code>link_down_s</code>.</div>
+    <div><b>Not restored</b> after a reconnect: a running sequence (the block loop restarts it) and mount alignment if the telescope rebooted (the reboot recovery re-initializes).</div>
+  </div>
+  <div class="links">Used by <a href="#block">[3] block loop</a> and <a href="#reboot">[4] reboot recovery</a>.</div>
+</section>
+
+<section id="telescope">
+  <h2><span class="key">[7]</span> telescope, as observed <span class="where">firmware behaviour, from logs and tests</span></h2>
+  <p class="lede">What the Origin's own controllers do in response, as seen from the daemon. This is behaviour measured on this telescope, not documented firmware.</p>
+  <div class="chart"><pre class="mermaid">
+flowchart LR
+  subgraph CAM ["Camera / TaskController"]
+    IDLE["IDLE"] -- "RunSampleCapture" --> CAP["SAMPLE_CAPTURE / IN_PROGRESS<br/>ExposedTime counts up"]
+    CAP -- "exposure + ~2.6 s,<br/>NewImageReady" --> IDLE
+    CAP -- "rare (28 Oct 00:53)" --> HUNG["HUNG: capture never ends,<br/>link stays up"]:::err
+    HUNG -- "CancelImaging: acked, ignored<br/>AbortAll: unknown command" --> HUNG
+    CAP -- "CancelImaging to TaskController:<br/>acked, capture runs to the end" --> CAP
+  end
+  subgraph SYS ["System"]
+    RB["Reboot: accepted idle or mid-exposure"]:::cmd --> OFFN["link closes, off network ~15–25 s"]:::wait
+    OFFN --> BACK["back: camera IDLE,<br/>mount NOT aligned"]:::rec
+  end
+  HUNG -. "only cure" .-> RB
+  BACK --> IDLE
+  subgraph MNT ["Mount"]
+    UN["unaligned"] -- "RunInitialize (needs stars,<br/>refused while the Sun is up)" --> ALN["aligned: goto, tracking"]
+    ALN -- "reboot / power cycle" --> UN
+  end
+  BACK -.-> UN
+  classDef cmd stroke:#6a4fb0,stroke-width:2px
+  classDef err stroke:#c23b3b,stroke-width:2px
+  classDef rec stroke:#23804f,stroke-width:2px
+  classDef wait stroke:#a86a12,stroke-width:2px
+  </pre></div>
+  <div class="notes">
+    <div><b>Abort commands tried on 28 Oct</b> (new_api branch): 16 abort-style names to TaskController, Camera and ImageServer were all unknown; <code>StopAll</code> to Mount and <code>CancelAutoFocus</code> unknown; <code>CancelImaging</code> to Camera dropped the link.</div>
+    <div><b>Official app.</b> Watched while the camera was hung: it has no recovery either.</div>
+  </div>
+  <div class="links">Drives <a href="#reboot">[4] reboot recovery</a> and <a href="#link">[6] link keeper</a>.</div>
+</section>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script><script>mermaid.initialize({startOnLoad:true, securityLevel:"loose", theme: matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "default"});</script></body></html>
