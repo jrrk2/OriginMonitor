@@ -679,6 +679,32 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
         if (r.isEmpty()) return fail("no response to GetFilter");
         return QJsonObject{{"ok", true}, {"filter", r["Filter"].toString()}};
     }
+    // A capture the camera never finished (2026-10-28 00:53: TaskController stuck in SAMPLE_CAPTURE for hours, every later RunSampleCapture ignored while the link stayed up):
+    // send CancelImaging (or AbortAll) and wait for a TaskController status that has left the capture. {"wait": seconds (default 20), "command": "CancelImaging" | "AbortAll"}
+    if (cmd == "cancel_capture") {
+        if (!m_backend->isConnected()) return fail("not connected");
+        if (m_seq->active()) return fail("a sequence is running: stop it first");
+        const QJsonObject before = m_last.value("TaskController/GetStatus");
+        const auto stuck = [](const QJsonObject& s) { return s["State"].toString() == "SAMPLE_CAPTURE" && s["Stage"].toString() == "IN_PROGRESS"; };
+        const QString how = req["command"].toString("CancelImaging");
+        if (how != "CancelImaging" && how != "AbortAll") return fail("command must be CancelImaging or AbortAll");
+        const QString dest = req["destination"].toString("TaskController");
+        if (!QStringList{"TaskController", "MountTaskController", "Camera", "ImageServer", "System"}.contains(dest)) return fail("destination must be TaskController, MountTaskController, Camera, ImageServer or System");
+        if (how == "CancelImaging" && dest == "TaskController") m_backend->abortExposure(); else m_backend->sendCommand(how, dest);
+        const QJsonObject ack = waitResponse(m_backend->lastSequenceId(), 8000);
+        QElapsedTimer t; t.start(); QJsonObject now = before; bool fresh = false;
+        const int waitMs = req["wait"].toInt(20) * 1000;
+        while (t.elapsed() < waitMs) {
+            QEventLoop loop; QTimer::singleShot(500, &loop, &QEventLoop::quit); loop.exec();
+            const QJsonObject cur = m_last.value("TaskController/GetStatus");
+            if (cur["SequenceID"].toInt() != before["SequenceID"].toInt()) { now = cur; fresh = true; if (!stuck(now)) break; }
+        }
+        const bool cleared = fresh && !stuck(now);
+        return QJsonObject{{"ok", cleared}, {"command", how}, {"destination", dest}, {"cleared", cleared}, {"was_stuck", stuck(before)}, {"state_before", before["State"].toString() + "/" + before["Stage"].toString()},
+                           {"state_now", fresh ? now["State"].toString() + "/" + now["Stage"].toString() : QString("no new status")}, {"ack", ack.isEmpty() ? QJsonValue("none") : QJsonValue(ack)},
+                           {"error", cleared ? QString() : QString("the telescope still reports a capture in progress")}};
+    }
+
     if (cmd == "send") {
         if (!m_allowRaw) return fail("raw commands disabled (start with --control-raw)");
         if (!m_backend->isConnected()) return fail("not connected");

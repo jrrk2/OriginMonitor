@@ -142,6 +142,8 @@ const QList<Cmd>& commands()
               O("target-efficiency", 'd', "auto exposure: share of the noise variance that is sky (0.5-0.99)", "0.94"), O("lat", 'd', "site latitude for the rotation limit", "52.2054", "lat_deg")}, true);
         pass("filter", "action", "Declare the hand-inserted filter to the firmware (clear or nebula; there is no motor, it only affects exposure choices for plate solving and centring), or read the current setting when no name is given. Setting takes about 11 s.", "filter",
              {P("name", 's', "clear | nebula (default: just read)", false)});
+        pass("cancel-capture", "action", "Cancel a capture the camera never finished (CancelImaging) and wait for the TaskController to leave SAMPLE_CAPTURE. Refuses while a sequence runs. No motion.", "cancel_capture",
+             {O("wait", 'i', "seconds to wait for the telescope to report the capture ended", "20"), O("command", 's', "CancelImaging or AbortAll", "CancelImaging"), O("destination", 's', "TaskController, MountTaskController, Camera, ImageServer or System", "TaskController")}, true);
         pass("send", "action", "Raw telescope command (server must run with --control-raw).", "send",
              {P("command", 's', "command name"), P("destination", 's', "destination, e.g. Camera"), O("params", 'j', "JSON object of parameters", "{}"), O("timeout", 'i', "seconds", "10")}, true);
         // --- orchestrated
@@ -958,6 +960,16 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
                 if (++g_run.restarts > 6) return RunResult::Failed;
                 const QJsonObject stt = call("status", {}, 20000);
                 if (!stt["connected"].toBool() && !g_run.host.isEmpty()) { call("connect", {{"host", g_run.host}}, 60000); sleepMs(30000); runLog("reconnect", {{"host", g_run.host}}); }
+                else if (why == "frame never arrived") {
+                    // the camera hung mid-capture with the link up (2026-10-28): it ignores new captures until cancelled. Cancel and check; a camera that stays stuck needs a power cycle
+                    bool cleared = false;
+                    for (int k = 0; k < 2 && !cleared; ++k) {
+                        const QJsonObject cc = call("cancel_capture", {{"wait", 30}}, 60000);
+                        cleared = cc["cleared"].toBool();
+                        runLog("capture_cancel", {{"target", t["key"]}, {"cleared", cleared}, {"state_before", cc["state_before"]}, {"state_now", cc["state_now"]}, {"attempt", k + 1}});
+                    }
+                    if (!cleared) { runLog("camera_hung", {{"target", t["key"]}, {"why", "the telescope still reports a capture in progress after two cancels: power-cycle the telescope"}}); return RunResult::Failed; }
+                }
             }
             if (!startSeq(exposure, iso, endUtc, !(why == "focus drift"))) { runLog("sequence_restart_failed", {{"target", t["key"]}}); return RunResult::Failed; }
             continue;

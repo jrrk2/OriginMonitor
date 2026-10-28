@@ -176,6 +176,7 @@ every command prints one JSON object). It has no `sequence` subcommand: use `too
 | `sky_map`, `monitor` | `lat_deg`, `lon_deg`, `black_level`, `auto_stack`, `min_transparency` | Learned obstruction bins; analysis settings |
 | `sequence` | `action`=start/stop/status; start takes `exposure`, `iso`, `pipeline`=true, `resend_params`=true, `bad_limit`=3, `probe_s`=30, `max_frames`, `for_minutes`, `until_local`="HH:MM" | The unattended exposure loop (below) |
 | `send` | `command`, `destination`, `params` | Raw telescope command (only with `--control-raw`) |
+| `cancel_capture` | `wait`, `command`, `destination` | Cancel a capture the camera never finished and report whether the TaskController left `SAMPLE_CAPTURE` (refuses while a sequence runs; CLI `cancel-capture`). Default `CancelImaging` to `TaskController`. On 2026-10-28 the camera hung mid-capture with the link up. `CancelImaging` was acknowledged but did not clear it, `AbortAll` was an unknown command to every controller tried, and a stray `CancelImaging` to `Camera` was followed by a disconnect. Only a power cycle is known to clear it. When a frame never arrives, the sequencer sends a cancel; the supervisor sends two more and, if the camera is still stuck, logs `camera_hung` and ends the run (park, e-mail) instead of retrying. |
 | `quit` | | Save the stack and exit |
 
 ### The sequencer

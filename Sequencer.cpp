@@ -113,7 +113,8 @@ void Sequencer::requestFrame()
 void Sequencer::onWatchdog()
 {
     if (!m_active) return;
-    m_b->recordEvent("sequence_timeout", "no image arrived; sequence stopped");
+    m_b->recordEvent("sequence_timeout", "no image arrived; capture cancelled, sequence stopped");
+    m_b->abortExposure();          // the camera can hang mid-capture and then ignore every new request until it is cancelled (2026-10-28)
     finish("frame never arrived");
 }
 

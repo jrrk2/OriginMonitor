@@ -682,6 +682,7 @@ bool OriginBackend::abortExposure()
     sendCommand("CancelImaging", "TaskController");
     
     m_isExposing = false;
+    m_snapshotInProgress = false;
     
     return true;
 }
