@@ -10,14 +10,14 @@ constexpr double kPi = 3.14159265358979323846;
 
 struct Pair { int i, j; float d, ang; };
 
-std::vector<Pair> pairsOf(const std::vector<SkyStar>& s, int K)
+std::vector<Pair> pairsOf(const std::vector<SkyStar>& s, int K, float maxD = 1e9f)
 {
     std::vector<Pair> v;
     const int n = std::min<int>(K, int(s.size()));
     for (int i = 0; i < n; ++i)
         for (int j = i + 1; j < n; ++j) {
-            const double dx = s[j].x - s[i].x, dy = s[j].y - s[i].y;
-            v.push_back({i, j, float(std::hypot(dx, dy)), float(std::atan2(dy, dx))});
+            const double dx = s[j].x - s[i].x, dy = s[j].y - s[i].y, d = std::hypot(dx, dy);
+            if (d <= maxD) v.push_back({i, j, float(d), float(std::atan2(dy, dx))});
         }
     return v;
 }
@@ -104,10 +104,13 @@ RegResult registerStars(const std::vector<SkyStar>& ref, const std::vector<SkySt
 
     // Pair voting over the brightest K stars of each list: 40 first (fast), then 80 when that finds nothing. Bright-star ranks are scrambled when the frames differ in ISO or saturate
     // (21 Apr M101, ISO 1000 against an ISO 200 reference: 98 of 599 frames matched with K=40, 582 with K=80; PixInsight StarAlignment matched 588).
-    for (const int K : {40, 80}) {
+    // 160 and 300 for frames of very different exposure: detection skips saturated stars, so a 17 s frame's list starts where a 4 s frame's ends (M1, 2026-10-14: of the 4 s frame's
+    // 40 brightest only 1 was in the 17 s frame's list at all, of its 300 stars 113 were). Those passes vote with pairs closer than 350 px only, which keeps them to about a second.
+    for (const int K : {40, 80, 160, 300}) {
         // Equal separations in both lists constrain rotation and shift (scale is ~1)
-        const std::vector<Pair> rp = pairsOf(ref, K);
-        std::vector<Pair> tp = pairsOf(tgt, K);
+        const float maxD = K > 80 ? 350.f : 1e9f;
+        const std::vector<Pair> rp = pairsOf(ref, K, maxD);
+        std::vector<Pair> tp = pairsOf(tgt, K, maxD);
         std::sort(tp.begin(), tp.end(), [](const Pair& a, const Pair& b) { return a.d < b.d; });
         struct Acc { int n = 0; double th = 0, tx = 0, ty = 0; };
         std::unordered_map<long long, Acc> votes;

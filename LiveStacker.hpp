@@ -35,7 +35,7 @@ public:
     /// Register only (no stacking): used to judge a frame against the stack's star field. iso <= 0: unknown, taken as the reference's.
     Report assess(const SkyFrame& frame, double exposureS, int iso = 0) const;
     /// Register and stack. Frames that cannot be registered, or that are far below the reference's clarity, are refused.
-    Report add(const SkyFrame& frame, double exposureS, double minTransparency = 0.5, int iso = 0);
+    Report add(const SkyFrame& frame, double exposureS, double minTransparency = 0.5, int iso = 0, const QString& filter = QString());
 
     bool hasReference() const { return m_frames > 0; }
     int frames() const { return m_frames; }
@@ -44,6 +44,7 @@ public:
     int referenceFrameWidth() const { return m_w; }
     int referenceFrameHeight() const { return m_h; }
     int referenceIso() const { return m_refIso; }
+    QString referenceFilter() const { return m_refFilter; }   // the FITS FILTER of the reference frame (empty: unknown)
     Image16 preview() const;                               // stretched (16 bits per channel), cropped to the well-covered area
     QJsonObject summary() const;
 
@@ -58,6 +59,7 @@ private:
     int m_w = 0, m_h = 0, m_frames = 0;
     double m_totalExposure = 0, m_refExposure = 0, m_bestRaw = 0;
     int m_refIso = 0;                                      // ISO of the reference frame (0 unknown); frames at another ISO are scaled by iso/m_refIso
+    QString m_refFilter;                                   // filter of the reference frame: star fluxes through another filter are not comparable (SkyMonitor starts a new stack)
     std::vector<double> m_recentRaw;
     Similarity m_last;
     bool m_haveLast = false;
