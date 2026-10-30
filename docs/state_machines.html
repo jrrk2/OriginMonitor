@@ -51,7 +51,7 @@ html { scroll-behavior: smooth; }
 <div class="wrap">
 <header>
   <h1>Origin control state machines</h1>
-  <p>How OriginHeadless drives the Celestron Origin through a night: the cron launcher, the unattended supervisor, the in-daemon sequencer, the link keeper, and the telescope's own controllers. Each chart shows the outline commands sent, the errors that come back, and what is done about them. Numbers in square brackets point to the other charts. State as of 28 Oct 2026 (branch <code>forecast-outlook</code>, uncommitted reboot recovery and auto-reconnect included).</p>
+  <p>How OriginHeadless drives the Celestron Origin through a night: the cron launcher, the unattended supervisor, the in-daemon sequencer, the link keeper, and the telescope's own controllers. Each chart shows the outline commands sent, the errors that come back, and what is done about them. Numbers in square brackets point to the other charts. State as of 30 Oct 2026 (branch <code>forecast-outlook</code>).</p>
 </header>
 
 <nav aria-label="Machines">
@@ -68,10 +68,10 @@ html { scroll-behavior: smooth; }
 
 <section id="overview">
   <h2><span class="key">[0]</span> Overview <span class="where">processes and who talks to whom</span></h2>
-  <p class="lede">Three processes. Cron runs <code>autorun</code> every 5 minutes; it starts the daemon and, once the mount is aligned, launches <code>run</code>. Both talk to the daemon over JSON on 127.0.0.1:8765; only the daemon holds the WebSocket to the telescope.</p>
+  <p class="lede">Three processes. Cron runs <code>autorun</code> every 10 minutes; it starts the daemon and, once the telescope is initialised (<code>IsAligned</code> and <code>IsReady</code>), launches <code>run</code>. Both talk to the daemon over JSON on 127.0.0.1:8765; only the daemon holds the WebSocket to the telescope.</p>
   <div class="chart"><pre class="mermaid">
 flowchart LR
-  cron(["cron, every 5 min"]) --> AR["[1] autorun<br/>dusk launcher"]
+  cron(["cron, every 10 min"]) --> AR["[1] autorun<br/>dusk launcher"]
   AR -- "start daemon, connect,<br/>unpark, solve, initialize" --> D
   AR -- "launch detached" --> RUN["[2] run --unattended<br/>night supervisor"]
   RUN -- "goto, sequence, cancel_capture,<br/>reboot, initialize, focus sweep" --> D
@@ -97,15 +97,15 @@ flowchart LR
 
 <section id="autorun">
   <h2><span class="key">[1]</span> autorun <span class="where">HeadlessMain.cpp cmdAutorun</span></h2>
-  <p class="lede">Each cron tick does the next missing step and returns. Any gate that fails ends the tick quietly ("idle"); the next tick, 5 minutes later, tries again. Nothing moves before the Sun is below the probe altitude (−7°), and the run itself waits for −12°.</p>
+  <p class="lede">Each cron tick does the next missing step and returns. Any gate that fails ends the tick quietly ("idle"); the next tick, 10 minutes later, tries again; a run that ends in failure calls autorun itself 20 s after it exits. Nothing moves before the Sun is below the probe altitude (−7°), and the run itself waits for −12°.</p>
   <div class="chart"><pre class="mermaid">
 flowchart TD
   T0(["cron tick"]) --> G1{"autorun.off?<br/>too early / too late?"}
   G1 -- yes --> I1["idle"]:::wait
   G1 -- no --> G2{"run already launched<br/>tonight?"}
   G2 -- "pid alive" --> I2["idle: run in progress"]:::wait
-  G2 -- "parked" --> I3["idle: night finished"]:::wait
-  G2 -- "died before parking" --> G2b{"launched 3 times?"}
+  G2 -- "last run parked, not failed" --> I3["idle: night finished"]:::wait
+  G2 -- "last run failed, or died" --> G2b{"same failure ended the last 2 runs?<br/>launched 6 times?"}
   G2b -- yes --> E0["give up tonight"]:::err
   G2b -- no --> G3
   G2 -- "not yet" --> G3{"plan empty?<br/>rain within 1 h?"}
@@ -120,11 +120,11 @@ flowchart TD
   C2 --> C3{"connected?"}
   C3 -- no --> I6["idle: telescope not out / off"]:::wait
   C3 -- yes --> M1
-  C1 -- yes --> M1{"mount aligned?"}
+  C1 -- yes --> M1{"initialised?<br/>(IsAligned and IsReady)"}
   M1 -- yes --> L1
   M1 -- no --> M2{"3 init attempts used?"}
   M2 -- yes --> E1["idle: needs a look"]:::err
-  M2 -- no --> TL{"tube low<br/>(tilt sensor)?"}
+  M2 -- no --> TL{"tube below the tree line + 5°<br/>(tilt sensor, 45°)?"}
   TL -- yes --> UP["unpark"]:::cmd
   UP -- fails --> E2["idle; 3 tries max"]:::err
   UP -- ok --> SV
@@ -134,12 +134,13 @@ flowchart TD
   SV -- "2 fails in the dark,<br/>METAR overcast" --> I8["idle: not spending an init on cloud"]:::wait
   SV -- "2 fails in the dark, not overcast" --> IN
   IN["initialize (wait, 300 s)"]:::cmd --> IR{"outcome"}
-  IR -- "not enough stars" --> I9["idle; does not use an attempt<br/>(12 a night max)"]:::wait
-  IR -- "other failure" --> FB{"--init-fallback fake-init?"}
+  IR -- "failed" --> RT["raise the tube if the init<br/>left it below the tree line"]:::rec --> IR2{"why"}
+  IR2 -- "not enough stars /<br/>could not identify the field" --> I9["idle; does not use an attempt<br/>(12 a night max)"]:::wait
+  IR2 -- "other failure" --> FB{"--init-fallback fake-init?"}
   FB -- "off (default)" --> I10["idle: retry"]:::err
   FB -- on --> FK["fake-init, goto other side<br/>of meridian"]:::rec
   FK --> I11["idle: real init next tick"]:::wait
-  IR -- ok --> AL{"IsAligned?"}
+  IR -- ok --> AL{"IsAligned and IsReady<br/>(up to 16 s)?"}
   AL -- no --> I12["idle: retry"]:::err
   AL -- yes --> L1["launch run --unattended --mail"]:::cmd
   L1 --> MAIL["e-mail: run started"] --> R2(["[2] run supervisor"]):::link
@@ -155,7 +156,7 @@ flowchart TD
 
 <section id="run">
   <h2><span class="key">[2]</span> run supervisor: the night <span class="where">HeadlessMain.cpp cmdRun</span></h2>
-  <p class="lede">Plans the night, then walks the plan block by block. Between blocks it reads OriginWatch requests every 30 s. A block is run by the block loop [3]; Rain, Failed or Stopped ends the night, which always ends with a park on Polaris and a summary e-mail.</p>
+  <p class="lede">Plans the night, then walks the plan block by block. Between blocks it reads OriginWatch requests every 30 s. A block is run by the block loop [3]; a skipped block moves on to the next, and Rain, Failed (including three blocks in a row skipped for the same trouble) or Stopped ends the night, which always ends with a park on Polaris and a summary e-mail. A failed run hands back to autorun [1] 20 s after it exits.</p>
   <div class="chart"><pre class="mermaid">
 flowchart TD
   S0(["run --unattended"]) --> P1["Planner::schedule (forecast as soft prior)"]
@@ -175,9 +176,13 @@ flowchart TD
   GD -- no --> W3["wait for dusk"]:::wait --> GD
   GD -- yes --> BL(["[3] block loop"]):::link
   BL -- Done --> B0
+  BL -- Skipped --> SK{"3rd skip in a row,<br/>same trouble?"}
+  SK -- no --> B0
+  SK -- yes --> PK
   BL -- "Rain / Failed / Stopped" --> PK
   OV --> B0
-  PK["stack save, goto Polaris (park)"]:::cmd --> ML["morning e-mail: decisions,<br/>restarts, refocuses, reboots"]
+  PK["stack save, goto Polaris (park)"]:::cmd --> ML["morning e-mail: outcome and reason, decisions,<br/>skips, restarts, refocuses, reboots, initializes"]
+  ML -- "failed" --> AR(["autorun in 20 s [1]"]):::link
   classDef cmd stroke:#6a4fb0,stroke-width:2px
   classDef err stroke:#c23b3b,stroke-width:2px
   classDef rec stroke:#23804f,stroke-width:2px
@@ -185,39 +190,53 @@ flowchart TD
   classDef link stroke:#2f5fb3,stroke-dasharray: 5 4,stroke-width:2px
   click BL href "#block"
   click OV href "#block"
+  click AR href "#autorun"
   </pre></div>
   <div class="links">Runs <a href="#block">[3] block loop</a>. If the mount came back unaligned from a failed <a href="#reboot">[4] reboot recovery</a>, the park goto is expected to fail too: the e-mail then asks for a power cycle.</div>
 </section>
 
 <section id="block">
   <h2><span class="key">[3]</span> block loop: one target <span class="where">HeadlessMain.cpp runTarget</span></h2>
-  <p class="lede">Slew, start the sequencer [5], then a 20 s supervision tick that reads the sequence status and events. Each kind of trouble has its own response and its own limit, so one fault cannot loop all night.</p>
+  <p class="lede">Make sure the telescope is initialised, slew, start the sequencer [5], then a 20 s supervision tick that reads the sequence status and events. Each kind of trouble has its own repair and its own limit, so one fault cannot loop all night; a block that cannot be observed is skipped and the night goes on. The run ends early only for rain, a stop, a fault a reboot did not clear, a telescope gone from the network, or the same trouble three blocks running.</p>
   <div class="chart"><pre class="mermaid">
 flowchart TD
-  A0(["block: target, end time"]) --> SL["monitor, target, goto,<br/>wait idle, set exposure"]:::cmd
-  SL -- fails --> F1["slew_failed: Failed"]:::err
+  A0(["block: target, end time"]) --> RD{"initialised?<br/>(IsAligned and IsReady)"}
+  RD -- no --> EI["raise tube if below the tree line,<br/>initialize, check IsReady"]:::rec
+  EI -- "no stars" --> WS["wait 5 min, retry<br/>(while the block lasts)"]:::wait --> EI
+  EI -- "still not ready" --> SK
+  EI -- ready --> SL
+  RD -- yes --> SL["monitor, target, goto,<br/>wait idle, set exposure"]:::cmd
+  SL -- fails --> DG["check link, re-initialise,<br/>goto once more"]:::rec
+  DG -- ok --> SQ
+  DG -- "still fails" --> BS
   SL --> SQ["sequence start (pipeline,<br/>auto exposure, focus pause)"]:::cmd
-  SQ -- fails --> F2["sequence_start_failed: Failed"]:::err
+  SQ -- fails --> RCAP["cancel_capture × 2, retry;<br/>still stuck: [4] reboot recovery"]:::rec
+  RCAP -- capturing --> TK
+  RCAP -- "reboot did not clear it" --> F6["Failed: power-cycle"]:::err
+  RCAP -- "other" --> BS
   SQ --> TK{"20 s tick"}
   TK -- "OriginWatch stop / replan /<br/>override" --> CT["stop sequence, save stack"]:::cmd
   CT --> X1(["Stopped / Done / nested block"])
   TK -- "block end or dawn" --> X2(["Done"])
-  TK -- "rain within 1 h<br/>(checked every 15 min)" --> X3(["Rain"])
-  TK -- "status call fails 3×" --> F3["server_lost: Failed"]:::err
+  TK -- "rain within 1 h<br/>(checked every 20 min)" --> X3(["Rain"])
+  TK -- "status call fails 3×" --> DR["restart the daemon (2 a night),<br/>reconnect, re-initialise, goto"]:::rec
+  DR -- ok --> RS
+  DR -- "cannot" --> F3["Failed"]:::err
   TK -- "sequence stopped" --> WH{"stop reason"}
   WH -- "end time / block end" --> X2
   WH -- "focus drift<br/>(20 min apart)" --> FS["focus sweep ±300, apply best"]:::rec --> RS
-  WH -- "other, 7th restart" --> F4["Failed"]:::err
-  WH -- "disconnected" --> RC["wait for link, 180 s<br/>(connect after 90 s)"]:::rec
-  RC -- "not back" --> F5["Failed"]:::err
+  WH -- "7th stop in this block" --> BS
+  WH -- "disconnected" --> RC["wait for link 180 s (connect after 90 s),<br/>then 10 min more; re-initialise if lost"]:::rec
+  RC -- "not back" --> F5["Failed: off the network"]:::err
   RC -- back --> RS
   WH -- "frame never arrived,<br/>link up" --> CC["cancel_capture × 2"]:::cmd
   CC -- cleared --> RS
   CC -- "still SAMPLE_CAPTURE" --> HB(["camera_hung → [4] reboot recovery"]):::link
   HB -- recovered --> RG["goto target again"]:::cmd --> RS
-  HB -- "failed: power-cycle" --> F6["Failed"]:::err
+  HB -- "failed: power-cycle" --> F6
   WH -- "capture refused /<br/>snapshot request failed" --> RS
-  RS["restart sequence"]:::cmd --> TK
+  RS["restart sequence"]:::cmd -- fails --> RCAP
+  RS --> TK
   TK -- "verdict trailed × 2" --> RT["re-goto (3 per block)"]:::rec --> TK
   TK -- "verdict defocused × 3,<br/>sky &lt; 60% cloud" --> RT
   RT -- "still defocused after a re-goto" --> WF["focus sweep ±900"]:::rec --> TK
@@ -228,6 +247,9 @@ flowchart TD
   TK -- "obstructed (tree, building)" --> BK
   BK -- found --> A0
   BK -- "none" --> TK
+  BS["backup target ≥ 20° away (3 deep),<br/>else skip the block"]:::rec
+  BS -- found --> A0
+  BS -- none --> X5(["Skipped: next block<br/>(3 in a row, same trouble: Failed)"])
   classDef cmd stroke:#6a4fb0,stroke-width:2px
   classDef err stroke:#c23b3b,stroke-width:2px
   classDef rec stroke:#23804f,stroke-width:2px
@@ -238,7 +260,7 @@ flowchart TD
   <div class="notes">
     <div><b>Why “frame never arrived”.</b> The sequencer's watchdog [5] fires at 3 × exposure + 60 s with no image. It has already sent one <code>CancelImaging</code>; the supervisor sends two more and checks the TaskController state each time.</div>
     <div><b>Disconnects.</b> The supervisor no longer reconnects on a fixed sleep; it waits for the daemon's own link keeper [6] and only sends <code>connect</code> itself after 90 s.</div>
-    <div><b>Limits.</b> 6 sequence restarts a night, 3 re-gotos a block, refocus at most every 20 min and 6 times, 2 reboots a night.</div>
+    <div><b>Limits.</b> 6 sequence restarts a block (then skip it), 3 re-gotos a block, refocus at most every 20 min and 6 times, 2 reboots and 2 daemon restarts a night, 12 initializes and 6 tube raises a night, backups 3 deep; three blocks in a row skipped for the same trouble end the run.</div>
   </div>
   <div class="links">See <a href="#sequencer">[5] sequencer</a> for where the stop reasons come from and <a href="#reboot">[4] reboot recovery</a> for <code>camera_hung</code>.</div>
 </section>
@@ -257,10 +279,10 @@ flowchart TD
   LK -- no --> FX
   LK -- yes --> TC{"TaskController IDLE<br/>within 2 min?"}
   TC -- "still SAMPLE_CAPTURE" --> FX
-  TC -- "IDLE (or no status)" --> IN["initialize (wait, 300 s)"]:::cmd
-  IN --> AL{"IsAligned?"}
-  AL -- no, 1st try --> IN
-  AL -- "no, 2nd try" --> FX
+  TC -- "IDLE (or no status)" --> IN["raise the tube if below the tree line,<br/>initialize (wait, 300 s)"]:::rec
+  IN --> AL{"IsAligned and IsReady?"}
+  AL -- "no, 1st try" --> IN
+  AL -- "no stars, or 2nd try" --> SK(["[3] backup target or skip the block;<br/>the next block initializes again"]):::link
   AL -- yes --> OK(["recovered → [3] goto target, restart sequence"]):::link
   classDef cmd stroke:#6a4fb0,stroke-width:2px
   classDef err stroke:#c23b3b,stroke-width:2px
@@ -268,10 +290,11 @@ flowchart TD
   classDef wait stroke:#a86a12,stroke-width:2px
   classDef link stroke:#2f5fb3,stroke-dasharray: 5 4,stroke-width:2px
   click OK href "#block"
+  click SK href "#block"
   </pre></div>
   <div class="notes">
     <div><b>Measured.</b> 12:57 idle: pings lost 7–20 s after the command. 13:01 during a 60 s exposure: link closed at once, pings lost 22–44 s. 13:10 with the new link keeper: back after 24 s, one attempt. Camera IDLE and captures normal each time.</div>
-    <div><b>Failure modes.</b> Cloud at the moment of the hang will fail the initialize; the run then ends and the park goto fails on an unaligned mount.</div>
+    <div><b>Failure modes.</b> Cloud at the moment of the hang fails the initialize; the block is skipped and the next one (or the wait for stars) initializes again. Only a camera the reboot does not clear, or a telescope that does not come back, ends the run.</div>
   </div>
   <div class="links">Relies on <a href="#link">[6] link keeper</a> and the telescope behaviour in <a href="#telescope">[7]</a>.</div>
 </section>

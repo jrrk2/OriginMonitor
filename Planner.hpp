@@ -21,7 +21,7 @@ struct Options {
     Astro::Site site;
     QString horizonFile;                          // JSON {"points": [[az_deg, min_alt_deg], ...]}; empty = flat at minAlt
     QString skyMapFile;                           // sky_map.json from SkyMonitor; empty = none
-    double minAlt = 20, sunAlt = -18, moonSep = 30, minBlockMin = 45, maxBlockMin = 150, stepMin = 5;
+    double minAlt = 20, sunAlt = -18, moonSep = 30, minBlockMin = 45, maxBlockMin = 60, stepMin = 5;
     int top = 25;
     QString timeZone = "Europe/London";
     QVector<Weather::Hour> weather;               // hourly forecast; empty = ignore the weather

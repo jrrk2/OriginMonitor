@@ -69,7 +69,7 @@ QList<Arg> plannerArgs()
 {
     return {O("date", 's', "local evening date YYYY-MM-DD (default: the night we are in)"), O("horizon", 's', "horizon JSON file (default: $ORIGIN_HORIZON or tools/horizon.json)"),
             O("min-alt", 'd', "flat horizon floor when there is no file, deg", "20"), O("sun-alt", 'd', "Sun altitude below which it is dark, deg", "-18"),
-            O("moon-sep", 'd', "minimum Moon separation, deg", "30"), O("min-block", 'd', "shortest useful block, minutes", "45"), O("max-block", 'd', "longest time on one target, minutes", "150"),
+            O("moon-sep", 'd', "minimum Moon separation, deg", "30"), O("min-block", 'd', "shortest useful block, minutes", "45"), O("max-block", 'd', "longest time on one target, minutes", "60"),
             O("step", 'd', "time step, minutes", "5"), O("sky-map", 'b', "also use the obstruction bins learned in <data dir>/sky_map.json"),
             O("lat", 'd', "site latitude, deg north", "52.2054"), O("lon", 'd', "site longitude, deg east", "0.1218"), O("top", 'i', "targets to list", "25"), O("text", 'b', "human-readable table instead of JSON"),
             O("boost", 's', "priority boosts, e.g. M1=5,M31=2 (added to ~/.config/origin/target_boost.json); a boosted target wins whenever it is observable"),
@@ -318,11 +318,73 @@ QJsonObject call(const QString& cmd, QJsonObject extra = {}, int timeoutMs = 120
 bool initialised()
 {
     if (!call("mount_status", {{"fresh", true}}, 15000)["mount"].toObject()["IsAligned"].toBool()) return false;
-    const QJsonObject tc = call("status", {}, 10000)["last"].toObject()["TaskController/GetStatus"].toObject();
+    const QJsonObject tc = call("status", {{"fresh", true}}, 10000)["last"].toObject()["TaskController/GetStatus"].toObject();
     return tc["IsReady"].toBool();
 }
 void note(const QJsonObject& o) { std::fprintf(stderr, "%s\n", QJsonDocument(o).toJson(QJsonDocument::Compact).constData()); std::fflush(stderr); }
 void sleepMs(int ms) { QThread::msleep(ms); }
+
+bool pidAlive(qint64 pid);
+// Start the daemon when it does not answer; one that is alive but silent (hung) is stopped first, since a second one cannot take the port or the telescope's client slot.
+// Refuses while the GUI app runs. Returns "" when the daemon answers.
+QString startDaemon(const QString& host)
+{
+    if (call("ping", {}, 3000)["ok"].toBool()) return QString();
+    QProcess pg; pg.start("pgrep", {"-x", "CelestronOrigin"}); pg.waitForFinished(3000);
+    if (pg.exitCode() == 0) return "CelestronOrigin (the GUI app) is running; not starting a second instance";
+    const QString dir = QDir::homePath() + "/.cache"; QDir().mkpath(dir);
+    QFile pf(dir + "/origin-daemon.pid");
+    const qint64 old = pf.open(QIODevice::ReadOnly) ? QString(pf.readAll()).trimmed().toLongLong() : 0;
+    if (old > 0 && pidAlive(old)) {
+        ::kill(pid_t(old), SIGTERM);
+        for (int i = 0; i < 20 && pidAlive(old); ++i) sleepMs(500);
+        if (pidAlive(old)) ::kill(pid_t(old), SIGKILL);
+        sleepMs(1000);
+    }
+    QProcess d; d.setProgram(QCoreApplication::applicationFilePath());
+    d.setArguments({"serve", "--daemon", "--control-port", QString::number(g_port), "--connect", host, "--pidfile", dir + "/origin-daemon.pid", "--log-file", dir + "/origin-daemon.log"});
+    d.start(); d.waitForFinished(10000);
+    for (int i = 0; i < 10; ++i) { sleepMs(1000); if (call("ping", {}, 3000)["ok"].toBool()) return QString(); }
+    return "could not start the daemon (see ~/.cache/origin-daemon.log)";
+}
+
+// The tilt the tube needs to see over the trees whichever way it faces (the azimuth is unknown before an alignment): 5 deg above the highest point of the horizon
+// profile, so 45 deg with tools/horizon.json's 40 deg tree line to the north. A failed initialize can leave the tube below it (37 deg into the trees, 30 Oct 2026).
+double treeClearDeg()
+{
+    static const double v = [] {
+        double hi = 40;
+        QFile f(Planner::defaultHorizonFile());
+        if (f.open(QIODevice::ReadOnly)) { hi = 0; for (const QJsonValue& p : QJsonDocument::fromJson(f.readAll()).object()["points"].toArray()) hi = std::max(hi, p.toArray().at(1).toDouble()); }
+        return std::max(hi, 20.0) + 5;
+    }();
+    return v;
+}
+
+// Raise the tube when the tilt sensor says it is below the tree line (the GUI's unpark: up to about 60 deg). {ok, raised, tilt_alt_deg, ...}; ok without raising when already high
+// or the sensor gives no reading.
+QJsonObject raiseTubeIfLow()
+{
+    const QJsonObject ms = call("mount_status", {{"fresh", true}}, 15000);
+    if (!ms.contains("tilt_alt_deg") || ms["tilt_alt_deg"].toDouble() >= treeClearDeg()) return {{"ok", true}, {"raised", false}, {"tilt_alt_deg", ms["tilt_alt_deg"]}};
+    QJsonObject u = call("unpark", {}, 150000);
+    u["raised"] = u["ok"].toBool(); u["start_tilt_deg"] = ms["tilt_alt_deg"]; u["need_deg"] = treeClearDeg();
+    return u;
+}
+
+// After an initialize: IsReady turns true the moment it completes, alongside the reply (18:41:30 on 30 Oct), so give the status up to 16 s to catch up
+bool waitInitialised()
+{
+    for (int k = 0; k < 8; ++k) { if (initialised()) return true; sleepMs(2000); }
+    return initialised();
+}
+
+// An initialize that failed for want of stars (cloud, twilight, or the tube looking into the trees) is weather, not a fault; anything else is the telescope's
+bool starFailure(const QJsonObject& r)
+{
+    const QString s = r["error"].toString() + " " + r["summary"].toString();
+    return s.contains("enough stars", Qt::CaseInsensitive) || s.contains("identify the field of view", Qt::CaseInsensitive);
+}
 QJsonObject failure(const QString& m) { return {{"ok", false}, {"error", m}}; }
 
 QJsonObject g_wx;                                   // forecast source/age/errors of the last plannerOptions() call
@@ -786,10 +848,16 @@ QJsonObject cmdFocusSweep(const Parsed& p, const Cmd& c)
 //                                          after --give-up minutes of cloud on one block, move on to the next block
 //   focus drift                         -> narrow focus sweep (at most every 20 min), apply the best position, resume
 //   rain forecast within the hour       -> stop, park, end the night
-//   sequence/connection failure         -> wait for the server's own reconnect (else connect), restart the sequence (6 restarts), then park
+//   telescope not initialised           -> before every block: raise a low tube over the trees, initialize, check IsReady; no stars: retry every 5 min while the block lasts
+//   goto fails                          -> check the link and the initialisation, try once more; still failing: a backup target for the rest of the block, else skip the block
+//   sequence will not start or restart  -> cancel the capture twice and retry; still stuck: reboot the telescope (twice a night), initialize, go back to the target
+//   sequence keeps stopping             -> wait for the server's own reconnect (else connect; 13 min at most), restart the sequence; a 7th stop in one block skips it
+//   daemon stops answering              -> restart it (twice a night), reconnect, re-initialise if needed, go back to the target
 //   camera stuck in a capture           -> cancel twice; still stuck: reboot the telescope, wait for the link, initialize, go back to the target, resume (twice a night)
 //   a request from OriginWatch's Tasks tab -> see "run control" below (override the target, end the override, replan, stop)
-// Every decision is logged to stderr and to <data dir>/run_<date>.jsonl. The night ends parked on Polaris.
+// A block that cannot be observed is skipped and the night goes on; the run ends early only for rain, a stop, a fault a reboot did not clear, a telescope gone from the network,
+// or the same trouble three blocks running. Then it hands straight back to autorun, which relaunches unless the same failure ended the last two runs.
+// Every decision is logged to stderr and to <data dir>/run_<date>.jsonl, the run's end with its reason ("run_end"). The night ends parked on Polaris.
 // ---------------------------------------------------------------------------------------------------------------------------------------
 struct RunState {
     Planner::Options o; QTimeZone zone; QDateTime darkEnd;
@@ -797,6 +865,8 @@ struct RunState {
     bool isoFallbackDone = false, rain = false;
     QDateTime lastRefocus, lastForecast; QStringList tried;
     int switches = 0, refocuses = 0, restarts = 0, blocksDone = 0, reboots = 0;
+    int inits = 0, raises = 0, skips = 0, skipStreak = 0, daemonRestarts = 0;    // recoveries tonight: initializes, tube raises, blocks skipped (and how many in a row, for the same reason)
+    QString lastSkip, failReason;                           // why the last block was skipped; why the run ended, when it failed (for the log, the e-mail and autorun)
     QString logPath; QJsonArray decisions;
     Parsed args; const Cmd* cmd = nullptr;                  // the run's own options, to plan again after a schedule change
     QString night; QJsonArray plan; int block = -1;         // tonight's plan and the block being run (for run_state.json)
@@ -924,6 +994,7 @@ bool waitLink(int timeoutS, int nudgeS)
 // Reboot (System) clears it, also mid-exposure (tested 2026-10-28 12:57 idle, 13:01 during a 60 s exposure: link back in 25-45 s, camera IDLE, captures fine) but leaves the mount unaligned.
 // So: reboot, wait for the link, wait for the camera to report IDLE, initialize (it aligns on stars from wherever the tube points, so cloud can fail it), check alignment.
 // Returns "" on success, else why it failed. The caller goes back to the target. At most two per night: a camera that keeps hanging needs a person.
+QString ensureInitialised(const QString& context);
 QString rebootRecover(const QJsonObject& t)
 {
     if (g_run.reboots >= 2) return "already rebooted twice tonight";
@@ -941,19 +1012,67 @@ QString rebootRecover(const QJsonObject& t)
     }
     runLog("reboot_link_up", {{"target", t["key"]}, {"task_controller", tc}});
     if (tc == "SAMPLE_CAPTURE") return "the camera is still in a capture after the reboot";
-    QJsonObject r;
-    for (int k = 0; k < 2; ++k) {
-        r = call("initialize", {{"lat_deg", g_run.o.site.latDeg}, {"lon_deg", g_run.o.site.lonDeg}, {"timezone", g_run.o.timeZone}, {"wait", true}, {"timeout", 300}}, 360000);
-        const bool aligned = initialised();
-        runLog("reboot_initialize", {{"target", t["key"]}, {"ok", r["ok"]}, {"outcome", r["outcome"]}, {"summary", r["summary"]}, {"aligned", aligned}, {"attempt", k + 1}});
-        if (aligned) return QString();
-    }
-    return "initialize after the reboot did not align the mount: " + r["summary"].toString() + r["error"].toString();
+    const QString bad = ensureInitialised("after the reboot");
+    return bad.isEmpty() ? QString() : "initialize after the reboot: " + bad;
 }
 
-enum class RunResult { Done, Failed, Rain, Stopped };
+// Skipped: this block could not be observed (see g_run.lastSkip), but the night goes on with the next one. Failed: something that needs a person; the run ends.
+enum class RunResult { Done, Failed, Rain, Stopped, Skipped };
 
-RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bool isOverride = false)
+// The run's own repair of an uninitialised telescope (it starts every evening uninitialised; a reboot or a firmware hiccup also loses it): raise a low tube over the trees,
+// initialize, check IsReady. Returns "" when the telescope is ready for gotos, else why not. A failure for want of stars is weather: the caller waits and tries again later.
+QString ensureInitialised(const QString& context)
+{
+    if (initialised()) return QString();
+    if (g_run.inits >= 12) return "12 initializes tonight have not left the telescope ready";
+    for (int k = 0; k < 2; ++k) {
+        if (g_run.raises < 6) {
+            const QJsonObject u = raiseTubeIfLow();
+            if (u["raised"].toBool() || !u["ok"].toBool()) { ++g_run.raises; runLog("tube_raise", {{"context", context}, {"ok", u["ok"]}, {"from_deg", u["start_tilt_deg"]}, {"to_deg", u["tilt_alt_deg"]}, {"error", u["error"]}}); }
+        }
+        ++g_run.inits;
+        const QJsonObject r = call("initialize", {{"lat_deg", g_run.o.site.latDeg}, {"lon_deg", g_run.o.site.lonDeg}, {"timezone", g_run.o.timeZone}, {"wait", true}, {"timeout", 300}}, 360000);
+        const bool ready = waitInitialised();
+        runLog("initialize", {{"context", context}, {"ok", r["ok"]}, {"outcome", r["outcome"]}, {"summary", r["summary"]}, {"error", r["error"]}, {"ready", ready}, {"attempt", k + 1}});
+        if (ready) return QString();
+        if (starFailure(r)) { raiseTubeIfLow(); return "no stars for the alignment: " + r["summary"].toString() + r["error"].toString(); }
+    }
+    return "initialize did not leave the telescope ready";
+}
+
+// Wait, up to the end of the block, for the telescope to become ready (an alignment needs stars: cloud passes). Rain, a stop or a replan end the wait.
+QString waitForReady(const QJsonObject& t, const QDateTime& endUtc)
+{
+    QString bad = ensureInitialised(t["key"].toString());
+    while (!bad.isEmpty() && bad.startsWith("no stars") && QDateTime::currentDateTimeUtc().addSecs(600) < endUtc && !g_run.stop && !g_run.replan) {
+        runLog("waiting_for_stars", {{"target", t["key"]}, {"why", bad}, {"retry_in_min", 5}});
+        g_run.current = QJsonObject{{"waiting", "initialize: " + bad}}; writeRunState("waiting");
+        for (int s = 0; s < 10; ++s) { sleepMs(30000); Control k; if (takeControl(&k)) { if (k.action == "stop") { g_run.stop = true; return "stopped"; } if (k.action == "replan") { g_run.replan = true; return "replanning"; } } }
+        if (rainSoon()) { g_run.rain = true; return "rain forecast"; }
+        bad = ensureInitialised(t["key"].toString());
+    }
+    return bad;
+}
+
+// The block's target cannot be observed: try a backup far from it in the sky for the rest of the block (at most 3 deep), else skip the block. `why` goes to the log and the e-mail.
+RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bool isOverride = false);
+RunResult backupOrSkip(const QJsonObject& t, const QDateTime& endUtc, int depth, const QString& why)
+{
+    g_run.tried.append(t["key"].toString());
+    if (depth < 3 && initialised()) {
+        const QJsonObject bk = Planner::backupTargets(g_run.o, t["ra_hours"].toDouble(), t["dec_deg"].toDouble(), QDateTime::currentDateTimeUtc(), 20, 3, 30, g_run.tried);
+        const QJsonArray list = bk["backups"].toArray();
+        if (!list.isEmpty()) {
+            const QJsonObject next = list.first().toObject();
+            runLog("switch", {{"from", t["key"]}, {"to", next["key"]}, {"reason", why}, {"separation_deg", next["separation_deg"]}}); ++g_run.switches;
+            return runTarget(next, endUtc, depth + 1, false);
+        }
+    }
+    g_run.lastSkip = why; runLog("block_skipped", {{"target", t["key"]}, {"why", why}});
+    return RunResult::Skipped;
+}
+
+RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bool isOverride)
 {
     const QDateTime t0 = QDateTime::currentDateTimeUtc();
     const double exposure = exposureFor(t, t0, t0);      // the rotation limit now; the sequencer's auto exposure follows it through the block
@@ -962,12 +1081,55 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
     runLog("start", {{"target", t["key"]}, {"exposure_s", exposure}, {"iso", iso}, {"until", endUtc.toTimeZone(g_run.zone).toString("HH:mm")}, {"backup", depth > 0}, {"override", isOverride}});
     const QJsonObject outer = g_run.current;
     g_run.current = {{"key", t["key"]}, {"name", t["name"]}, {"until", endUtc.toString(Qt::ISODate)}, {"override", isOverride}, {"backup", depth > 0}}; writeRunState();
+    // the telescope must be initialised before a goto: repair it here (raise the tube, initialize; wait for stars while the block lasts) rather than fail the night
+    {
+        const QString bad = waitForReady(t, endUtc);
+        if (g_run.stop) { g_run.current = outer; return RunResult::Stopped; }
+        if (g_run.rain) { g_run.current = outer; return RunResult::Rain; }
+        if (g_run.replan) { g_run.current = outer; return RunResult::Done; }
+        if (!bad.isEmpty()) { g_run.current = outer; g_run.lastSkip = "not initialised: " + bad; runLog("block_skipped", {{"target", t["key"]}, {"why", g_run.lastSkip}}); return RunResult::Skipped; }
+    }
     QJsonObject r = slewTo(t, exposure, iso);
-    if (!r["ok"].toBool()) { runLog("slew_failed", {{"target", t["key"]}, {"error", r["error"]}}); return RunResult::Failed; }
-    if (!startSeq(exposure, iso, endUtc, true)) { runLog("sequence_start_failed", {{"target", t["key"]}}); return RunResult::Failed; }
+    if (!r["ok"].toBool()) {
+        // diagnose before giving up on the target: the link, the initialisation, then one more goto
+        runLog("slew_failed", {{"target", t["key"]}, {"error", r["error"]}});
+        if (!call("status", {{"fresh", true}}, 20000)["connected"].toBool()) runLog("reconnect", {{"host", g_run.host}, {"ok", waitLink(300, 90)}});
+        const QString bad = ensureInitialised(t["key"].toString());
+        if (bad.isEmpty()) { r = slewTo(t, exposure, iso); runLog("slew_retry", {{"target", t["key"]}, {"ok", r["ok"]}, {"error", r["error"]}}); }
+        if (!r["ok"].toBool()) { g_run.current = outer; return backupOrSkip(t, endUtc, depth, "goto failed: " + (bad.isEmpty() ? r["error"].toString() : bad)); }
+    }
+    // a capture that will not start: cancel a stuck one and try again; a camera that stays stuck gets the reboot recovery. "" = capturing again, else why not
+    auto recoverCapture = [&](const QString& why) -> QString {
+        for (int k = 0; k < 2; ++k) {
+            const QJsonObject cc = call("cancel_capture", {{"wait", 30}}, 60000);
+            runLog("capture_cancel", {{"target", t["key"]}, {"why", why}, {"cleared", cc["cleared"]}, {"state_now", cc["state_now"]}, {"attempt", k + 1}});
+            call("set", {{"exposure", 0.5}, {"iso", iso}}); sleepMs(3000);
+            if (startSeq(exposure, iso, endUtc, true)) return QString();
+        }
+        runLog("camera_hung", {{"target", t["key"]}, {"why", why + "; the capture still will not start after two cancels: rebooting the telescope"}});
+        const QString rb = rebootRecover(t);
+        if (!rb.isEmpty()) return rb;
+        r = slewTo(t, exposure, iso);
+        runLog("reboot_recovered", {{"target", t["key"]}, {"goto_ok", r["ok"]}, {"error", r["error"]}});
+        if (!r["ok"].toBool()) return "goto after the reboot failed: " + r["error"].toString();
+        return startSeq(exposure, iso, endUtc, true) ? QString() : "the capture will not start even after a reboot";
+    };
+    // a camera fault is the run's to end only when the reboot recovery could not clear it; anything else skips to the next block
+    auto captureFailed = [&](const QString& bad) -> RunResult {
+        g_run.current = outer;
+        if (bad.contains("still in a capture") || bad.contains("will not start even after a reboot") || bad.contains("did not come back") || bad.contains("reboot refused")) {
+            g_run.failReason = "camera: " + bad + "; power-cycle the telescope"; runLog("reboot_recovery_failed", {{"target", t["key"]}, {"why", g_run.failReason}}); return RunResult::Failed;
+        }
+        return backupOrSkip(t, endUtc, depth, "capture: " + bad);
+    };
+    if (!startSeq(exposure, iso, endUtc, true)) {
+        runLog("sequence_start_failed", {{"target", t["key"]}});
+        const QString bad = recoverCapture("the sequence would not start");
+        if (!bad.isEmpty()) return captureFailed(bad);
+    }
     int trailedFrames = 0, regotos = 0; QDateTime cloudSince, blockCloudStart; double cloudMinTotal = 0; QDateTime lastTick = QDateTime::currentDateTimeUtc();
     qint64 seq = call("events", {{"since", 1e12}})["next"].toDouble();            // only events from now on
-    bool obstructed = false; int failures = 0;
+    bool obstructed = false; int failures = 0, blockRestarts = 0;
     while (true) {
         sleepMs(20000);
         const QDateTime now = QDateTime::currentDateTimeUtc();
@@ -983,7 +1145,7 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
                     call("sequence", {{"action", "stop"}, {"reason", "override: " + ot["key"].toString()}}); call("stack", {}, 60000);
                     if (isOverride) { g_run.current = outer; return runTarget(ot, parseZ(ot["override_until"].toString()), depth, true); }     // a new override replaces this one
                     const RunResult rr = runTarget(ot, parseZ(ot["override_until"].toString()), depth, true);
-                    if (rr != RunResult::Done || g_run.replan || g_run.stop) { g_run.current = outer; return rr; }
+                    if ((rr != RunResult::Done && rr != RunResult::Skipped) || g_run.replan || g_run.stop) { g_run.current = outer; return rr; }   // a skipped override still resumes this block
                     if (QDateTime::currentDateTimeUtc() < endUtc && QDateTime::currentDateTimeUtc() < g_run.darkEnd) { runLog("resume", {{"target", t["key"]}}); g_run.current = outer; return runTarget(t, endUtc, depth); }
                     g_run.current = outer; return RunResult::Done;
                 }
@@ -995,7 +1157,21 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
             if (rainSoon()) { call("sequence", {{"action", "stop"}, {"reason", "rain forecast"}}); runLog("rain_forecast", {{"target", t["key"]}}); g_run.rain = true; return RunResult::Rain; }
         }
         const QJsonObject st = call("sequence", {{"action", "status"}}, 20000);
-        if (!st["ok"].toBool()) { if (++failures >= 3) { runLog("server_lost", {{"error", st["error"]}}); return RunResult::Failed; } continue; }
+        if (!st["ok"].toBool()) {
+            if (++failures < 3) continue;
+            // the daemon stopped answering: restart it (once or twice a night), reconnect, re-initialise if the telescope lost it, and go back to the target
+            runLog("server_lost", {{"error", st["error"]}});
+            const QString bad = g_run.daemonRestarts++ < 2 ? startDaemon(g_run.host.isEmpty() ? QString("192.168.1.195") : g_run.host) : QString("the daemon was restarted twice tonight already");
+            runLog("daemon_restart", {{"ok", bad.isEmpty()}, {"error", bad}, {"count", g_run.daemonRestarts}});
+            if (!bad.isEmpty() || !waitLink(300, 60)) { g_run.failReason = "the control daemon stopped answering and could not be brought back: " + (bad.isEmpty() ? QString("no link to the telescope") : bad); g_run.current = outer; return RunResult::Failed; }
+            failures = 0;
+            const QString ni = ensureInitialised(t["key"].toString());
+            if (!ni.isEmpty()) { g_run.current = outer; return backupOrSkip(t, endUtc, depth, "not initialised after the daemon restart: " + ni); }
+            r = slewTo(t, exposure, iso);
+            if (!r["ok"].toBool()) { g_run.current = outer; return backupOrSkip(t, endUtc, depth, "goto failed after the daemon restart: " + r["error"].toString()); }
+            if (!startSeq(exposure, iso, endUtc, true)) { const QString cb = recoverCapture("the sequence would not start after the daemon restart"); if (!cb.isEmpty()) return captureFailed(cb); }
+            continue;
+        }
         failures = 0;
         const QJsonObject s = st["status"].toObject();
         const QJsonObject ev = call("events", {{"since", double(seq)}}, 20000);
@@ -1012,13 +1188,22 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
                 r = call("set", {{"exposure", 0.5}, {"iso", iso}});
             } else {
                 runLog("sequence_stopped", {{"target", t["key"]}, {"reason", why}});
-                if (++g_run.restarts > 6) return RunResult::Failed;
+                ++g_run.restarts;
+                if (++blockRestarts > 6) { call("stack", {}, 60000); g_run.current = outer; return backupOrSkip(t, endUtc, depth, "the sequence keeps stopping: " + why); }
                 const QJsonObject stt = call("status", {{"fresh", true}}, 20000);
                 if (!stt["connected"].toBool()) {
                     // the server reconnects by itself (5 s after the drop, then every 15 s); ask it directly only if that has not worked within 90 s
-                    const bool up = waitLink(180, 90);
+                    bool up = waitLink(180, 90);
                     runLog("reconnect", {{"host", g_run.host}, {"ok", up}});
-                    if (!up) return RunResult::Failed;
+                    if (!up) { up = waitLink(600, 0); runLog("reconnect", {{"host", g_run.host}, {"ok", up}, {"waited_min", 10}}); }
+                    if (!up) { g_run.failReason = "the telescope left the network and did not come back within 13 minutes (battery? power?)"; g_run.current = outer; return RunResult::Failed; }
+                    // a telescope that dropped off may have restarted: it is then uninitialised and pointing anywhere
+                    if (!initialised()) {
+                        const QString ni = ensureInitialised(t["key"].toString());
+                        if (!ni.isEmpty()) { g_run.current = outer; return backupOrSkip(t, endUtc, depth, "not initialised after the link came back: " + ni); }
+                        r = slewTo(t, exposure, iso);
+                        if (!r["ok"].toBool()) { g_run.current = outer; return backupOrSkip(t, endUtc, depth, "goto failed after the link came back: " + r["error"].toString()); }
+                    }
                     sleepMs(10000);                                              // let the first statuses arrive before the next capture
                 }
                 else if (why == "frame never arrived") {
@@ -1032,14 +1217,18 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
                     if (!cleared) {
                         runLog("camera_hung", {{"target", t["key"]}, {"why", "the telescope still reports a capture in progress after two cancels: rebooting it"}});
                         const QString bad = rebootRecover(t);
-                        if (!bad.isEmpty()) { runLog("reboot_recovery_failed", {{"target", t["key"]}, {"why", bad + "; power-cycle the telescope"}}); return RunResult::Failed; }
+                        if (!bad.isEmpty()) return captureFailed(bad);
                         r = slewTo(t, exposure, iso);
                         runLog("reboot_recovered", {{"target", t["key"]}, {"goto_ok", r["ok"]}, {"error", r["error"]}});
-                        if (!r["ok"].toBool()) return RunResult::Failed;
+                        if (!r["ok"].toBool()) { g_run.current = outer; return backupOrSkip(t, endUtc, depth, "goto after the reboot failed: " + r["error"].toString()); }
                     }
                 }
             }
-            if (!startSeq(exposure, iso, endUtc, !(why == "focus drift"))) { runLog("sequence_restart_failed", {{"target", t["key"]}}); return RunResult::Failed; }
+            if (!startSeq(exposure, iso, endUtc, !(why == "focus drift"))) {
+                runLog("sequence_restart_failed", {{"target", t["key"]}});
+                const QString bad = recoverCapture("the sequence would not restart after: " + why);
+                if (!bad.isEmpty()) return captureFailed(bad);
+            }
             continue;
         }
         // trailed stars are the mount's fault, not cloud: re-centre with a fresh goto (at most 3 times per block) instead of counting cloud time or leaving for a backup
@@ -1113,8 +1302,8 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
 // the morning summary of an unattended night, from the decision log and the stacks the server reports
 void mailRunSummary(const QString& outcome, const QString& night)
 {
-    QString body = QString("Unattended night %1: %2.\n\nBlocks run: %3, target switches: %4, refocuses: %5, restarts: %6, telescope reboots: %7.\n\nWhat it did (local time):\n")
-                       .arg(night, outcome).arg(g_run.blocksDone).arg(g_run.switches).arg(g_run.refocuses).arg(g_run.restarts).arg(g_run.reboots);
+    QString body = QString("Unattended night %1: %2.\n\nBlocks run: %3 (skipped: %8), target switches: %4, refocuses: %5, restarts: %6, telescope reboots: %7, initializes: %9, tube raises: %10, daemon restarts: %11.\n\nWhat it did (local time):\n")
+                       .arg(night, outcome).arg(g_run.blocksDone).arg(g_run.switches).arg(g_run.refocuses).arg(g_run.restarts).arg(g_run.reboots).arg(g_run.skips).arg(g_run.inits).arg(g_run.raises).arg(g_run.daemonRestarts);
     for (const QJsonValue& v : g_run.decisions) {
         const QJsonObject d = v.toObject(); QStringList bits;
         for (auto it = d.constBegin(); it != d.constEnd(); ++it)
@@ -1203,6 +1392,14 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
         g_run.tried = QStringList{b["key"].toString()};
         res = runTarget(b, end, 0);
         ++g_run.blocksDone;
+        if (res == RunResult::Skipped) {
+            // a block that could not be observed does not end the night; the same trouble three blocks running does (it will not fix itself)
+            ++g_run.skips;
+            static QString prevKind; const QString kind = g_run.lastSkip.section(':', 0, 0);
+            g_run.skipStreak = kind == prevKind ? g_run.skipStreak + 1 : 1; prevKind = kind;
+            if (g_run.skipStreak >= 3) { g_run.failReason = "three blocks in a row could not be observed: " + g_run.lastSkip; res = RunResult::Failed; break; }
+            res = RunResult::Done;
+        } else g_run.skipStreak = 0;
         if (res == RunResult::Rain || res == RunResult::Failed || res == RunResult::Stopped) break;
         if (g_run.replan) { --i; continue; }
         g_run.tried.clear();
@@ -1211,9 +1408,16 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
     const QJsonObject park = parkIt ? cmdPark() : QJsonObject{{"ok", true}, {"skipped", "stopped from OriginWatch without parking"}};
     const QString outcome = g_run.stop ? "stopped" : res == RunResult::Done ? "complete" : res == RunResult::Rain ? "rain" : "failed";
     runLog("parked", {{"ok", park["ok"]}, {"outcome", outcome}, {"parked", parkIt}});
+    runLog("run_end", {{"outcome", outcome}, {"reason", g_run.failReason}, {"skips", g_run.skips}, {"inits", g_run.inits}});
     g_run.current = {{"finished", outcome}}; writeRunState("finished");
-    if (p.v.contains("mail")) mailRunSummary(g_run.stop ? "stopped from OriginWatch" : res == RunResult::Done ? "complete" : res == RunResult::Rain ? "stopped for rain" : "stopped after a failure", S["night"].toString());
-    return {{"ok", res != RunResult::Failed}, {"outcome", g_run.stop ? "stopped from OriginWatch" : res == RunResult::Done ? "complete" : res == RunResult::Rain ? "stopped: rain forecast" : "stopped: failure"}, {"blocks_run", g_run.blocksDone},
+    if (p.v.contains("mail")) mailRunSummary(g_run.stop ? "stopped from OriginWatch" : res == RunResult::Done ? "complete" : res == RunResult::Rain ? "stopped for rain" : "stopped after a failure: " + (g_run.failReason.isEmpty() ? QString("see the log") : g_run.failReason), S["night"].toString());
+    // a failed run hands straight back to autorun (once this process has gone) instead of waiting up to 10 minutes for the next cron tick; autorun decides whether to relaunch
+    if (res == RunResult::Failed && !g_run.stop && p.v.contains("unattended") && QDateTime::currentDateTimeUtc() < g_run.darkEnd.addSecs(-3600)) {
+        const QString sh = QString("sleep 20; ORIGIN_CONTROL_PORT=%1 '%2' autorun >> \"$HOME/.cache/origin-autorun.log\" 2>&1").arg(g_port).arg(QCoreApplication::applicationFilePath());
+        QProcess::startDetached("sh", {"-c", sh});
+        note({{"handed_to_autorun", true}});
+    }
+    return {{"ok", res != RunResult::Failed}, {"outcome", g_run.stop ? "stopped from OriginWatch" : res == RunResult::Done ? "complete" : res == RunResult::Rain ? "stopped: rain forecast" : "stopped: failure"}, {"reason", g_run.failReason}, {"blocks_run", g_run.blocksDone},
             {"switches", g_run.switches}, {"refocuses", g_run.refocuses}, {"log", g_run.logPath}, {"parked", parkIt && park["ok"].toBool()}};
 }
 
@@ -1606,11 +1810,18 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
     const QString runLogPath = originDataDir() + "/run_" + QString(night).remove('-') + ".jsonl";
     if (st["launches"].toInt() > 0) {
         if (pidAlive(qint64(st["pid"].toDouble()))) return idle("run is in progress");
-        // finished = parked at the end of the night; a run that failed parks too ("outcome":"failed"), and is relaunched like one that died
+        // a run that failed parks too ("outcome":"failed"), and is relaunched like one that died
         QFile f(runLogPath); const QByteArray rl = f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
-        const bool parked = rl.contains("\"decision\":\"parked\""), failed = rl.contains("\"outcome\":\"failed\"");
-        if (parked && !failed) return idle("tonight's run has finished");
-        if (st["launches"].toInt() >= 3) return idle("run died 3 times tonight; giving up");
+        // all of a night's runs share one log: the last "parked" line says how the last run ended
+        QString lastOutcome;
+        for (const QByteArray& line : rl.split('\n')) { const QJsonObject j = QJsonDocument::fromJson(line).object(); if (j["decision"].toString() == "parked") lastOutcome = j["outcome"].toString(); }
+        if (!lastOutcome.isEmpty() && lastOutcome != "failed") return idle("tonight's run has finished");
+        const bool failed = lastOutcome == "failed";
+        // relaunch unless the same failure has ended the last two runs (it will not fix itself; the e-mail says why) or this is the 6th launch
+        QStringList reasons;
+        for (const QByteArray& line : rl.split('\n')) { const QJsonObject j = QJsonDocument::fromJson(line).object(); if (j["decision"].toString() == "run_end" && j["outcome"].toString() == "failed") reasons << j["reason"].toString().section(':', 0, 0); }
+        if (reasons.size() >= 2 && !reasons.last().isEmpty() && reasons.last() == reasons[reasons.size() - 2]) return idle("the run failed twice for the same reason (" + reasons.last() + "); not relaunching tonight");
+        if (st["launches"].toInt() >= 6) return idle("the run was launched 6 times tonight; giving up");
         note({{"autorun", failed ? "run ended in failure; relaunching" : "run process died before parking; relaunching"}});
     }
     if (S["plan"].toArray().isEmpty()) return idle("nothing observable tonight");
@@ -1620,14 +1831,8 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
 
     // daemon: one instance only. The old GUI app would hold the telescope's single client slot.
     if (!call("ping", {}, 3000)["ok"].toBool()) {
-        QProcess pg; pg.start("pgrep", {"-x", "CelestronOrigin"}); pg.waitForFinished(3000);
-        if (pg.exitCode() == 0) return idle("CelestronOrigin (the GUI app) is running; not starting a second instance");
-        const QString dir = QDir::homePath() + "/.cache"; QDir().mkpath(dir);
-        QProcess d; d.setProgram(QCoreApplication::applicationFilePath());
-        d.setArguments({"serve", "--daemon", "--control-port", QString::number(g_port), "--connect", str(p, "telescope", "192.168.1.195"), "--pidfile", dir + "/origin-daemon.pid", "--log-file", dir + "/origin-daemon.log"});
-        d.start(); d.waitForFinished(10000);
-        sleepMs(4000);
-        if (!call("ping", {}, 3000)["ok"].toBool()) return idle("could not start the daemon (see ~/.cache/origin-daemon.log)");
+        const QString bad = startDaemon(str(p, "telescope", "192.168.1.195"));
+        if (!bad.isEmpty()) return idle(bad);
         note({{"autorun", "daemon started"}});
     }
     if (!call("status", {}, 10000)["connected"].toBool()) {
@@ -1641,7 +1846,7 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
         // The solve proves there are stars to align on and tells us where the tube points; it is advisory for now: after 2 failed solves the initialize is tried anyway.
         {
             const QJsonObject ms = call("mount_status", {}, 15000);
-            if (ms.contains("tilt_alt_deg") && ms["tilt_alt_deg"].toDouble() < 45) {
+            if (ms.contains("tilt_alt_deg") && ms["tilt_alt_deg"].toDouble() < treeClearDeg()) {
                 if (st["unparks"].toInt() >= 3) return idle("tube still low after 3 unpark attempts; needs a look");
                 st["unparks"] = st["unparks"].toInt() + 1; save();
                 note({{"autorun", "tube is low (tilt sensor); unparking"}, {"tilt", ms["tilt_alt_deg"]}});
@@ -1686,8 +1891,10 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
         note({{"autorun", "initializing the mount"}});
         QJsonObject r = call("initialize", {{"lat_deg", o.site.latDeg}, {"lon_deg", o.site.lonDeg}, {"timezone", o.timeZone}, {"wait", true}, {"timeout", 300}}, 360000);
         if (!r["ok"].toBool() || r["outcome"].toString().toLower() == "failed") {
-            if (r["error"].toString().contains("enough stars", Qt::CaseInsensitive) || r["summary"].toString().contains("enough stars", Qt::CaseInsensitive)) {
-                // the sky is not clear enough yet: that is weather, not a mount fault, so it does not use up one of the 3 attempts (at most 12 such tries a night)
+            // a failed initialize can leave the tube low, looking into the trees (37 deg, 30 Oct 2026): raise it now so the next try sees sky
+            { const QJsonObject u = raiseTubeIfLow(); if (u["raised"].toBool()) note({{"autorun", "tube left low by the failed initialize; raised"}, {"result", u}}); }
+            if (starFailure(r)) {
+                // no stars (cloud, twilight, or trees in the way): that is weather, not a mount fault, so it does not use up one of the 3 attempts (at most 12 such tries a night)
                 st["init_attempts"] = st["init_attempts"].toInt() - 1; st["star_fails"] = st["star_fails"].toInt() + 1; save();
                 if (st["star_fails"].toInt() > 12) return idle("the alignment found too few stars 12 times tonight; giving up until the sky clears (touch nothing; it will keep trying tomorrow)");
                 return idle("initialize: not enough stars for alignment (cloud?); will retry next tick");
@@ -1704,10 +1911,7 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
             return idle(QString("initialize failed (%1); fake-init %2, moved to az %3 alt %4 (%5); will retry the real initialize").arg(r["summary"].toString(), fk["ok"].toBool() ? "ok" : "failed").arg(newAz, 0, 'f', 0).arg(newAlt, 0, 'f', 0).arg(g["ok"].toBool() ? "goto ok" : g["error"].toString()));
         }
         // never launch the run on a mount that is not aligned, whatever the initialize call reported
-        // IsReady turns true the moment the initialize completes, alongside the reply (18:41:30 on 30 Oct): give the status a few seconds to catch up
-        bool ready = false;
-        for (int k = 0; k < 8 && !(ready = initialised()); ++k) sleepMs(2000);
-        if (!ready) {
+        if (!waitInitialised()) {
             st["need_real_init"] = false; save();
             return idle("initialize returned but the telescope is not initialised (mount not aligned, or TaskController not ready); will retry next tick");
         }
