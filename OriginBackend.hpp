@@ -17,6 +17,8 @@
 #include <QTextStream>
 #include <QStandardPaths>
 #include <QDir>
+#include <QDateTime>
+#include <QHash>
 #include <QStringConverter>
 #include <QWebSocket>
 #include "TelescopeDataProcessor.hpp"
@@ -207,6 +209,7 @@ private:
     
     // Pending operations
     QMap<int, QString> m_pendingCommands;
+    QHash<QString, QDateTime> m_auxLost;      // device (Source) -> when it first answered -802, until it answers cleanly again
     QString m_currentImagingSession;
     QFile* m_logFile;
     QTextStream* m_logStream;
