@@ -312,6 +312,15 @@ QJsonObject call(const QJsonObject& reqIn, int timeoutMs = 120000)
     return QJsonDocument::fromJson(buf).object();
 }
 QJsonObject call(const QString& cmd, QJsonObject extra = {}, int timeoutMs = 120000) { extra["cmd"] = cmd; return call(extra, timeoutMs); }
+// Is the telescope initialised for precise gotos? The mount's IsAligned is not enough: a failed initialize can leave IsAligned true with one alignment reference
+// while the TaskController still says IsReady false and rejects GotoRaDec ("not yet initialized"; 30 Oct 2026, after a reboot, the run launched on that and failed at its first goto).
+// IsReady is the firmware's own flag; it turned true on 29 Oct only when an initialize succeeded.
+bool initialised()
+{
+    if (!call("mount_status", {{"fresh", true}}, 15000)["mount"].toObject()["IsAligned"].toBool()) return false;
+    const QJsonObject tc = call("status", {}, 10000)["last"].toObject()["TaskController/GetStatus"].toObject();
+    return tc["IsReady"].toBool();
+}
 void note(const QJsonObject& o) { std::fprintf(stderr, "%s\n", QJsonDocument(o).toJson(QJsonDocument::Compact).constData()); std::fflush(stderr); }
 void sleepMs(int ms) { QThread::msleep(ms); }
 QJsonObject failure(const QString& m) { return {{"ok", false}, {"error", m}}; }
@@ -935,7 +944,7 @@ QString rebootRecover(const QJsonObject& t)
     QJsonObject r;
     for (int k = 0; k < 2; ++k) {
         r = call("initialize", {{"lat_deg", g_run.o.site.latDeg}, {"lon_deg", g_run.o.site.lonDeg}, {"timezone", g_run.o.timeZone}, {"wait", true}, {"timeout", 300}}, 360000);
-        const bool aligned = call("mount_status", {{"fresh", true}}, 15000)["mount"].toObject()["IsAligned"].toBool();
+        const bool aligned = initialised();
         runLog("reboot_initialize", {{"target", t["key"]}, {"ok", r["ok"]}, {"outcome", r["outcome"]}, {"summary", r["summary"]}, {"aligned", aligned}, {"attempt", k + 1}});
         if (aligned) return QString();
     }
@@ -1422,7 +1431,7 @@ QJsonObject cmdSurvey(const Parsed& p, const Cmd& c)
     if (sunNow > num(p, c, "sun-limit")) return failure(QString("too early: the Sun is at %1 deg (the survey needs it below %2)").arg(sunNow, 0, 'f', 1).arg(num(p, c, "sun-limit"), 0, 'f', 0));
     { QProcess pg; pg.start("pgrep", {"-x", "CelestronOrigin"}); pg.waitForFinished(3000); if (pg.exitCode() == 0) return failure("the GUI app is running; it holds the telescope"); }
     if (!call("status", {}, 10000)["connected"].toBool()) return failure("the daemon is not connected to the telescope");
-    if (!call("mount_status", {}, 15000)["mount"].toObject()["IsAligned"].toBool()) return failure("the mount is not aligned; initialize first");
+    if (!initialised()) return failure("the telescope is not initialised (mount not aligned, or TaskController not ready); initialize first");
     if (call("sequence", {{"action", "status"}}, 10000)["status"].toObject()["active"].toBool()) return failure("a sequence is running");
     if (runActive()) return failure("an unattended run is in progress; it holds the telescope");
 
@@ -1511,7 +1520,7 @@ QJsonObject cmdSkySurvey(const Parsed& p, const Cmd& c)
     if (sunNow > num(p, c, "sun-limit")) return failure(QString("too early: the Sun is at %1 deg (the sky survey needs it below %2)").arg(sunNow, 0, 'f', 1).arg(num(p, c, "sun-limit"), 0, 'f', 0));
     { QProcess pg; pg.start("pgrep", {"-x", "CelestronOrigin"}); pg.waitForFinished(3000); if (pg.exitCode() == 0) return failure("the GUI app is running; it holds the telescope"); }
     if (!call("status", {}, 10000)["connected"].toBool()) return failure("the daemon is not connected to the telescope");
-    if (!call("mount_status", {}, 15000)["mount"].toObject()["IsAligned"].toBool()) return failure("the mount is not aligned; initialize first");
+    if (!initialised()) return failure("the telescope is not initialised (mount not aligned, or TaskController not ready); initialize first");
     if (call("sequence", {{"action", "status"}}, 10000)["status"].toObject()["active"].toBool()) return failure("a sequence is running");
     if (runActive()) return failure("an unattended run is in progress; it holds the telescope");
 
@@ -1597,10 +1606,12 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
     const QString runLogPath = originDataDir() + "/run_" + QString(night).remove('-') + ".jsonl";
     if (st["launches"].toInt() > 0) {
         if (pidAlive(qint64(st["pid"].toDouble()))) return idle("run is in progress");
-        QFile f(runLogPath); const bool parked = f.open(QIODevice::ReadOnly) && f.readAll().contains("\"decision\":\"parked\"");
-        if (parked) return idle("tonight's run has finished");
+        // finished = parked at the end of the night; a run that failed parks too ("outcome":"failed"), and is relaunched like one that died
+        QFile f(runLogPath); const QByteArray rl = f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+        const bool parked = rl.contains("\"decision\":\"parked\""), failed = rl.contains("\"outcome\":\"failed\"");
+        if (parked && !failed) return idle("tonight's run has finished");
         if (st["launches"].toInt() >= 3) return idle("run died 3 times tonight; giving up");
-        note({{"autorun", "run process died before parking; relaunching"}});
+        note({{"autorun", failed ? "run ended in failure; relaunching" : "run process died before parking; relaunching"}});
     }
     if (S["plan"].toArray().isEmpty()) return idle("nothing observable tonight");
     if (p.v.contains("dry-run")) return {{"ok", true}, {"acted", false}, {"dry_run", true}, {"night", night}, {"would", "start the daemon if needed, connect, initialize if needed, launch run --unattended --mail"}, {"blocks", S["plan"].toArray().size()}};
@@ -1624,8 +1635,7 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
         sleepMs(3000);
         if (!call("status", {}, 10000)["connected"].toBool()) return idle("telescope does not answer (not put out, or off)");
     }
-    const QJsonObject mount = call("mount_status", {}, 15000)["mount"].toObject();
-    if (!mount["IsAligned"].toBool() || st["need_real_init"].toBool()) {
+    if (!initialised() || st["need_real_init"].toBool()) {
         if (st["init_attempts"].toInt() >= 3) return idle("mount will not align (3 attempts); needs a look");
         // Before the first init: raise the tube if the tilt sensor says it is low (the GUI's unpark, at most 3 times a night), then take a frame and plate-solve it.
         // The solve proves there are stars to align on and tells us where the tube points; it is advisory for now: after 2 failed solves the initialize is tried anyway.
@@ -1694,9 +1704,12 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
             return idle(QString("initialize failed (%1); fake-init %2, moved to az %3 alt %4 (%5); will retry the real initialize").arg(r["summary"].toString(), fk["ok"].toBool() ? "ok" : "failed").arg(newAz, 0, 'f', 0).arg(newAlt, 0, 'f', 0).arg(g["ok"].toBool() ? "goto ok" : g["error"].toString()));
         }
         // never launch the run on a mount that is not aligned, whatever the initialize call reported
-        if (!call("mount_status", {{"fresh", true}}, 15000)["mount"].toObject()["IsAligned"].toBool()) {
+        // IsReady turns true the moment the initialize completes, alongside the reply (18:41:30 on 30 Oct): give the status a few seconds to catch up
+        bool ready = false;
+        for (int k = 0; k < 8 && !(ready = initialised()); ++k) sleepMs(2000);
+        if (!ready) {
             st["need_real_init"] = false; save();
-            return idle("initialize returned but the mount is not aligned; will retry next tick");
+            return idle("initialize returned but the telescope is not initialised (mount not aligned, or TaskController not ready); will retry next tick");
         }
         st["need_real_init"] = false; save();
     }
