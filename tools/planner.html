@@ -98,14 +98,15 @@ function survey(b) {
 }
 function renderPlan(tg, now) {
   const P = D.plan || [];
-  $('#plannote').textContent = P.length ? P.length + (P.length === 1 ? ' block' : ' blocks') + ' (the unattended run replans as the night goes)' : '';
+  $('#plannote').textContent = P.length ? P.length + (P.length === 1 ? ' block' : ' blocks') + (D.plan_source === 'run' ? ' (the blocks tonight’s run is following)' : ' (no run in progress: the schedule as it stands now)') : '';
   if (!P.length) { $('#plan').innerHTML = '<div class="sub">nothing planned for the rest of this night</div>'; return; }
   $('#plan').innerHTML = P.map(b => {
     const s = new Date(b.start), e = new Date(b.end), cls = now >= e ? 'past' : (now >= s || b.name === tg) ? 'now' : '';
     let pics = b.ra_hours != null ? '<figure><img loading="lazy" src="' + survey(b) + '" alt="survey image of ' + esc(b.name) + '"><figcaption>DSS2 red survey (NASA SkyView), framed as the telescope field (75′ × 50′), north up</figcaption></figure>' : '';
     pics += b.thumb ? '<figure><img src="' + b.thumb + '" alt="our stack of ' + esc(b.name) + '"><figcaption>' + esc(b.thumb_note) + '</figcaption></figure>'
                     : '<figure><div style="aspect-ratio:3/2;border:1px dashed var(--line);border-radius:4px;display:grid;place-items:center;color:var(--mute);font-size:12px">no stack yet: new target</div></figure>';
-    return '<div class="blk ' + cls + '"><h3>' + esc(b.name) + '</h3><div class="when">' + hhmm(s) + '–' + hhmm(e) + ' · ' + b.minutes + ' min · priority ' + b.priority
+    return '<div class="blk ' + cls + '"><h3>' + esc(b.name) + '</h3><div class="when">' + hhmm(s) + '–' + hhmm(e) + ' · ' + b.minutes + ' min'
+      + (b.started ? ' · started ' + hhmm(new Date(b.started)) + (b.backup ? ' (backup)' : '') : '') + ' · priority ' + b.priority
       + (b.size_arcmin ? ' · ' + b.size_arcmin + '′ across' : '') + (b.novelty ? ' · covered ' + esc(b.novelty) : '') + (cls === 'now' ? ' · <b>now</b>' : '') + '</div><div class="pics">' + pics + '</div></div>';
   }).join('');
 }

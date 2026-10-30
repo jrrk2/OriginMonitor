@@ -76,11 +76,30 @@ def our_picture(data, ra_h, dec, filt='clear', width=480):
     except Exception: return {}
 
 
+def tonights_run(data, night):
+    """the plan the unattended run is following (run_state.json, kept up to date by the run, replans included) while that run is alive, and the blocks it has started,
+    from its log after the last run_start: {key: start line}. (None, {}) when no run of this night is running: the page then shows the schedule's plan."""
+    try:
+        st = json.load(open(os.path.join(data, 'run_state.json')))
+        if st.get('night') != night or st.get('phase') in ('finished', 'parked'): return None, {}
+        os.kill(int(st['pid']), 0)
+    except (OSError, ValueError, KeyError, TypeError): return None, {}
+    started = {}
+    try:
+        for l in open(st.get('log') or os.path.join(data, 'run_%s.jsonl' % night.replace('-', ''))):
+            try: j = json.loads(l)
+            except ValueError: continue
+            if j.get('decision') == 'run_start': started = {}
+            elif j.get('decision') == 'start' and j.get('target'): started.setdefault(j['target'], j)
+    except OSError: pass
+    return st.get('plan') or [], started
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--out', default='/mnt/fits-backup/claude'); ap.add_argument('--date'); ap.add_argument('--top', type=int, default=60); ap.add_argument('--step', type=int, default=15); a = ap.parse_args()
     exe = os.path.join(ROOT, 'build/headless/build/OriginHeadless')
-    cmd = [exe, 'schedule', '--top', str(a.top), '--sky-map', '--novelty', 'on', '--weather', 'on'] + (['--date', a.date] if a.date else [])
+    cmd = [exe, 'schedule', '--top', str(a.top), '--sky-map', '--novelty', 'on', '--weather', 'on', '--min-quality', '0.2'] + (['--date', a.date] if a.date else [])
     s = sh(cmd, 120)
     if not s.get('ok'): sys.exit('schedule failed: %s' % s)
     site = s.get('site') or {}; lat = float(site.get('lat', LAT)); lon = float(site.get('lon', LON))
@@ -108,10 +127,12 @@ def main():
     except Exception as e:
         live = {'error': str(e)}
     by_key = {t['key']: t for t in targets}
+    run_plan, started = tonights_run(a.out, s.get('night'))
     plan = []
-    for b in s.get('plan', []):
+    for b in run_plan if run_plan is not None else s.get('plan', []):
         blk = {k: b.get(k) for k in ('key', 'name', 'start', 'end', 'priority', 'minutes')}
-        t = by_key.get(b.get('key')) or {}
+        if b.get('key') in started: blk.update(started=started[b['key']]['time'], until=started[b['key']].get('until'), backup=started[b['key']].get('backup'))
+        t = by_key.get(b.get('key')) or b
         if t.get('ra_hours') is not None:
             blk.update(ra_hours=t['ra_hours'], dec_deg=t['dec_deg'], size_arcmin=t.get('size_arcmin'), novelty=t.get('novelty'))
             blk.update(our_picture(a.out, t['ra_hours'], t['dec_deg'], read_filter()))
@@ -119,7 +140,7 @@ def main():
     wx = [{'utc': h['utc'], 'quality': h.get('quality'), 'cloud': h.get('cloud'), 'precip_mm': h.get('precip_mm')} for h in (s.get('weather') or {}).get('hours', [])]
     out = {'generated': dt.datetime.now(dt.timezone.utc).strftime(fmt), 'night': s.get('night'), 'site': {'lat': lat, 'lon': lon}, 'dark_start': s['dark_start'], 'dark_end': s['dark_end'],
            'moon_illumination': s.get('moon_illumination'), 'step_min': a.step, 'times': [t.strftime(fmt) for t in times], 'targets': targets,
-           'plan': plan, 'weather': wx, 'stacks': stacks, 'live': live,
+           'plan': plan, 'plan_source': 'run' if run_plan is not None else 'schedule', 'weather': wx, 'stacks': stacks, 'live': live,
            'horizon': s.get('horizon'), 'filter': read_filter()}
     os.makedirs(a.out, exist_ok=True); tmp = os.path.join(a.out, 'planner.json.tmp'); json.dump(out, open(tmp, 'w')); os.replace(tmp, os.path.join(a.out, 'planner.json'))
     shutil.copyfile(os.path.join(HERE, 'planner.html'), os.path.join(a.out, 'planner.html'))
