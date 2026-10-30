@@ -59,6 +59,38 @@ ControlServer::ControlServer(OriginBackend* backend, bool allowRaw, QObject* par
         qInfo() << "telescope link lost; reconnecting to" << m_backend->connectedHost() << "in 5 s";
         m_reconnect.start(5000);
     });
+    restoreSession();
+}
+
+// A restarted daemon used to come back with target "auto": a run that only restarted its sequence then stacked into stacks/auto
+// (2026-10-30 21:13, an hour of NGC 7000). The target and monitor settings are kept in the data dir and taken back if under 12 h old.
+void ControlServer::saveSession() const
+{
+    const SkyMonitor& sky = m_backend->sky();
+    QJsonObject j = sky.settings();
+    if (sky.targetKnown()) { j["ra_hours"] = sky.targetPos().raHours; j["dec_deg"] = sky.targetPos().decDeg; }
+    j["saved"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+    QFile f(originDataDir() + "/daemon_session.json");
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) f.write(QJsonDocument(j).toJson());
+}
+
+void ControlServer::restoreSession()
+{
+    QFile f(originDataDir() + "/daemon_session.json");
+    if (!f.open(QIODevice::ReadOnly)) return;
+    const QJsonObject j = QJsonDocument::fromJson(f.readAll()).object();
+    const QDateTime saved = QDateTime::fromString(j["saved"].toString(), Qt::ISODate);
+    if (!saved.isValid() || saved.secsTo(QDateTime::currentDateTimeUtc()) > 12 * 3600) return;
+    SkyMonitor& sky = m_backend->sky();
+    Astro::Site s = sky.site(); s.latDeg = j["lat_deg"].toDouble(s.latDeg); s.lonDeg = j["lon_deg"].toDouble(s.lonDeg); sky.setSite(s);
+    if (j.contains("black_level")) sky.setBlackLevel(j["black_level"].toDouble());
+    if (j.contains("auto_stack")) sky.setAutoStack(j["auto_stack"].toBool());
+    if (j.contains("min_transparency")) sky.setMinTransparency(j["min_transparency"].toDouble());
+    const QString t = j["target"].toString();
+    if (!t.isEmpty() && t != "auto") {
+        const QJsonObject r = sky.setTarget(t, j["ra_hours"].toDouble(-1), j["dec_deg"].toDouble(-999), false);
+        qInfo() << "restored target" << t << "from" << f.fileName() << (r["resumed"].toBool() ? "(stack resumed)" : "(new stack)");
+    }
 }
 
 void ControlServer::tryReconnect()
@@ -628,7 +660,8 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
     if (cmd == "target") {                            // choose the live stack; resumes a saved stack of the same name unless reset
         SkyMonitor& sky = m_backend->sky();
         if (!req.contains("name")) return QJsonObject{{"ok", true}, {"target", sky.targetName()}, {"stack", sky.stackSummary()}};
-        return sky.setTarget(req["name"].toString(), req.contains("ra_hours") ? req["ra_hours"].toDouble() : -1, req.contains("dec_deg") ? req["dec_deg"].toDouble() : -999, req["reset"].toBool());
+        const QJsonObject r = sky.setTarget(req["name"].toString(), req.contains("ra_hours") ? req["ra_hours"].toDouble() : -1, req.contains("dec_deg") ? req["dec_deg"].toDouble() : -999, req["reset"].toBool());
+        saveSession(); return r;
     }
     if (cmd == "stack") {                             // summary of the live stack; saves state and preview.png and returns their paths
         SkyMonitor& sky = m_backend->sky();
@@ -654,6 +687,7 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
         if (req.contains("black_level")) sky.setBlackLevel(req["black_level"].toDouble());
         if (req.contains("auto_stack")) sky.setAutoStack(req["auto_stack"].toBool());
         if (req.contains("min_transparency")) sky.setMinTransparency(req["min_transparency"].toDouble());
+        saveSession();
         return QJsonObject{{"ok", true}, {"settings", sky.settings()}};
     }
     if (cmd == "focus_status") {                      // last focus score, plus the newest "history" entries (default 0)

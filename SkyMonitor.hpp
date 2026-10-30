@@ -39,6 +39,8 @@ public:
     /// Choose the stack frames are added to. A saved stack with the same name is resumed. Negative ra/dec leave the position unknown.
     QJsonObject setTarget(const QString& name, double raHours, double decDeg, bool reset);
     QString targetName() const { return m_target; }
+    bool targetKnown() const { return m_targetKnown; }
+    Astro::Equatorial targetPos() const { return m_targetPos; }
     LiveStacker& stacker() { return m_stack; }
     QJsonObject stackSummary() const;
     QString stackDirectory() const;
