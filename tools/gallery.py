@@ -15,7 +15,7 @@ HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 # (final directory, slug, title, card crop as (cx, cy, width) in preview pixels or None for the whole field, full-field crop box or None)
 TARGETS = [
     ("NGC_6888_Nebula",                     "ngc6888",  "Crescent Nebula, NGC 6888",        None, None),
-    ("NGC6992_Veil_Clear",                  "ngc6992",  "Eastern Veil, NGC 6992",           None, None),
+    ("NGC_6992_Eastern_Veil_Nebula",        "ngc6992",  "Eastern Veil, NGC 6992",           (800, 298, 894), None),
     ("NGC2174_Monkey_Head_Clear",           "ngc2174",  "Monkey Head Nebula, NGC 2174",     None, None),
     ("M31_Clear",                           "m31",      "Andromeda Galaxy, M31, with M32 and M110", None, None),
     ("IC405_Flaming_Star_Clear",            "ic405",    "Flaming Star Nebula, IC 405",      None, None),
@@ -30,7 +30,7 @@ TARGETS = [
     ("NGC_6946_Fireworks_Galaxy_Nebula",    "ngc6946",  "Fireworks Galaxy, NGC 6946",       (668, 431, 380), None),
     ("M33_Nebula",                          "m33",      "Triangulum Galaxy, M33",           None, None),
     ("M13_Clear",                           "m13",      "Hercules Cluster, M13",            (761, 509, 640), None),
-    ("NGC_7000_North_America_Nebula_Clear", "ngc7000",  "North America Nebula, NGC 7000",   None, None),
+    ("NGC_7000_North_America_Nebula_Nebula", "ngc7000",  "North America Nebula, NGC 7000",   None, None),
 ]
 FILTER = {"Clear": "no filter", "Nebula": "Antlia quad-band nebula filter"}
 CARD_W, CARD_H = 720, 480
@@ -83,7 +83,7 @@ def main():
         if box: im = im.crop(box)
         im.save(os.path.join(gdir, slug + ".jpg"), quality=90, optimize=True, progressive=True)
         card(im, crop).save(os.path.join(gdir, slug + "_card.jpg"), quality=85, optimize=True, progressive=True)
-        f.update(slug=slug, title=title, w=im.width, h=im.height, cropped=bool(crop))
+        f.update(slug=slug, title=title, w=im.width, h=im.height, cropped=bool(crop) and crop[2] < 0.6 * im.width)   # a card that only trims a wide field is not a close crop
         items.append(f)
         print("%-10s %4d frames %5.0f min  %-6s nights %s" % (slug, f["frames"], f["minutes"], f["filter"], ",".join(f["nights"])))
 
