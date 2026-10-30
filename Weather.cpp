@@ -322,6 +322,9 @@ static QJsonObject allSkyCover(const QString& dir, double* cover, QDateTime* whe
     const QDateTime mod = QDateTime::fromString(m["modified"].toString(), Qt::ISODate);
     if (!mod.isValid() || mod.secsTo(QDateTime::currentDateTimeUtc()) > 1200) return {{"ok", false}, {"error", "all-sky image is stale"}};
     const QByteArray jpeg = f.readAll();
+    // between the Sun at -8 and -15 deg neither method works: too few stars for the star count, and the brightness method (fitted to frames down to -5 deg) reads the darkening
+    // sky as cloud (88% at -10.5 deg on 30 Oct 2026 while every airport within 60 km reported clear; it emptied the planner and would have stopped autorun's initialize)
+    if (sunAlt < -8 && sunAlt >= -15) return {{"ok", false}, {"error", QString("deep twilight (Sun %1 deg): the all-sky camera is not used between -8 and -15 deg").arg(sunAlt, 0, 'f', 1)}, {"sun_alt", sunAlt}};
     if (sunAlt < -15) {
         QJsonObject r = allSkyStars(jpeg, mod, dir, true);
         if (r["ok"].toBool()) { *cover = r["cover"].toDouble(); *when = mod; }

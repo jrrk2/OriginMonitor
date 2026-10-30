@@ -400,7 +400,7 @@ Broken cloud; the unattended supervisor ran the night while I fixed what it show
 
 | What happened | Impact | Status |
 |---|---|---|
-| `initialize` reported success on a failed alignment (mount IDLE, `IsAligned` false) | A run launched on an unaligned mount | Fixed: needs `IsAligned`; `autorun` verifies it; "not enough stars" failures do not count towards the 3 attempts |
+| `initialize` reported success on a failed alignment (mount IDLE, `IsAligned` false); or a failed one left `IsAligned` true with one reference while `TaskController` `IsReady` stayed false (30 Oct 2026) | A run launched on an uninitialised telescope; its first goto was rejected ("not yet initialized") | Fixed: "initialised" means `IsAligned` and `IsReady`; `autorun` and every block of the run check it and repair it themselves (raise the tube, initialize); "not enough stars" and "could not identify the field of view" failures do not count towards the 3 attempts |
 | `ControlServer` SIGSEGV when a client hung up during a long command | Daemon down mid-run | Fixed (deferred socket deletion) |
 | `solve` blocked the event loop; the telescope dropped the websocket | Lost connection during a solve | Fixed (waits on the event loop). The snapshot exposure also lagged one request behind: explicit values now go straight into the capture |
 | After a slew the telescope drops its capture settings; frames came back PNG | 3 of 11 survey frames, many first frames | Mitigated: bit depth 16 with every capture and one retry; not eliminated (31 of 698) |
