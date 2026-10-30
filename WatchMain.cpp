@@ -618,12 +618,13 @@ private:
         QString st = tc["State"].toString(); const QJsonObject ii = tc["InitializationInfo"].toObject();
         if (ii.contains("CurrentStep")) st += QString(" (%1, %2%)").arg(ii["CurrentStep"].toString()).arg(ii["PercentageComplete"].toInt());
         m_tState->setText(st.isEmpty() ? "-" : st);
+        if (tc.contains("IsReady")) m_tcReady = tc["IsReady"].toBool();
         m_cExp->setText(QString("%1 s, ISO %2").arg(r["exposure"].toDouble()).arg(r["iso"].toInt()));
         if (cam.contains("Temperature")) m_cTemp->setText(QString("%1 °C").arg(cam["Temperature"].toDouble(), 0, 'f', 1));
     }
     void onMount(const QJsonObject& m)
     {
-        m_tMount->setText(QString("%1, %2").arg(m["IsTracking"].toBool() ? "tracking" : "not tracking", m["IsAligned"].toBool() ? "aligned" : "not aligned"));
+        m_tMount->setText(QString("%1, %2").arg(m["IsTracking"].toBool() ? "tracking" : "not tracking", m_tcReady ? "initialised (ready)" : "NOT initialised"));
         m_tBatt->setText(QString("%1 %2 V %3").arg(m["BatteryLevel"].toString()).arg(m["BatteryVoltage"].toDouble(), 0, 'f', 1).arg(m["ChargerStatus"].toString()));
         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
         if (!m_chargerAtMs || nowMs - m_chargerAtMs >= 60000) m_gateDismissed = false;   // the telescope talks again after a silence (the gate's 60 s): a dismissed alert re-arms
@@ -717,6 +718,7 @@ private:
         qApp->setStyleSheet(on ? "QWidget { background: #100000; color: #ff4040; } QGroupBox { border: 1px solid #601010; margin-top: 8px; } QPushButton, QTabBar::tab { background: #200000; border: 1px solid #601010; padding: 4px; } QListWidget::item:selected, QTabBar::tab:selected { background: #500000; }" : QString());
     }
 
+    bool m_tcReady = false;            // TaskController IsReady: the firmware's own "initialised" flag (the mount's IsAligned can be true after a failed initialize)
     QString m_charger, m_batteryLevel; qint64 m_chargerAtMs = 0; bool m_gateDismissed = false;       // latest ChargerStatus / BatteryLevel from the mount, and when
     Client* m_client = nullptr; QString m_dir; int m_port; double m_lat, m_lon; QTimer m_poll, m_files, m_liveTimer, m_fcTimer;
     QDateTime m_picStamp; QElapsedTimer m_webLive;

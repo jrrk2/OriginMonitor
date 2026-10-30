@@ -26,6 +26,15 @@ svg { display:block; }
 .legend i { width:14px; height:10px; display:inline-block; border-radius:2px; }
 .tag { font-size:11px; padding:0 5px; border-radius:8px; border:1px solid var(--line); color:var(--mute); margin-left:4px; }
 .tag.f { color:var(--ok); border-color:var(--ok); } .tag.u { color:var(--warn); border-color:var(--warn); }
+.plan { display:flex; flex-wrap:wrap; gap:12px; }
+.plan .blk { flex:1 1 300px; max-width:520px; border:1px solid var(--line); border-radius:8px; padding:8px; }
+.plan .blk.now { border-color:var(--acc); box-shadow:0 0 0 1px var(--acc); }
+.plan .blk.past { opacity:.55; }
+.plan h3 { margin:0 0 2px; font-size:15px; } .plan .when { color:var(--mute); font-size:12px; margin-bottom:6px; }
+.plan .pics { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+.plan figure { margin:0; } .plan img { width:100%; aspect-ratio:3/2; object-fit:cover; display:block; border-radius:4px; background:#000; }
+.plan figcaption { color:var(--mute); font-size:11px; line-height:1.3; margin-top:2px; }
+@media (max-width:420px) { .plan .pics { grid-template-columns:1fr; } }
 #tip { position:fixed; pointer-events:none; background:var(--card); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:12px; display:none; z-index:9; box-shadow:0 2px 10px rgba(0,0,0,.25); }
 .err { color:var(--bad); }
 </style>
@@ -34,6 +43,7 @@ svg { display:block; }
 <h1>Night Planner</h1>
 <div class="sub" id="sub">loading…</div>
 <div class="card live" id="live"></div>
+<div class="card"><b>Tonight's plan</b> <span class="sub" id="plannote"></span><div class="plan" id="plan"></div></div>
 <div class="bar">
   <label>Sort <select id="sort"><option value="pri">priority</option><option value="peak">time of peak</option><option value="start">window start</option><option value="name">name</option></select></label>
   <label>Show <select id="show"><option value="obs">observable tonight</option><option value="all">all candidates</option></select></label>
@@ -79,12 +89,33 @@ async function setFilter(name) {
     msg.textContent = 'saved; the plan updates within 5 minutes';
   } catch (e) { msg.innerHTML = '<span class="err">not saved: ' + e.message + '</span>'; $('#filter').value = D.filter || 'clear'; }
 }
+// The supervisor's planned blocks with a picture of each object: a survey image framed like the telescope's 75 x 50 arcmin field (DSS2 red from NASA SkyView, fetched by the
+// browser; the CDS hips2fits colour service did not answer from here on 30 Oct 2026), and our own best stack so far when there is one (planner_data.py inlines it)
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function survey(b) {
+  return 'https://skyview.gsfc.nasa.gov/current/cgi/runquery.pl?Survey=' + encodeURIComponent('DSS2 Red') + '&Position=' + (b.ra_hours * 15).toFixed(4) + ',' + b.dec_deg.toFixed(4)
+    + '&Pixels=480,320&Size=1.255,0.84&Scaling=HistEq&Return=JPEG';
+}
+function renderPlan(tg, now) {
+  const P = D.plan || [];
+  $('#plannote').textContent = P.length ? P.length + (P.length === 1 ? ' block' : ' blocks') + ' (the unattended run replans as the night goes)' : '';
+  if (!P.length) { $('#plan').innerHTML = '<div class="sub">nothing planned for the rest of this night</div>'; return; }
+  $('#plan').innerHTML = P.map(b => {
+    const s = new Date(b.start), e = new Date(b.end), cls = now >= e ? 'past' : (now >= s || b.name === tg) ? 'now' : '';
+    let pics = b.ra_hours != null ? '<figure><img loading="lazy" src="' + survey(b) + '" alt="survey image of ' + esc(b.name) + '"><figcaption>DSS2 red survey (NASA SkyView), framed as the telescope field (75′ × 50′), north up</figcaption></figure>' : '';
+    pics += b.thumb ? '<figure><img src="' + b.thumb + '" alt="our stack of ' + esc(b.name) + '"><figcaption>' + esc(b.thumb_note) + '</figcaption></figure>'
+                    : '<figure><div style="aspect-ratio:3/2;border:1px dashed var(--line);border-radius:4px;display:grid;place-items:center;color:var(--mute);font-size:12px">no stack yet: new target</div></figure>';
+    return '<div class="blk ' + cls + '"><h3>' + esc(b.name) + '</h3><div class="when">' + hhmm(s) + '–' + hhmm(e) + ' · ' + b.minutes + ' min · priority ' + b.priority
+      + (b.size_arcmin ? ' · ' + b.size_arcmin + '′ across' : '') + (b.novelty ? ' · covered ' + esc(b.novelty) : '') + (cls === 'now' ? ' · <b>now</b>' : '') + '</div><div class="pics">' + pics + '</div></div>';
+  }).join('');
+}
 function render() {
   const g = new Date(D.generated), now = new Date();
   if (document.activeElement !== $('#filter')) $('#filter').value = D.filter || 'clear';
   const L = D.live || {}, seq = L.sequence || {}, tg = (L.target || {}).target || '', st = (L.target || {}).stack || {}, mt = L.mount || {};
   $('#sub').textContent = 'night of ' + D.night + ' · dark ' + hhmm(new Date(D.dark_start)) + '–' + hhmm(new Date(D.dark_end)) + ' (UK) · Moon ' + Math.round((D.moon_illumination || 0) * 100) + '% lit · times are Europe/London';
-  $('#live').innerHTML = '<div><b>target</b> ' + (tg || '—') + '</div><div><b>capture</b> ' + (seq.active ? 'running, ' + seq.exposure + ' s ISO ' + seq.iso : 'idle') + '</div><div><b>frames</b> ' + (seq.good ?? '—') + ' good / ' + (seq.bad ?? '—') + ' bad</div><div><b>stack</b> ' + (st.frames ?? '—') + ' frames, ' + Math.round(st.total_exposure_s || 0) + ' s</div><div><b>mount</b> ' + (mt.IsAligned ? 'aligned (' + mt.NumAlignRefs + ' refs)' : 'NOT aligned') + (mt.IsTracking ? ', tracking' : ', not tracking') + '</div>';
+  $('#live').innerHTML = '<div><b>target</b> ' + (tg || '—') + '</div><div><b>capture</b> ' + (seq.active ? 'running, ' + seq.exposure + ' s ISO ' + seq.iso : 'idle') + '</div><div><b>frames</b> ' + (seq.good ?? '—') + ' good / ' + (seq.bad ?? '—') + ' bad</div><div><b>stack</b> ' + (st.frames ?? '—') + ' frames, ' + Math.round(st.total_exposure_s || 0) + ' s</div><div><b>mount</b> ' + (mt.IsReady ? 'initialised (ready)' : 'NOT initialised') + (mt.IsTracking ? ', tracking' : ', not tracking') + '</div>';
+  renderPlan(tg, now);
   $('#age').textContent = 'data from ' + hhmm(g) + ' (' + Math.round((now - g) / 60000) + ' min ago)';
   const times = D.times.map(t => new Date(t)), n = times.length, W = 14, H = 22, minsub = +$('#minsub').value;
   const obs = t => t.window_start && t.minutes > 0;
