@@ -972,6 +972,13 @@ QJsonObject slewTo(const QJsonObject& t, double exposure, int iso)
 
 bool startSeq(double exposure, int iso, const QDateTime& endUtc, bool focusPause)
 {
+    // the daemon may have been restarted under us and come back stacking into "auto" (2026-10-30): put the block's target back before capturing
+    const QString key = g_run.current["key"].toString();
+    if (!key.isEmpty() && g_run.current.contains("ra_hours") && call("target", {}, 5000)["target"].toString() != key) {
+        call("monitor", {{"lat_deg", g_run.o.site.latDeg}, {"lon_deg", g_run.o.site.lonDeg}, {"auto_stack", true}});
+        const QJsonObject tr = call("target", {{"name", key}, {"ra_hours", g_run.current["ra_hours"]}, {"dec_deg", g_run.current["dec_deg"]}});
+        runLog("target_restored", {{"target", key}, {"resumed", tr["resumed"]}});
+    }
     const QJsonObject r = call("sequence", {{"action", "start"}, {"exposure", exposure}, {"iso", iso}, {"pipeline", true}, {"focus_pause", focusPause},
                                             {"auto_exposure", true}, {"min_exposure", 1.0}, {"max_exposure", std::max(g_run.ceiling, exposure)}, {"lat_deg", g_run.o.site.latDeg},
                                             {"until_local", endUtc.toTimeZone(g_run.zone).toString("HH:mm")}});
@@ -1080,7 +1087,7 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
     int iso = g_run.iso;
     runLog("start", {{"target", t["key"]}, {"exposure_s", exposure}, {"iso", iso}, {"until", endUtc.toTimeZone(g_run.zone).toString("HH:mm")}, {"backup", depth > 0}, {"override", isOverride}});
     const QJsonObject outer = g_run.current;
-    g_run.current = {{"key", t["key"]}, {"name", t["name"]}, {"until", endUtc.toString(Qt::ISODate)}, {"override", isOverride}, {"backup", depth > 0}}; writeRunState();
+    g_run.current = {{"key", t["key"]}, {"name", t["name"]}, {"ra_hours", t["ra_hours"]}, {"dec_deg", t["dec_deg"]}, {"until", endUtc.toString(Qt::ISODate)}, {"override", isOverride}, {"backup", depth > 0}}; writeRunState();
     // the telescope must be initialised before a goto: repair it here (raise the tube, initialize; wait for stars while the block lasts) rather than fail the night
     {
         const QString bad = waitForReady(t, endUtc);

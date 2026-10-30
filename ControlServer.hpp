@@ -61,6 +61,8 @@ private:
     QJsonObject queryTaskController(int timeoutMs = 3000);
     void tryReconnect();                                        // one attempt to reopen the lost telescope link; reschedules itself while it fails
     static QJsonObject fail(const QString& message);
+    void saveSession() const;                                   // the stack target and monitor settings, so a restarted daemon carries on where it was
+    void restoreSession();
 
     struct CacheEntry { QJsonObject reply; qint64 atMs = 0; };
     QHash<QByteArray, CacheEntry> m_cache;                      // canonical request JSON -> reply
