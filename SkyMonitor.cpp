@@ -16,6 +16,17 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kMaxObstructionAlt = 60;       // a bin whose lower edge is above this cannot be a tree line or building
 QString baseDir() { return originDataDir(); }
+// a FITS header string card ("FILTER  = 'Nebula  '"), empty when absent
+QString fitsHeaderString(const QByteArray& d, const char* key)
+{
+    const int n = std::min<int>(d.size(), 2880 * 6);
+    for (int i = 0; i + 80 <= n; i += 80) {
+        const QByteArray card = d.mid(i, 80);
+        if (card.startsWith("END ")) break;
+        if (card.left(8).trimmed() == key && card[8] == '=') { const int a = card.indexOf('\'', 10), b = a < 0 ? -1 : card.indexOf('\'', a + 1); return b > a ? QString::fromLatin1(card.mid(a + 1, b - a - 1)).trimmed() : QString(); }
+    }
+    return QString();
+}
 QString safeName(const QString& s) { QString o = s; for (QChar& c : o) if (!c.isLetterOrNumber() && c != '-' && c != '_') c = '_'; return o.isEmpty() ? "target" : o; }
 }
 
@@ -84,12 +95,12 @@ QJsonObject SkyMonitor::setTarget(const QString& name, double raHours, double de
     return o;
 }
 
-void SkyMonitor::archiveStack()
+void SkyMonitor::archiveStack(const QString& tag)
 {
     if (m_stack.frames() <= 0) return;
     saveStack();
     const QString dir = stackDirectory();
-    QDir().rename(dir, dir + "_" + QDateTime::currentDateTimeUtc().toString("yyyyMMdd_HHmmss"));
+    QDir().rename(dir, dir + (tag.isEmpty() ? QString() : "_" + safeName(tag)) + "_" + QDateTime::currentDateTimeUtc().toString("yyyyMMdd_HHmmss"));
 }
 
 bool SkyMonitor::saveStack() { return m_stack.frames() > 0 && m_stack.save(stackDirectory()); }
@@ -218,6 +229,8 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     QJsonObject o = focus.toJson();
     o["time"] = utc.toString(Qt::ISODateWithMs);
     o["exposure"] = exposureS; o["iso"] = iso;
+    const QString filter = fitsHeaderString(fits, "FILTER");
+    if (!filter.isEmpty()) o["filter"] = filter;
     if (!F.valid) { o["verdict"] = "unreadable"; o["reasons"] = QJsonArray{F.note}; return o; }
 
     { const QString pic = writePicture(F, m_blackLevel, utc, &m_pictureMs); if (!pic.isEmpty()) { o["picture"] = pic; o["picture_time"] = utc.toString(Qt::ISODate); } }
@@ -304,6 +317,14 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     // --- registration against the target's stack and per-tile coverage
     QStringList reasons; QString verdict = "clear";
     LiveStacker::Report rep;
+    QString filterNote;
+    // star fluxes through different filters are not comparable (a pre-filter stack read every frame through the quad-band filter as transparency 0.2, "cloudy", 2026-10-27):
+    // a stack whose reference was taken with another filter is archived (stacks/<target>_<filter>_<UTC>) and this frame may seed a new one
+    if (m_stack.hasReference() && !filter.isEmpty() && !m_stack.referenceFilter().isEmpty() && m_stack.referenceFilter().compare(filter, Qt::CaseInsensitive) != 0) {
+        const QString old = m_stack.referenceFilter();
+        archiveStack(old); m_stack.reset(); m_refHfr = 0; m_refStars = 0; m_regFailRun = 0;
+        filterNote = QString("the stack was taken with filter %1, this frame with %2: archived, a new stack starts").arg(old, filter);
+    }
     bool haveStack = m_stack.hasReference();
     const bool pointingOk = !m_targetKnown || offTarget < 0.5;
     if (!pointingOk) { verdict = "off_target"; reasons << QString("mount is %1 deg from the target position").arg(offTarget, 0, 'f', 2); }
@@ -316,15 +337,19 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
         refNote = QString("a sharper frame (HFR %1 px) replaces the stack reference").arg(focus.hfrPx, 0, 'f', 2);
     }
     if (haveStack && pointingOk) {
-        rep = m_stack.assess(F, exposureS);                 // register and measure first; only frames judged usable are stacked
+        rep = m_stack.assess(F, exposureS, iso);                 // register and measure first; only frames judged usable are stacked
         QJsonObject reg{{"inliers", rep.inliers}, {"rms_px", rep.rms}, {"rotation_deg", rep.rotationDeg}, {"shift_px", rep.shiftPx}, {"matched_fraction", rep.matchedFraction},
                         {"transparency", rep.transparency}, {"raw_transparency", rep.rawTransparency}, {"stacked", rep.accepted && m_autoStack}, {"frames_in_stack", rep.frames}};
         if (!rep.reason.isEmpty()) reg["refused_because"] = rep.reason;
-        QJsonArray cov; double worst = 1; int weak = 0;
+        QJsonArray cov; double worst = 1; int weak = 0, expAll = 0, foundAll = 0;
+        for (int i = 0; i < LiveStacker::Report::kTilesX * LiveStacker::Report::kTilesY; ++i) if (rep.tileExpected[i] >= 3) { expAll += rep.tileExpected[i]; foundAll += rep.tileFound[i]; }
+        // a tile is weak against the frame's own find rate, not an absolute 30%: a longer exposure than the reference cannot detect the reference's brightest (saturated) stars
+        // anywhere, and 300 reference stars made every tile of a clear 17 s M1 frame look thin against a 4 s reference
+        const double overall = expAll > 0 ? double(foundAll) / expAll : 1.0;
         for (int i = 0; i < LiveStacker::Report::kTilesX * LiveStacker::Report::kTilesY; ++i) {
             const double c = rep.tileExpected[i] >= 3 ? double(rep.tileFound[i]) / rep.tileExpected[i] : -1.0;
             cov.append(c);
-            if (c >= 0) { worst = std::min(worst, c); if (c < 0.3) ++weak; }
+            if (c >= 0) { worst = std::min(worst, c); if (c < 0.3 * std::min(1.0, overall / 0.9)) ++weak; }
         }
         reg["tile_coverage"] = cov; reg["tile_grid"] = QString("%1x%2 row-major from top-left of the stack frame").arg(LiveStacker::Report::kTilesX).arg(LiveStacker::Report::kTilesY);
         o["registration"] = reg;
@@ -332,7 +357,11 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
         // good frame read "cloudy"), not that the sky is cloudy. After 3 such frames the small stack is dropped and the next frame seeds a new one.
         const bool sharpSky = focus.valid && focus.stars >= 40 && focus.hfrPx > 0 && focus.hfrPx < 4.5;
         const bool noMatch = rep.inliers == 0 || rep.reason == "no star-pattern match";
-        if (noMatch && sharpSky) {
+        if (!noMatch) m_regFailRun = 0;     // the count is of consecutive failures: scattered ones over a long session archived a 654-frame NGC 6888 stack (restack, 2026-10-28)
+        if (noMatch && sharpSky && m_keepReference) {
+            verdict = "unknown"; o["cause"] = "reference";
+            reasons << QString("%1 sharp stars but no match to the stack reference (kept: offline restack)").arg(focus.stars);
+        } else if (noMatch && sharpSky) {
             // plenty of round, sharp stars that will not register mean a bad or stale reference, not cloud (registration is by star pattern, so thin cloud does not break it): "unknown", cause "reference",
             // which the supervisor does not count as cloud. A small stack is dropped after 3 such frames; a large one after 10, and then archived (stacks/<target>_<UTC>), not overwritten.
             const bool small = m_stack.frames() <= 10 || m_stack.summary()["total_exposure_s"].toDouble() < 300.0;
@@ -364,7 +393,7 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
             o["registration"] = QJsonObject{{"reference_frame", false}, {"stacked", false}, {"frames_in_stack", 0}};
             verdict = "cloudy"; reasons << QString("sky %1% above the dark baseline: not used as the stack reference").arg(int(excess * 100));
         } else {
-            rep = m_autoStack ? m_stack.add(F, exposureS, m_minTransparency) : LiveStacker::Report();
+            rep = m_autoStack ? m_stack.add(F, exposureS, m_minTransparency, iso, filter) : LiveStacker::Report();
             if (rep.accepted && rep.frames == 1) { m_refHfr = focus.hfrPx; m_refStars = focus.stars; }
             o["registration"] = QJsonObject{{"reference_frame", rep.accepted}, {"stacked", rep.accepted}, {"frames_in_stack", rep.frames}};
             if (!rep.accepted && m_autoStack) { verdict = F.stars.size() < 12 ? "cloudy" : "unknown"; reasons << rep.reason; }
@@ -375,7 +404,7 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     // Stack the frame only if it is a usable one: clouds, patchy obstruction and wrong pointing would dilute the stack
     const bool stackable = haveStack && pointingOk && (verdict == "clear" || verdict == "hazy");
     if (stackable && m_autoStack) {
-        const LiveStacker::Report added = m_stack.add(F, exposureS, m_minTransparency);
+        const LiveStacker::Report added = m_stack.add(F, exposureS, m_minTransparency, iso, filter);
         rep.accepted = added.accepted; rep.frames = added.frames;
         QJsonObject reg = o["registration"].toObject(); reg["stacked"] = added.accepted; reg["frames_in_stack"] = added.frames;
         if (!added.reason.isEmpty()) reg["refused_because"] = added.reason;
@@ -389,6 +418,7 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     // --- sky brightness context (never overrides cloud, but explains it and flags what the moon or dawn are doing)
     QStringList notes;
     if (!refNote.isEmpty()) notes << refNote;
+    if (!filterNote.isEmpty()) notes << filterNote;
     if (sunAlt > -12) notes << (sunAlt > -6 ? "bright twilight" : "twilight");
     if (moonAlt > 0 && moonIll > 0.05 && (excess > 0.3 || gradient > 8)) notes << QString("moon glow (moon alt %1, illumination %2, separation %3 deg)").arg(moonAlt, 0, 'f', 0).arg(moonIll, 0, 'f', 2).arg(moonSep, 0, 'f', 0);
     else if (excess > 0.5 && dark) notes << "sky brighter than the dark baseline without the moon or sun up (light pollution, thin cloud lit from below, or dew)";

@@ -38,6 +38,8 @@
 #include <QListWidget>
 #include <QMainWindow>
 #include <QPainter>
+#include <QProcess>
+#include <QSaveFile>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QQueue>
@@ -260,6 +262,26 @@ public:
         }
         return h;
     }
+    // The only settings the web pages may change. POST /filter?name=clear|nebula: the hand-fitted filter. Writes ~/.config/origin/filter (the planner reads it: emission
+    // targets first under the nebula filter; the daemon declares it to the firmware after each connect), then in the background: declare it now (no motion), ask a live
+    // unattended run to replan, and rebuild planner.json so the page shows the new plan.
+    WebReply webPost(const QString& path, const QUrlQuery& q)
+    {
+        WebReply r; r.type = "application/json";
+        if (path != "/filter") { r.status = 404; r.body = "{\"ok\":false,\"error\":\"no such setting\"}\n"; return r; }
+        const QString name = q.queryItemValue("name");
+        if (name != "clear" && name != "nebula") { r.status = 400; r.body = "{\"ok\":false,\"error\":\"name must be clear or nebula\"}\n"; return r; }
+        const QString cfg = QDir::homePath() + "/.config/origin"; QDir().mkpath(cfg);
+        QSaveFile f(cfg + "/filter");
+        if (!f.open(QIODevice::WriteOnly) || f.write(name.toUtf8() + "\n") < 0 || !f.commit()) { r.status = 500; r.body = "{\"ok\":false,\"error\":\"cannot write the filter file\"}\n"; return r; }
+        fprintf(stderr, "%s filter set to %s from the web page\n", qPrintable(QDateTime::currentDateTime().toString(Qt::ISODate)), qPrintable(name));
+        const QString root = QDir(QCoreApplication::applicationDirPath() + "/../../..").canonicalPath();     // build/watch/build -> the checkout
+        const QString oh = root + "/build/headless/build/OriginHeadless";
+        const QString sh = QString("cd '%1' && { '%2' filter %3; python3 tools/run_control.py send replan; python3 tools/planner_data.py; } >> \"$HOME/.cache/origin-planner.log\" 2>&1").arg(root, oh, name);
+        QProcess::startDetached("/bin/sh", {"-c", sh});
+        r.body = QString("{\"ok\":true,\"filter\":\"%1\",\"note\":\"saved; the plan is being rebuilt (about 30 s)\"}\n").arg(name).toUtf8();
+        return r;
+    }
     WebReply web(const QString& path, const QUrlQuery& q)
     {
         WebReply r; auto html = [&](const QString& body, int refresh) { r.body = webPage(body, refresh).toUtf8(); return r; };
@@ -302,7 +324,7 @@ public:
             if (!m_fcSky->pixmap().isNull() && !m_fcSky->isHidden()) h += "<p><img src='/img/allsky.jpg' alt='all-sky camera' style='max-width:40%'></p>";
             for (QLabel* l : {m_fcInfo, m_fcNow, m_fcAcc}) if (l && !l->text().isEmpty()) { QTextDocument d; d.setHtml(l->text()); h += "<p>" + esc(d.toPlainText()).replace("\n", "<br>") + "</p>"; }   // the labels are rich text; show their words only
             // the tables as real HTML (the page scrolls as one; nothing is clipped inside a picture): the nights, the hourly columns, then the per-model columns in a fold-out
-            const bool day = q.queryItemValue("daylight") == "1";                  // daylight hours are left out unless asked for
+            const bool day = q.queryItemValue("daylight") == "1";                  // dry daylight hours are left out unless asked for (rain always shows)
             auto table = [&](QTableWidget* tw, QList<int> cols) {
                 QString t = "<table class=fc><tr>";
                 for (int c : cols) t += "<th>" + esc(tw->horizontalHeaderItem(c) ? tw->horizontalHeaderItem(c)->text() : QString()) + "</th>";
@@ -325,7 +347,7 @@ public:
             h += QString("<h2>Next 48 hours</h2><p><a href='/forecast%1'>%2</a></p>").arg(day ? "" : "?daylight=1", day ? "Hide daylight hours" : "Show daylight hours");
             h += table(m_fcTable, {0, 1, 2, 3, 4, 5, 6, 7});
             h += "<details><summary>Quality by model</summary>" + table(m_fcTable, {0, 8, 9, 10, 11, 12, 13, 14}) + "</details>";
-            h += "<p class=dim>Quality 0..1 = how much of the hour is usable. Green 0.5 or more, amber 0.3-0.5, red below.</p>";
+            h += "<p class=dim>Quality 0..1 = how much of the hour is usable. Green 0.5 or more, amber 0.3-0.5, red below. A red rain cell is rain (chance 40% or more, or 0.1 mm); those hours show even in daylight.</p>";
             return html(h, 300);
         }
         if (path == "/img/allsky.jpg") return png(m_fcSky->pixmap().toImage(), true);
@@ -453,9 +475,10 @@ private:
             m_fcTable->insertRow(row);
             auto put = [&](int c, const QString& t, const QColor& bg = QColor()) { auto* it = new QTableWidgetItem(t); it->setTextAlignment(Qt::AlignCenter); if (bg.isValid()) { it->setBackground(bg); it->setForeground(Qt::white); } m_fcTable->setItem(row, c, it); };
             put(0, h.utc.toTimeZone(zone).toString("ddd HH:mm")); put(1, QString::number(h.quality, 'f', 2), tint(h.quality));
-            m_fcTable->item(row, 0)->setData(Qt::UserRole, sunAlt(h.utc.addSecs(1800)) > 0);     // daylight: hidden unless asked for
+            const bool wet = h.precipProb >= 40 || h.precip >= 0.1;                                // rain as Weather::quality counts it
+            m_fcTable->item(row, 0)->setData(Qt::UserRole, sunAlt(h.utc.addSecs(1800)) > 0 && !wet);  // dry daylight: hidden unless asked for; rain always shows
             put(2, h.models.isEmpty() ? "-" : QString("%1 - %2").arg(h.qMin, 0, 'f', 2).arg(h.qMax, 0, 'f', 2));
-            put(3, QString::number(h.cloud, 'f', 0)); put(4, QString::number(h.low, 'f', 0)); put(5, QString::number(h.mid, 'f', 0)); put(6, QString::number(h.high, 'f', 0)); put(7, QString::number(h.precipProb, 'f', 0));
+            put(3, QString::number(h.cloud, 'f', 0)); put(4, QString::number(h.low, 'f', 0)); put(5, QString::number(h.mid, 'f', 0)); put(6, QString::number(h.high, 'f', 0)); put(7, QString::number(h.precipProb, 'f', 0), wet ? tint(0) : QColor());
             for (int i = 0; i < ids.size(); ++i) { if (h.models.contains(ids[i])) put(8 + i, QString::number(h.models[ids[i]], 'f', 2), tint(h.models[ids[i]])); else put(8 + i, "-"); }
             ++row;
         }
@@ -726,6 +749,7 @@ int main(int argc, char* argv[])
     if (webPort > 0) {
         QString token; if (!tokenFile.isEmpty()) { QFile tf(tokenFile); if (tf.open(QIODevice::ReadOnly)) token = QString::fromUtf8(tf.readAll()).trimmed(); else { fprintf(stderr, "cannot read %s\n", qPrintable(tokenFile)); return 2; } }
         web = new WebServer([&w](const QString& p, const QUrlQuery& q) { return w.web(p, q); }, token, &app);
+        web->setPostHandler([&w](const QString& p, const QUrlQuery& q) { return w.webPost(p, q); });
         QString err;
         if (!web->start(quint16(webPort), cert, key, bind.isEmpty() ? QHostAddress(QHostAddress::Any) : QHostAddress(bind), &err)) { fprintf(stderr, "web server: %s\n", qPrintable(err)); return 2; }
         fprintf(stderr, "OriginWatch web view on %s://*:%d/ (private networks only%s)\n", web->tls() ? "https" : "http", webPort, token.isEmpty() ? "" : ", token required");

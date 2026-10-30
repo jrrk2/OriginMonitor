@@ -38,6 +38,39 @@ ControlServer::ControlServer(OriginBackend* backend, bool allowRaw, QObject* par
             m_focuserUpper = m["CalibrationUpperLimit"].toInt(m_focuserUpper);
         }
     });
+    // Reconnect a link that dropped by itself. The telescope rebooting (asked for or not) or a Wi-Fi drop used to leave the daemon disconnected until a client sent "connect"
+    // (2026-10-28: after a Reboot the telescope answered pings again within 25 s and took captures, but the daemon stayed down).
+    m_reconnect.setSingleShot(true);
+    connect(&m_reconnect, &QTimer::timeout, this, &ControlServer::tryReconnect);
+    // the bookkeeping is done here, not in tryReconnect(): an attempt's socket can finish connecting after that attempt stopped waiting for it (seen 2026-10-28 13:09)
+    connect(m_backend, &OriginBackend::connected, this, [this]() {
+        m_reconnect.stop();
+        if (m_wantLink && m_linkLost.isValid()) {
+            const qint64 down = m_linkLost.secsTo(QDateTime::currentDateTimeUtc());
+            m_last.clear(); m_cache.clear();            // statuses from before the drop describe a telescope that may have rebooted since
+            m_backend->recordEvent("reconnected", QString("telescope link restored after %1 s (%2 attempts)").arg(down).arg(m_reconnectTries), {{"down_s", double(down)}, {"attempts", m_reconnectTries}});
+            QTimer::singleShot(2000, this, [this]() { if (m_backend->isConnected()) declareConfiguredFilter(); });
+        }
+        m_wantLink = true; m_linkLost = QDateTime(); m_reconnectTries = 0;
+    });
+    connect(m_backend, &OriginBackend::disconnected, this, [this]() {
+        if (!m_wantLink || m_linkLost.isValid()) return;
+        m_linkLost = QDateTime::currentDateTimeUtc(); m_reconnectTries = 0;
+        qInfo() << "telescope link lost; reconnecting to" << m_backend->connectedHost() << "in 5 s";
+        m_reconnect.start(5000);
+    });
+}
+
+void ControlServer::tryReconnect()
+{
+    if (!m_wantLink || m_backend->isConnected() || m_backend->connectedHost().isEmpty()) return;
+    m_reconnecting = true; ++m_reconnectTries;
+    const bool up = m_backend->connectToTelescope(m_backend->connectedHost(), m_backend->connectedPort());   // success is handled by the connected() handler
+    m_reconnecting = false;
+    if (up || m_backend->isConnected()) return;
+    const qint64 down = m_linkLost.isValid() ? m_linkLost.secsTo(QDateTime::currentDateTimeUtc()) : 0;
+    if (m_reconnectTries == 1 || m_reconnectTries % 10 == 0) qInfo() << "reconnect attempt" << m_reconnectTries << "failed; link down" << down << "s";
+    if (m_wantLink) m_reconnect.start(down < 300 ? 15000 : 60000);
 }
 
 bool ControlServer::listen(quint16 port)
@@ -81,6 +114,7 @@ void ControlServer::onReadyRead()
 
 void ControlServer::shutdown()
 {
+    m_wantLink = false; m_reconnect.stop();
     if (m_seq->active()) m_seq->stop("app quitting");
     m_backend->sky().saveStack();
     QTimer::singleShot(100, qApp, &QCoreApplication::quit);
@@ -514,7 +548,7 @@ QJsonObject ControlServer::handle(const QJsonObject& req)
     if (cmd == "commands" || cmd == "help")
         return QJsonObject{{"ok", true}, {"note", "server commands; the OriginHeadless CLI has a fuller catalogue: OriginHeadless commands"},
                            {"commands", QJsonArray{"ping", "connect", "status", "manual", "auto", "set", "snapshot", "mount_status", "goto", "focus_status", "analysis", "events", "target", "stack",
-                                                   "sky_map", "preview", "monitor", "focuser_status", "focuser_move", "focuser_settings", "filter", "initialize", "unpark", "solve", "frame_stats", "sky_note", "sequence", "send", "cache", "quit"}}};
+                                                   "sky_map", "preview", "monitor", "focuser_status", "focuser_move", "focuser_settings", "filter", "initialize", "unpark", "solve", "frame_stats", "sky_note", "sequence", "cancel_capture", "reboot", "send", "cache", "quit"}}};
     int ttl = cacheTtlMs(cmd);
     if (cmd == "target" && req.contains("name")) ttl = 0;                       // that form changes the target
     if (!m_cacheOn || ttl == 0) {
@@ -549,6 +583,7 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
     if (cmd == "connect") {
         QString host = req["host"].toString();
         if (host.isEmpty()) return fail("missing 'host'");
+        for (int i = 0; i < 40 && m_reconnecting; ++i) { QEventLoop loop; QTimer::singleShot(500, &loop, &QEventLoop::quit); loop.exec(); }   // the automatic reconnect owns the socket just now
         bool ok = m_backend->connectToTelescope(host, req["port"].toInt(80));
         if (!ok) return fail("connection failed");
         QJsonObject out{{"ok", true}, {"host", host}};
@@ -561,6 +596,7 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
         QJsonObject r{{"ok", true}, {"connected", m_backend->isConnected()}, {"host", m_backend->connectedHost()},
                       {"exposure", m_backend->currentExposure()}, {"iso", m_backend->currentISO()},
                       {"binning", m_backend->currentBinning()}, {"snapshot_in_progress", m_backend->snapshotInProgress()}};
+        if (!m_backend->isConnected() && m_wantLink) { r["reconnecting"] = true; r["reconnect_attempts"] = m_reconnectTries; if (m_linkLost.isValid()) r["link_down_s"] = double(m_linkLost.secsTo(QDateTime::currentDateTimeUtc())); }
         QJsonObject last;
         for (auto it = m_last.constBegin(); it != m_last.constEnd(); ++it) {
             const QString& k = it.key();
@@ -679,6 +715,45 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
         if (r.isEmpty()) return fail("no response to GetFilter");
         return QJsonObject{{"ok", true}, {"filter", r["Filter"].toString()}};
     }
+    // A capture the camera never finished (2026-10-28 00:53: TaskController stuck in SAMPLE_CAPTURE for hours, every later RunSampleCapture ignored while the link stayed up):
+    // send CancelImaging (or AbortAll) and wait for a TaskController status that has left the capture. {"wait": seconds (default 20), "command": "CancelImaging" | "AbortAll"}
+    if (cmd == "cancel_capture") {
+        if (!m_backend->isConnected()) return fail("not connected");
+        if (m_seq->active()) return fail("a sequence is running: stop it first");
+        const QJsonObject before = m_last.value("TaskController/GetStatus");
+        const auto stuck = [](const QJsonObject& s) { return s["State"].toString() == "SAMPLE_CAPTURE" && s["Stage"].toString() == "IN_PROGRESS"; };
+        const QString how = req["command"].toString("CancelImaging");
+        if (how != "CancelImaging" && how != "AbortAll") return fail("command must be CancelImaging or AbortAll");
+        const QString dest = req["destination"].toString("TaskController");
+        if (!QStringList{"TaskController", "MountTaskController", "Camera", "ImageServer", "System"}.contains(dest)) return fail("destination must be TaskController, MountTaskController, Camera, ImageServer or System");
+        if (how == "CancelImaging" && dest == "TaskController") m_backend->abortExposure(); else m_backend->sendCommand(how, dest);
+        const QJsonObject ack = waitResponse(m_backend->lastSequenceId(), 8000);
+        QElapsedTimer t; t.start(); QJsonObject now = before; bool fresh = false;
+        const int waitMs = req["wait"].toInt(20) * 1000;
+        while (t.elapsed() < waitMs) {
+            QEventLoop loop; QTimer::singleShot(500, &loop, &QEventLoop::quit); loop.exec();
+            const QJsonObject cur = m_last.value("TaskController/GetStatus");
+            if (cur["SequenceID"].toInt() != before["SequenceID"].toInt()) { now = cur; fresh = true; if (!stuck(now)) break; }
+        }
+        const bool cleared = fresh && !stuck(now);
+        return QJsonObject{{"ok", cleared}, {"command", how}, {"destination", dest}, {"cleared", cleared}, {"was_stuck", stuck(before)}, {"state_before", before["State"].toString() + "/" + before["Stage"].toString()},
+                           {"state_now", fresh ? now["State"].toString() + "/" + now["Stage"].toString() : QString("no new status")}, {"ack", ack.isEmpty() ? QJsonValue("none") : QJsonValue(ack)},
+                           {"error", cleared ? QString() : QString("the telescope still reports a capture in progress")}};
+    }
+
+    if (cmd == "reboot") {
+        // Reboot (System): the only command found that clears a camera stuck in SAMPLE_CAPTURE (2026-10-28; CancelImaging is acknowledged and ignored, AbortAll is unknown).
+        // Accepted even mid-exposure. The link drops at once, the telescope is off the network for about 15-25 s, the server reconnects by itself; the mount comes back NOT aligned.
+        if (!m_backend->isConnected()) return fail("not connected");
+        if (m_seq->active()) return fail("a sequence is running: stop it first");
+        m_backend->recordEvent("telescope_reboot", req["reason"].toString("requested"));
+        m_backend->sendCommand("Reboot", "System");
+        const QJsonObject ack = waitResponse(m_backend->lastSequenceId(), 8000);
+        const bool ok = !ack.isEmpty() && ack["ErrorCode"].toInt() == 0;
+        return QJsonObject{{"ok", ok}, {"ack", ack.isEmpty() ? QJsonValue("none") : QJsonValue(ack)}, {"host", m_backend->connectedHost()},
+                           {"error", ok ? QString() : QString("the telescope did not accept the reboot")}};
+    }
+
     if (cmd == "send") {
         if (!m_allowRaw) return fail("raw commands disabled (start with --control-raw)");
         if (!m_backend->isConnected()) return fail("not connected");

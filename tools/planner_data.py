@@ -36,6 +36,12 @@ def tmax(alt, az, lat):
     return min(2 * (math.degrees(1 / CORNER_PX) / abs(r)) * 3600, 3600.0)
 
 
+def read_filter():
+    """the hand-fitted filter as the planner sees it (~/.config/origin/filter: clear | nebula; no file = clear)"""
+    try: return open(os.path.expanduser('~/.config/origin/filter')).read().strip().lower() or 'clear'
+    except OSError: return 'clear'
+
+
 def sh(cmd, timeout=60):
     env = dict(os.environ, ORIGIN_CONTROL_PORT=os.environ.get('ORIGIN_CONTROL_PORT', '8765'))
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env, cwd=ROOT)
@@ -76,7 +82,7 @@ def main():
     out = {'generated': dt.datetime.now(dt.timezone.utc).strftime(fmt), 'night': s.get('night'), 'site': {'lat': lat, 'lon': lon}, 'dark_start': s['dark_start'], 'dark_end': s['dark_end'],
            'moon_illumination': s.get('moon_illumination'), 'step_min': a.step, 'times': [t.strftime(fmt) for t in times], 'targets': targets,
            'plan': [{k: b.get(k) for k in ('key', 'name', 'start', 'end', 'priority', 'minutes')} for b in s.get('plan', [])], 'weather': wx, 'stacks': stacks, 'live': live,
-           'horizon': s.get('horizon')}
+           'horizon': s.get('horizon'), 'filter': read_filter()}
     os.makedirs(a.out, exist_ok=True); tmp = os.path.join(a.out, 'planner.json.tmp'); json.dump(out, open(tmp, 'w')); os.replace(tmp, os.path.join(a.out, 'planner.json'))
     shutil.copyfile(os.path.join(HERE, 'planner.html'), os.path.join(a.out, 'planner.html'))
     print('planner.json: %d targets, %d time steps, %d plan blocks' % (len(targets), len(times), len(out['plan'])))

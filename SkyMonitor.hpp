@@ -29,6 +29,7 @@ public:
     Astro::Site site() const { return m_site; }
     void setBlackLevel(double adu) { m_blackLevel = adu; }
     void setAutoStack(bool on) { m_autoStack = on; }
+    void setKeepReference(bool on) { m_keepReference = on; }   // offline restacks: frames that will not register are skipped, the stack is never replaced
     void setMinTransparency(double t) { m_minTransparency = t; }
     /// While the mount is not aligned its RA/Dec mean nothing. A plate solve gives the true pointing (used for 30 minutes); without one the frame is scored "no_pointing".
     void setMountAligned(bool aligned) { m_mountAligned = aligned; }
@@ -41,7 +42,7 @@ public:
     LiveStacker& stacker() { return m_stack; }
     QJsonObject stackSummary() const;
     QString stackDirectory() const;
-    void archiveStack();                                    // save the stack and move it aside (stacks/<target>_<UTC>) so a replacement stack does not overwrite it
+    void archiveStack(const QString& tag = QString());      // save the stack and move it aside (stacks/<target>[_<tag>]_<UTC>) so a replacement stack does not overwrite it
     bool saveStack();
 
     /// Analyse one snapshot (raw 16-bit FITS bytes) taken at the mount position (ra, dec in radians).
@@ -74,7 +75,8 @@ private:
     double m_fixRa = 0, m_fixDec = 0; QDateTime m_fixAt;   // latest plate-solved pointing
     QMap<QString, QList<double>> m_darkRecent;                // the last 5 dark-sky rates (exposures of 8 s or more) per ISO, for a baseline that one frame cannot move
     double m_refHfr = 0; int m_refStars = 0;                  // HFR and round-star count of the frame that seeded the current stack (0 when the stack was loaded from disk)
-    int m_regFailRun = 0;                                   // consecutive frames with many round stars that could not register to a small stack
+    int m_regFailRun = 0;                                   // consecutive frames with many round stars that could not register to the stack (reset by any frame that registers)
+    bool m_keepReference = false;
     qint64 m_pictureMs = 0;                                 // last time the picture of the sky was written
     QString m_target = "auto";
     bool m_targetKnown = false;

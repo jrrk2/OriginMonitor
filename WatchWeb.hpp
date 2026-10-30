@@ -1,6 +1,8 @@
 #pragma once
 
-// A minimal read-only web server for OriginWatch: HTTP, or HTTPS when a certificate and key are given (QSslServer, Qt 6.4+). GET only, one request per connection.
+// A minimal web server for OriginWatch: HTTP, or HTTPS when a certificate and key are given (QSslServer, Qt 6.4+). One request per connection. GET is read-only; the one
+// exception is a POST handler (setPostHandler) for small settings, taken only with the header X-Origin-Watch: 1 (a cross-site form cannot send it, and a cross-site
+// fetch with it needs a CORS preflight, which is refused) and the same token as GET. Its arguments travel in the query string; no request body is read.
 // Access is limited to private-network peers (loopback, 10/8, 172.16/12, 192.168/16, link-local, fc00::/7), so a router that forwards the port by mistake does not publish it,
 // and optionally to a shared token (?t=TOKEN once, then a cookie). It never writes anything and never talks to the telescope: the handler only shows what the OriginWatch window shows.
 
@@ -30,6 +32,7 @@ class WebServer : public QObject {
 public:
     using Handler = std::function<WebReply(const QString& path, const QUrlQuery& query)>;
     WebServer(Handler h, const QString& token, QObject* parent = nullptr) : QObject(parent), m_handler(std::move(h)), m_token(token.toUtf8()) {}
+    void setPostHandler(Handler h) { m_post = std::move(h); }
 
     // certFile/keyFile empty: plain HTTP. Returns false and says why in *err.
     bool start(quint16 port, const QString& certFile, const QString& keyFile, const QHostAddress& bind, QString* err)
@@ -95,14 +98,17 @@ private:
     {
         const QList<QByteArray> lines = req.split('\n'); const QList<QByteArray> first = lines.value(0).trimmed().split(' ');
         WebReply r; QByteArray extra;
-        if (first.size() < 2 || first[0] != "GET") { r.status = 405; r.type = "text/plain"; r.body = "read-only: GET only\n"; }
+        bool marked = false;                                                     // X-Origin-Watch: 1, required for POST
+        for (const QByteArray& l : lines) if (l.trimmed().toLower() == "x-origin-watch: 1") marked = true;
+        const bool post = first.size() >= 2 && first[0] == "POST" && m_post && marked;
+        if (first.size() < 2 || (first[0] != "GET" && !post)) { r.status = 405; r.type = "text/plain"; r.body = "GET only (POST only for settings, from the page itself)\n"; }
         else {
             const QUrl url = QUrl::fromEncoded(first[1]); const QUrlQuery q(url);
             bool ok = m_token.isEmpty();
             if (!ok && q.queryItemValue("t").toUtf8() == m_token) { ok = true; extra = "Set-Cookie: t=" + m_token + "; Path=/; HttpOnly; SameSite=Strict" + (m_tls ? "; Secure" : "") + "\r\n"; }
             for (const QByteArray& l : lines) if (!ok && l.trimmed().toLower().startsWith("cookie:") && l.contains("t=" + m_token)) ok = true;
             if (!ok) { r.status = 403; r.type = "text/plain"; r.body = "forbidden: open the address with ?t=TOKEN once\n"; }
-            else r = m_handler(url.path(), q);
+            else r = post ? m_post(url.path(), q) : m_handler(url.path(), q);
         }
         fprintf(stderr, "%s web %s %s -> %d\n", qPrintable(QDateTime::currentDateTime().toString(Qt::ISODate)), qPrintable(s->peerAddress().toString()),
                 first.size() >= 2 ? qPrintable(QString::fromLatin1(first[0]) + " " + QUrl::fromEncoded(first[1]).path()) : "(malformed)", r.status);      // access log: path only, never the query (it holds the token)
@@ -111,5 +117,5 @@ private:
                  "\r\n" + (r.location.isEmpty() ? QByteArray() : "Location: " + r.location + "\r\n") + "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n" + extra + "\r\n" + r.body);
         s->disconnectFromHost();
     }
-    Handler m_handler; QByteArray m_token; QTcpServer* m_server = nullptr; bool m_tls = false;
+    Handler m_handler, m_post; QByteArray m_token; QTcpServer* m_server = nullptr; bool m_tls = false;
 };

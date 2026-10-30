@@ -148,6 +148,7 @@ public:
     int currentISO() const { return m_currentISO; }
     int currentBinning() const { return m_currentBinning; }
     QString connectedHost() const { return m_connectedHost; }
+    int connectedPort() const { return m_connectedPort; }
     int lastSequenceId() const { return m_nextSequenceId - 1; }   // ID of the most recently sent command
     double radiansToHours(double radians);
     double radiansToDegrees(double radians);

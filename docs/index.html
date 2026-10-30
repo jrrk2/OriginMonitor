@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OriginMonitor gallery</title>
+<style>
+:root{--bg:#0d0f13;--fg:#d9dde4;--dim:#8b93a1;--card:#161a21;--link:#8cc4ff;--tag:#2a3240}
+body{background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0}
+header,main,footer{max-width:1480px;margin:0 auto;padding:0 16px}
+h1{font-weight:600;font-size:28px;margin:28px 0 4px}
+p{color:var(--dim);max-width:900px}
+a{color:var(--link)}
+main{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,420px),1fr));gap:20px;margin-bottom:32px}
+figure{margin:0;background:var(--card);border-radius:6px;overflow:hidden}
+figure img{display:block;width:100%;height:auto;background:#000}
+figcaption{padding:10px 12px 12px;font-size:14px;color:var(--dim)}
+figcaption b{color:var(--fg);font-weight:600;font-size:15px}
+.tag{background:var(--tag);color:var(--fg);border-radius:3px;padding:0 5px;font-size:12px;margin-left:4px}
+footer{color:var(--dim);font-size:14px;padding-bottom:40px}
+</style>
+<header>
+<h1>OriginMonitor gallery</h1>
+<p>Deep-sky images taken unattended with a Celestron Origin (152 mm f/2.2 RASA, 1.48&Prime; per pixel) from Cambridge, UK, between 9 October 2026 and 27 October 2026:
+17 targets, 21.9 hours of stacked exposure over 9 nights. Each target is one stack of all its good frames from every night
+(<code>tools/restack.py</code>), shown as the live stacker's own preview at half resolution: background extraction, colour neutralisation and a stretch, with no further processing.
+Click a picture for the full field (about 75&prime; &times; 50&prime;).</p>
+<p>The stacker, scheduler and unattended supervisor are in the <a href="https://github.com/jrrk2/OriginMonitor">OriginMonitor repository</a>; how they drive the telescope is
+drawn in <a href="state_machines.html">the state-machine charts</a>.</p>
+</header>
+<main>
+<figure><a href="gallery/ngc6888.jpg" title="Full field, 1380 &times; 580"><img src="gallery/ngc6888_card.jpg" alt="Crescent Nebula, NGC 6888" width="720" height="480" loading="lazy"></a><figcaption><b>Crescent Nebula, NGC 6888</b><br>889 frames, 197 min &middot; 10 s at ISO 800 &middot; Antlia quad-band nebula filter &middot; nights of 16, 25 Oct 2026 &middot; star HFR 3.5&Prime;</figcaption></figure>
+<figure><a href="gallery/ngc6992.jpg" title="Full field, 1429 &times; 858"><img src="gallery/ngc6992_card.jpg" alt="Eastern Veil, NGC 6992" width="720" height="480" loading="lazy"></a><figcaption><b>Eastern Veil, NGC 6992</b><br>340 frames, 112 min &middot; 20 s at ISO 200 &middot; no filter &middot; night of 9 Oct 2026 &middot; star HFR 3.4&Prime;</figcaption></figure>
+<figure><a href="gallery/ngc2174.jpg" title="Full field, 1411 &times; 937"><img src="gallery/ngc2174_card.jpg" alt="Monkey Head Nebula, NGC 2174" width="720" height="480" loading="lazy"></a><figcaption><b>Monkey Head Nebula, NGC 2174</b><br>267 frames, 89 min &middot; 20 s at ISO 200 &middot; no filter &middot; night of 9 Oct 2026 &middot; star HFR 3.6&Prime;</figcaption></figure>
+<figure><a href="gallery/m31.jpg" title="Full field, 1427 &times; 845"><img src="gallery/m31_card.jpg" alt="Andromeda Galaxy, M31, with M32 and M110" width="720" height="480" loading="lazy"></a><figcaption><b>Andromeda Galaxy, M31, with M32 and M110</b><br>426 frames, 49 min &middot; 6 s at ISO 800 &middot; no filter &middot; nights of 9, 11, 13 Oct 2026 &middot; star HFR 3.6&Prime;</figcaption></figure>
+<figure><a href="gallery/ic405.jpg" title="Full field, 1466 &times; 944"><img src="gallery/ic405_card.jpg" alt="Flaming Star Nebula, IC 405" width="720" height="480" loading="lazy"></a><figcaption><b>Flaming Star Nebula, IC 405</b><br>327 frames, 109 min &middot; 20 s at ISO 200 &middot; no filter &middot; night of 9 Oct 2026 &middot; star HFR 3.6&Prime;</figcaption></figure>
+<figure><a href="gallery/ic5070.jpg" title="Full field, 1393 &times; 685"><img src="gallery/ic5070_card.jpg" alt="Pelican Nebula, IC 5070" width="720" height="480" loading="lazy"></a><figcaption><b>Pelican Nebula, IC 5070</b><br>579 frames, 104 min &middot; 20 s at ISO 800 &middot; Antlia quad-band nebula filter &middot; night of 27 Oct 2026 &middot; star HFR 3.8&Prime;</figcaption></figure>
+<figure><a href="gallery/ngc7380.jpg" title="Full field, 1451 &times; 895"><img src="gallery/ngc7380_card.jpg" alt="Wizard Nebula, NGC 7380" width="720" height="480" loading="lazy"></a><figcaption><b>Wizard Nebula, NGC 7380</b><br>250 frames, 71 min &middot; 17 s at ISO 800 &middot; Antlia quad-band nebula filter &middot; night of 27 Oct 2026 &middot; star HFR 3.8&Prime;</figcaption></figure>
+<figure><a href="gallery/m45.jpg" title="Full field, 1464 &times; 925"><img src="gallery/m45_card.jpg" alt="Pleiades, M45" width="720" height="480" loading="lazy"></a><figcaption><b>Pleiades, M45</b><br>176 frames, 39 min &middot; 13 s at ISO 800 &middot; no filter &middot; nights of 11, 13 Oct 2026 &middot; star HFR 3.9&Prime;</figcaption></figure>
+<figure><a href="gallery/ngc2237.jpg" title="Full field, 1429 &times; 857"><img src="gallery/ngc2237_card.jpg" alt="Rosette Nebula, NGC 2237" width="720" height="480" loading="lazy"></a><figcaption><b>Rosette Nebula, NGC 2237</b><br>152 frames, 25 min &middot; 10 s at ISO 800 &middot; Antlia quad-band nebula filter &middot; night of 16 Oct 2026 &middot; star HFR 4.0&Prime;</figcaption></figure>
+<figure><a href="gallery/ngc869.jpg" title="Full field, 1438 &times; 842"><img src="gallery/ngc869_card.jpg" alt="Double Cluster, NGC 869 and 884" width="720" height="480" loading="lazy"></a><figcaption><b>Double Cluster, NGC 869 and 884</b><br>281 frames, 66 min &middot; 14 s at ISO 800 &middot; no filter &middot; night of 11 Oct 2026 &middot; star HFR 3.6&Prime;</figcaption></figure>
+<figure><a href="gallery/m27.jpg" title="Full field, 1454 &times; 898"><img src="gallery/m27_card.jpg" alt="Dumbbell Nebula, M27" width="720" height="480" loading="lazy"></a><figcaption><b>Dumbbell Nebula, M27</b> <span class="tag">close crop</span><br>534 frames, 71 min &middot; 8 s at ISO 800 &middot; Antlia quad-band nebula filter &middot; night of 16 Oct 2026 &middot; star HFR 3.2&Prime;</figcaption></figure>
+<figure><a href="gallery/m1.jpg" title="Full field, 1395 &times; 745"><img src="gallery/m1_card.jpg" alt="Crab Nebula, M1" width="720" height="480" loading="lazy"></a><figcaption><b>Crab Nebula, M1</b> <span class="tag">close crop</span><br>287 frames, 77 min &middot; 17 s at ISO 800 &middot; no filter &middot; nights of 11, 13 Oct 2026 &middot; star HFR 3.9&Prime;</figcaption></figure>
+<figure><a href="gallery/m57.jpg" title="Full field, 1501 &times; 985"><img src="gallery/m57_card.jpg" alt="Ring Nebula, M57" width="720" height="480" loading="lazy"></a><figcaption><b>Ring Nebula, M57</b> <span class="tag">close crop</span><br>331 frames, 110 min &middot; 20 s at ISO 800 &middot; Antlia quad-band nebula filter &middot; night of 15 Oct 2026 &middot; star HFR 3.6&Prime;</figcaption></figure>
+<figure><a href="gallery/ngc6946.jpg" title="Full field, 1411 &times; 798"><img src="gallery/ngc6946_card.jpg" alt="Fireworks Galaxy, NGC 6946" width="720" height="480" loading="lazy"></a><figcaption><b>Fireworks Galaxy, NGC 6946</b> <span class="tag">close crop</span><br>448 frames, 112 min &middot; 15 s at ISO 800 &middot; Antlia quad-band nebula filter &middot; night of 27 Oct 2026 &middot; star HFR 4.0&Prime;</figcaption></figure>
+<figure><a href="gallery/m33.jpg" title="Full field, 1446 &times; 960"><img src="gallery/m33_card.jpg" alt="Triangulum Galaxy, M33" width="720" height="480" loading="lazy"></a><figcaption><b>Triangulum Galaxy, M33</b><br>164 frames, 25 min &middot; 9 s at ISO 800 &middot; Antlia quad-band nebula filter &middot; night of 21 Oct 2026 &middot; star HFR 4.9&Prime;</figcaption></figure>
+<figure><a href="gallery/m13.jpg" title="Full field, 1516 &times; 1002"><img src="gallery/m13_card.jpg" alt="Hercules Cluster, M13" width="720" height="480" loading="lazy"></a><figcaption><b>Hercules Cluster, M13</b> <span class="tag">close crop</span><br>60 frames, 20 min &middot; 20 s at ISO 800 &middot; no filter &middot; night of 11 Oct 2026 &middot; star HFR 4.0&Prime;</figcaption></figure>
+<figure><a href="gallery/ngc7000.jpg" title="Full field, 945 &times; 795"><img src="gallery/ngc7000_card.jpg" alt="North America Nebula, NGC 7000" width="720" height="480" loading="lazy"></a><figcaption><b>North America Nebula, NGC 7000</b><br>572 frames, 35 min &middot; 3 s at ISO 200 &middot; no filter &middot; nights of 10, 13 Oct 2026 &middot; star HFR 2.9&Prime;</figcaption></figure>
+</main>
+<footer>Photographs &copy; Jonathan Kimmitt. Star HFR is the median half-flux radius of the stacked frames. &ldquo;Antlia quad-band&rdquo; is a narrowband filter fitted on 15 October 2026; earlier frames are unfiltered.</footer>
+</html>
