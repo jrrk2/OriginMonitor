@@ -11,6 +11,10 @@ supervised live; the second was broken cloud and run by the unattended superviso
 
 ![Andromeda](docs/previews/andromeda_m31.jpg)
 
+**[Gallery](https://jrrk2.github.io/OriginMonitor/)**: the best stack of each target so far, all good frames from every night restacked into one image per target
+(built by `tools/gallery.py` from the `tools/restack.py` finals). The [state-machine charts](https://jrrk2.github.io/OriginMonitor/state_machines.html) show how the daemon,
+sequencer and supervisor drive the telescope.
+
 ## Licence
 
 This program is free software under the **GNU General Public Licence, version 3 or (at your option) any later version** (see `LICENSE`), because the focuser commands
