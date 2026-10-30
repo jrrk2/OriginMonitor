@@ -25,7 +25,7 @@ and decides what to do: keep going, wait for cloud to pass, change target, refoc
 | `stack` | frames and total exposure in the current target's stack |
 
 `originctl.py events [--since SEQ]` is the telescope error feed (`telescope_error`, `telescope_alert`, `connection_error`, `disconnected`,
-`download_error`, `image_unreadable`); remember `next` and pass it as `--since`. `originctl.py stack` saves the stack and returns the path of
+`download_error`, `image_unreadable`, and `aux_lost`/`aux_restored` when the telescope computer cannot read one of its own devices, code -802); remember `next` and pass it as `--since`. `originctl.py stack` saves the stack and returns the path of
 `preview.png` (look at it). `originctl.py sky-map` lists az/alt bins that were bad on several nights and never good (almost certainly trees
 or buildings) next to bins that are only sometimes bad (cloud).
 

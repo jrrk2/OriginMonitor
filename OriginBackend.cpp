@@ -838,6 +838,7 @@ void OriginBackend::onWebSocketDisconnected()
     
     stopContinuousSnapshots();
     recordEvent("disconnected", "websocket connection to the telescope was lost");
+    m_auxLost.clear();
     emit disconnected();
 }
 
@@ -858,7 +859,18 @@ void OriginBackend::onTextMessageReceived(const QString &message)
         const int errCode = obj["ErrorCode"].toInt(0);
         const QString cmd = obj["Command"].toString(), type = obj["Type"].toString(), state = obj["State"].toString();
         const QString lower = (cmd + " " + type + " " + state).toLower();
-        if (errCode != 0 || !errMsg.isEmpty())
+        const QString src = obj["Source"].toString();
+        // -802 is the telescope computer failing to read a device over its internal aux bus (one garbled reply, 30 Oct 2026 06:30, the next poll fine):
+        // report it as a lost link and its recovery, once each, instead of an error per poll
+        if (errCode == -802) {
+            if (!m_auxLost.contains(src)) {
+                m_auxLost.insert(src, QDateTime::currentDateTimeUtc());
+                recordEvent("aux_lost", QString("lost communication with aux device %1 (%2: %3)").arg(src, cmd, errMsg), obj);
+            }
+        } else if (!m_auxLost.isEmpty() && m_auxLost.contains(src) && errCode == 0 && errMsg.isEmpty()) {
+            const double s = m_auxLost.take(src).msecsTo(QDateTime::currentDateTimeUtc()) / 1000.0;
+            recordEvent("aux_restored", QString("regained communication with aux device %1 after %2 s").arg(src).arg(s, 0, 'f', 1), QJsonObject{{"device", src}, {"down_s", s}});
+        } else if (errCode != 0 || !errMsg.isEmpty())
             recordEvent("telescope_error", QString("%1 %2: %3 (code %4)").arg(obj["Source"].toString(), cmd, errMsg, QString::number(errCode)), obj);
         else if (lower.contains("error") || lower.contains("fault") || lower.contains("alert") || lower.contains("warn") || lower.contains("fail") || lower.contains("alarm"))
             recordEvent("telescope_alert", QString("%1 %2 %3 %4").arg(obj["Source"].toString(), cmd, type, state).trimmed(), obj);
