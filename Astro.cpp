@@ -134,6 +134,10 @@ double moonSeparationDeg(const Equatorial& target, const QDateTime& utc)
 bool bodyPosition(const QString& name, const Site& site, const QDateTime& utc, BodyView* out)
 {
     Ephemeris::Body b;
+    if (Ephemeris::topocentric(name, utc, site.latDeg, site.lonDeg, 20.0, &b)) {          // exact, when the Earth PCK is there (Cambridge is ~20 m up)
+        out->eq = {b.raHours, b.decDeg}; out->distKm = b.distKm; out->elongationDeg = b.elongationDeg; out->illumination = b.illumination; out->phaseAngleDeg = b.phaseAngleDeg;
+        return true;
+    }
     if (!Ephemeris::body(name, utc, &b)) return false;
     const double r = M_PI / 180.0, Re = 6378.137, phi = site.latDeg * r, lst = lstDegrees(julianDate(utc), site.lonDeg) * r;
     const double ox = Re * std::cos(phi) * std::cos(lst), oy = Re * std::cos(phi) * std::sin(lst), oz = Re * std::sin(phi);   // observer, equator of date (the precession offset is metres)

@@ -19,6 +19,9 @@ namespace Ephemeris {
 namespace {
 QMutex g_mutex;
 bool g_tried = false, g_ok = false;
+QHash<QString, QByteArray> g_small;            // small bodies loaded from their own SPK files: lower-case name or alias -> NAIF id
+QStringList g_smallNames, g_smallFiles;         // their main names, and the SPK files already furnished
+QByteArray g_earthFrame;                        // body-fixed Earth frame for observer positions: ITRF93 (high-precision PCK) or IAU_EARTH (pck00010.tpc); empty = none
 QString g_desc = "low-precision series (CSPICE not linked)";
 
 QString firstExisting(const QStringList& c) { for (const QString& f : c) if (QFileInfo::exists(f)) return QFileInfo(f).absoluteFilePath(); return QString(); }
@@ -41,6 +44,12 @@ void load()
     furnsh_c(l.toUtf8().constData()); furnsh_c(s.toUtf8().constData());
     if (failed_c()) { reset_c(); g_desc = "low-precision series (SPICE kernels failed to load)"; return; }
     g_ok = true;
+    // the Earth's orientation and shape, for positions seen from a place on the ground (spkcpo_c): optional
+    QStringList bpc, tpc; for (const QString& d : dirs) { bpc << d + "/earth_latest_high_prec.bpc"; tpc << d + "/pck00010.tpc"; }
+    const QString t = firstExisting(tpc), hp = firstExisting(bpc);
+    if (!t.isEmpty()) { furnsh_c(t.toUtf8().constData()); g_earthFrame = "IAU_EARTH"; }
+    if (!hp.isEmpty()) { furnsh_c(hp.toUtf8().constData()); g_earthFrame = "ITRF93"; }
+    if (failed_c()) { reset_c(); g_earthFrame.clear(); }
     g_desc = QString("JPL %1 via CSPICE (%2, %3)").arg(QFileInfo(s).baseName().toUpper(), QFileInfo(s).fileName(), QFileInfo(l).fileName());
 }
 #endif
@@ -85,7 +94,65 @@ bool sunMoon(const QDateTime& utc, SunMoon* out)
 #endif
 }
 
-QStringList bodyNames() { return {"sun", "moon", "mercury", "venus", "mars", "jupiter", "saturn", "uranus", "neptune", "pluto"}; }
+bool topocentric(const QString& name, const QDateTime& utc, double latDeg, double lonDeg, double heightM, Body* out)
+{
+#ifdef ORIGIN_SPICE
+    static const QHash<QString, QByteArray> id = {{"sun", "SUN"}, {"moon", "MOON"}, {"mercury", "MERCURY"}, {"venus", "VENUS"}, {"mars", "MARS BARYCENTER"}, {"jupiter", "JUPITER BARYCENTER"},
+                                                  {"saturn", "SATURN BARYCENTER"}, {"uranus", "URANUS BARYCENTER"}, {"neptune", "NEPTUNE BARYCENTER"}, {"pluto", "PLUTO BARYCENTER"}};
+    const QString key = name.trimmed().toLower();
+    if (!available()) return false;
+    QMutexLocker lock(&g_mutex);
+    if (g_earthFrame.isEmpty()) return false;
+    const bool small = g_small.contains(key);
+    if (!small && !id.contains(key)) return false;
+    SpiceDouble et = 0, radii[3], obs[3], st[6], s[6], lt = 0; SpiceInt n = 0;
+    str2et_c(utc.toUTC().toString("yyyy-MM-ddTHH:mm:ss.zzz").toUtf8().constData(), &et);
+    bodvrd_c("EARTH", "RADII", 3, &n, radii);
+    const double f = (radii[0] - radii[2]) / radii[0];
+    georec_c(lonDeg * M_PI / 180.0, latDeg * M_PI / 180.0, heightM / 1000.0, radii[0], f, obs);       // geodetic -> Earth-fixed, km
+    const char* corr = small ? "LT" : "LT+S";                                                          // as in body()
+    spkcpo_c(small ? g_small[key].constData() : id[key].constData(), et, "J2000", "OBSERVER", corr, obs, "EARTH", g_earthFrame.constData(), st, &lt);
+    spkcpo_c("SUN", et, "J2000", "OBSERVER", "LT+S", obs, "EARTH", g_earthFrame.constData(), s, &lt);
+    if (failed_c()) { reset_c(); return false; }
+    SpiceDouble r, ra, dec;
+    recrad_c(st, &r, &ra, &dec);
+    out->distKm = r; out->raHours = ra * 12.0 / M_PI; out->decDeg = dec * 180.0 / M_PI; out->xKm = st[0]; out->yKm = st[1]; out->zKm = st[2];
+    out->elongationDeg = vsep_c(st, s) * 180.0 / M_PI;
+    double toSun[3], toObs[3];
+    for (int i = 0; i < 3; ++i) { toSun[i] = s[i] - st[i]; toObs[i] = -st[i]; }
+    const double phase = vsep_c(toSun, toObs);
+    out->phaseAngleDeg = phase * 180.0 / M_PI; out->illumination = (1.0 + std::cos(phase)) / 2.0;
+    return true;
+#else
+    Q_UNUSED(name) Q_UNUSED(utc) Q_UNUSED(latDeg) Q_UNUSED(lonDeg) Q_UNUSED(heightM) Q_UNUSED(out)
+    return false;
+#endif
+}
+
+bool loadSmallBody(const QStringList& names, const QString& spkFile, int naifId, QString* error)
+{
+#ifdef ORIGIN_SPICE
+    if (names.isEmpty()) { if (error) *error = "no name given"; return false; }
+    if (!available()) { if (error) *error = "SPICE is not active: " + description(); return false; }
+    if (!QFileInfo::exists(spkFile)) { if (error) *error = "no SPK file " + spkFile; return false; }
+    QMutexLocker lock(&g_mutex);
+    const QString abs = QFileInfo(spkFile).absoluteFilePath();
+    if (!g_smallFiles.contains(abs)) {
+        furnsh_c(abs.toUtf8().constData());
+        if (failed_c()) { reset_c(); if (error) *error = "SPICE could not load " + spkFile; return false; }
+        g_smallFiles << abs;
+    }
+    for (const QString& n : names) if (!n.trimmed().isEmpty()) g_small[n.trimmed().toLower()] = QByteArray::number(naifId);
+    if (!g_smallNames.contains(names.first())) g_smallNames << names.first();
+    return true;
+#else
+    Q_UNUSED(names) Q_UNUSED(spkFile) Q_UNUSED(naifId)
+    if (error) *error = "built without CSPICE";
+    return false;
+#endif
+}
+
+QStringList bodyNames() { QMutexLocker lock(&g_mutex); return QStringList{"sun", "moon", "mercury", "venus", "mars", "jupiter", "saturn", "uranus", "neptune", "pluto"} + g_smallNames; }
 
 bool body(const QString& name, const QDateTime& utc, Body* out)
 {
@@ -93,11 +160,15 @@ bool body(const QString& name, const QDateTime& utc, Body* out)
     static const QHash<QString, QByteArray> id = {{"sun", "SUN"}, {"moon", "MOON"}, {"mercury", "MERCURY"}, {"venus", "VENUS"}, {"mars", "MARS BARYCENTER"}, {"jupiter", "JUPITER BARYCENTER"},
                                                   {"saturn", "SATURN BARYCENTER"}, {"uranus", "URANUS BARYCENTER"}, {"neptune", "NEPTUNE BARYCENTER"}, {"pluto", "PLUTO BARYCENTER"}};
     const QString key = name.trimmed().toLower();
-    if (!id.contains(key) || !available()) return false;
+    if (!available()) return false;
     QMutexLocker lock(&g_mutex);
+    const bool small = g_small.contains(key);
+    if (!small && !id.contains(key)) return false;
     SpiceDouble et = 0, p[3], s[3], lt = 0;
     str2et_c(utc.toUTC().toString("yyyy-MM-ddTHH:mm:ss.zzz").toUtf8().constData(), &et);
-    spkpos_c(id[key].constData(), et, "J2000", "LT+S", "EARTH", p, &lt);
+    // a small body is wanted where the stars around it are in the frame: astrometric (light time only), like catalogue positions and plate solutions;
+    // stellar aberration (up to 20") moves the field and the asteroid together
+    spkpos_c(small ? g_small[key].constData() : id[key].constData(), et, "J2000", small ? "LT" : "LT+S", "EARTH", p, &lt);
     spkpos_c("SUN", et, "J2000", "LT+S", "EARTH", s, &lt);
     if (failed_c()) { reset_c(); return false; }
     SpiceDouble r, ra, dec;

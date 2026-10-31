@@ -1,5 +1,6 @@
 #include "ControlServer.hpp"
 #include <algorithm>
+#include <cmath>
 #include "OriginBackend.hpp"
 #include "DataDir.hpp"
 #include "Sequencer.hpp"
@@ -786,6 +787,22 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
         const bool ok = !ack.isEmpty() && ack["ErrorCode"].toInt() == 0;
         return QJsonObject{{"ok", ok}, {"ack", ack.isEmpty() ? QJsonValue("none") : QJsonValue(ack)}, {"host", m_backend->connectedHost()},
                            {"error", ok ? QString() : QString("the telescope did not accept the reboot")}};
+    }
+
+    // Firmware moving-target tracking. The Celestron app's imaging request carries "TargetTrack": [{"Ra", "Dec", "JulianDate"}, ...] (decoded from the iOS app,
+    // 2026-10-31); this sends the same list with Mount/TrackMovingTarget. Ra/Dec in radians like GotoRaDec (J2000 topocentric), JulianDate UTC.
+    // {"track": [{"ra_hours", "dec_deg", "jd"}, ...]} - or {"track": []} to send an empty list. Read IsTrackingMovingTarget from mount_status afterwards.
+    if (cmd == "track_moving") {
+        if (!m_backend->isConnected()) return fail("not connected");
+        QJsonArray pts;
+        for (const QJsonValue& v : req["track"].toArray()) {
+            const QJsonObject o = v.toObject();
+            pts.append(QJsonObject{{"Ra", o["ra_hours"].toDouble() * M_PI / 12.0}, {"Dec", o["dec_deg"].toDouble() * M_PI / 180.0}, {"JulianDate", o["jd"].toDouble()}});
+        }
+        m_backend->sendCommand("TrackMovingTarget", "Mount", QJsonObject{{"TargetTrack", pts}});
+        const QJsonObject ack = waitResponse(m_backend->lastSequenceId(), 8000);
+        if (ack.isEmpty()) return fail("no acknowledgement from TrackMovingTarget");
+        return QJsonObject{{"ok", ack["ErrorCode"].toInt() == 0}, {"ack", ack}, {"points", pts.size()}, {"error", ack["ErrorMessage"].toString()}};
     }
 
     if (cmd == "send") {

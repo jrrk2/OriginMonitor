@@ -33,7 +33,15 @@ struct Body {
     double elongationDeg = 0;                              // from the Sun
     double phaseAngleDeg = 0, illumination = 1;            // Sun-body-Earth angle; illuminated fraction of the disc
 };
-bool body(const QString& name, const QDateTime& utc, Body* out);      // false for an unknown name or when SPICE is not active
+bool body(const QString& name, const QDateTime& utc, Body* out);
+// The same seen from a place on the ground (geodetic latitude/longitude, height above the ellipsoid), with the Earth's shape and orientation from a PCK
+// (earth_latest_high_prec.bpc if present, else pck00010.tpc) and light time from that place: exact topocentric, which matters for the Moon and close
+// asteroids (Apophis in 2029 passes at ~6 Earth radii, parallax of several degrees). False when no PCK was found: use body() plus a correction then.
+bool topocentric(const QString& name, const QDateTime& utc, double latDeg, double lonDeg, double heightM, Body* out);
+// An asteroid or comet from its own SPK file (JPL Horizons makes them: tools/fetch_spk.py). Afterwards body(name, ...) gives its position, astrometric
+// (light time only, no stellar aberration) so that it matches the star field around it; the planets above stay apparent.
+// names: the main name first, then aliases (any of them works in body()); loading the same file again only adds names.
+bool loadSmallBody(const QStringList& names, const QString& spkFile, int naifId, QString* error = nullptr);      // false for an unknown name or when SPICE is not active
 QStringList bodyNames();
 
 }   // namespace Ephemeris

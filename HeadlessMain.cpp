@@ -189,6 +189,13 @@ const QList<Cmd>& commands()
                    O("lat", 'd', "site latitude, deg north", "52.2054"), O("lon", 'd', "site longitude, deg east", "0.1218"), O("text", 'b', "one line per body instead of JSON")}});
         v.append({"goto-body", "action", "Slew to the Sun-free position of a Moon or planet now (topocentric J2000 from CSPICE) and report where it was aimed. Refuses below 20 deg altitude and the Sun (never point the telescope at the Sun).", "", true, false,
                   {P("name", 's', "moon, mercury, venus, mars, jupiter, saturn, uranus, neptune or pluto"), O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218"), O("timeout", 'i', "seconds", "240")}});
+        v.append({"track", "action", "Follow an asteroid or comet (its SPK fetched with tools/fetch_spk.py) with a capture sequence: the telescope tracks the stars and is re-pointed by goto whenever the object has drifted --recentre of the field's short side. Logs every frame with the object's predicted position to DATA/track_<name>_<date>.jsonl (check with tools/track_check.py). Slews: refuses before Sun -12 deg, while an unattended run is active, uninitialised, or with the object under --min-alt. --dry-run lists the track and the re-pointings.", "", true, false,
+                  {P("name", 's', "the object: its name, number or file name as in DATA/spk (e.g. 524522, zoozve, 363790)"), O("hours", 'd', "how long to follow it", "2"), O("exposure", 'd', "seconds per frame (keep the object's trail short)", "10"),
+                   O("iso", 'i', "ISO", "800"), O("recentre", 'd', "re-point when the object has drifted this fraction of the field's short side (0.84 deg)", "0.25"), O("min-alt", 'd', "stop when the object is lower than this, deg", "30"),
+                   O("firmware", 'b', "also give the mount the object's path (TrackMovingTarget with TargetTrack points) and let it follow; falls back to re-pointing if IsTrackingMovingTarget stays false"),
+                   O("track-step", 'd', "minutes between TargetTrack points with --firmware", "2"),
+                   O("no-stack", 'b', "do not stack the frames"), O("not-before", 's', "\"dusk\" (Sun below -12) or a local HH:MM", "dusk"), O("dry-run", 'b', "list the track and the re-pointings; no motion"),
+                   O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218")}});
         v.append({"forecast-accuracy", "planning", "How good the weather forecast has been: compares the archived dusk forecast of each night with the frames the sequencer took (usable fraction per hour). Writes forecast_accuracy.csv/.json in the data dir; reports bias (positive = the sky was better than forecast).", "", false, true, {}});
         v.append({"autorun", "planning", "Dusk launcher for cron (every 5 minutes): once per night, if the telescope is out and reachable, starts the daemon, connects, initializes the mount if needed and starts 'run --unattended --mail' in the background. Does nothing (quietly) when the telescope does not answer, when nothing is observable, when rain is forecast, or when ~/.config/origin/autorun.off exists. Slews the telescope: only schedule it if that is wanted.", "", true, false,
                   [] { QList<Arg> a = {O("telescope", 's', "telescope host", "192.168.1.195"), O("start-after", 's', "\"dusk\" (autorun begins when the Sun is below --probe-sun-alt; the run itself waits for -12 deg) or a local HH:MM; never act before this", "dusk"), O("probe-sun-alt", 'd', "Sun altitude below which autorun starts: raises the tube, probes with plate solves (exposure scaled to the sky brightness) and initializes; the run still waits for -12", "-7"), O("stop-before-dawn", 'd', "minutes before the end of darkness after which no run is started", "60"),
@@ -1489,6 +1496,22 @@ QJsonObject cmdGotoAltAz(const Parsed& p, const Cmd& c)
 // ---------------------------------------------------------------------------------------------------------------------------------------
 // body / goto-body: planets, Sun and Moon from JPL DE440 (CSPICE). The reference for planet coordinates.
 // ---------------------------------------------------------------------------------------------------------------------------------------
+// Asteroids and comets fetched with tools/fetch_spk.py (DATA/spk/<name>.json + .bsp): each answers to its full name ("363790 (2005 JE46)"), its file
+// name (363790_2005_JE46) and its number or first word (363790). Returns the main names loaded.
+QStringList loadSpkBodies()
+{
+    QStringList out;
+    for (const QFileInfo& f : QDir(originDataDir() + "/spk").entryInfoList({"*.json"}, QDir::Files, QDir::Name)) {
+        const QJsonObject j = readJsonFile(f.absoluteFilePath());
+        const QString name = j["name"].toString(), file = j["file"].toString(); const int id = j["naif_id"].toInt();
+        if (name.isEmpty() || file.isEmpty() || !id) continue;
+        QString err;
+        if (Ephemeris::loadSmallBody({name, f.completeBaseName(), name.section(' ', 0, 0), j["query"].toString()}, file, id, &err)) out << name;
+        else note({{"spk", f.fileName()}, {"error", err}});
+    }
+    return out;
+}
+
 QJsonObject bodyJson(const QString& name, const Astro::Site& site, const QDateTime& t)
 {
     Astro::BodyView b;
@@ -1501,6 +1524,7 @@ QJsonObject bodyJson(const QString& name, const Astro::Site& site, const QDateTi
 QJsonObject cmdBody(const Parsed& p, const Cmd& c)
 {
     if (!Ephemeris::available()) return failure("SPICE is not active: " + Ephemeris::description());
+    loadSpkBodies();
     const Astro::Site site{num(p, c, "lat"), num(p, c, "lon")}; const QDateTime now = QDateTime::currentDateTimeUtc();
     const QStringList names = p.v.contains("name") ? QStringList{str(p, "name").toLower()} : Ephemeris::bodyNames();
     const double hours = num(p, c, "hours"); const int step = std::max(1, int(num(p, c, "step")));
@@ -1510,7 +1534,7 @@ QJsonObject cmdBody(const Parsed& p, const Cmd& c)
         if (!b["ok"].toBool()) return failure("unknown body " + n + " (try: " + Ephemeris::bodyNames().join(", ") + ")");
         if (hours > 0) {
             QJsonArray rows;
-            for (int m = 0; m <= int(hours * 60); m += step) { const QDateTime t = now.addSecs(m * 60); const QJsonObject r = bodyJson(n, site, t); rows.append(QJsonObject{{"utc", t.toString(Qt::ISODate)}, {"alt_deg", r["alt_deg"]}, {"az_deg", r["az_deg"]}}); }
+            for (int m = 0; m <= int(hours * 60); m += step) { const QDateTime t = now.addSecs(m * 60); const QJsonObject r = bodyJson(n, site, t); rows.append(QJsonObject{{"utc", t.toString(Qt::ISODate)}, {"ra_hours", r["ra_hours"]}, {"dec_deg", r["dec_deg"]}, {"alt_deg", r["alt_deg"]}, {"az_deg", r["az_deg"]}}); }
             b["track"] = rows;
         }
         text += QString("%1  RA %2 h  Dec %3  alt %4  az %5  %6 AU  elong %7  illum %8%\n").arg(n, -8).arg(b["ra_hours"].toDouble(), 0, 'f', 5).arg(b["dec_deg"].toDouble(), 0, 'f', 4).arg(b["alt_deg"].toDouble(), 0, 'f', 1)
@@ -1527,6 +1551,7 @@ QJsonObject cmdGotoBody(const Parsed& p, const Cmd& c)
     const QString name = str(p, "name").toLower();
     if (name == "sun") return failure("refusing to point the telescope at the Sun");
     if (!Ephemeris::available()) return failure("SPICE is not active: " + Ephemeris::description());
+    loadSpkBodies();
     const Astro::Site site{num(p, c, "lat"), num(p, c, "lon")}; const QDateTime now = QDateTime::currentDateTimeUtc();
     Astro::BodyView b;
     if (!Astro::bodyPosition(name, site, now, &b)) return failure("unknown body " + name + " (try: " + Ephemeris::bodyNames().join(", ") + ")");
@@ -1538,6 +1563,165 @@ QJsonObject cmdGotoBody(const Parsed& p, const Cmd& c)
     QJsonObject r = call("goto", {{"ra_hours", b.eq.raHours}, {"dec_deg", b.eq.decDeg}, {"timeout", timeoutS}}, (timeoutS + 60) * 1000);
     r["body"] = bodyJson(name, site, now); r["ra_hours"] = b.eq.raHours; r["dec_deg"] = b.eq.decDeg;
     return r;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------
+// track: follow an asteroid or comet with frames. The telescope tracks the stars; the object drifts across the field at its own rate, so the telescope
+// is re-pointed (a goto to the object's position now) whenever it has moved --recentre of the field's short side (50') from the last pointing.
+// Each frame is logged with the object's predicted position at mid-exposure and its motion (DATA/track_<name>_<YYYYMMDD>.jsonl), for tools/track_check.py.
+// Positions: CSPICE with the object's SPK (tools/fetch_spk.py), astrometric J2000, topocentric. Written for a rehearsal of (99942) Apophis, April 2029.
+// ---------------------------------------------------------------------------------------------------------------------------------------
+namespace {
+QString fitsCard(const QString& file, const QString& key)                 // a header value as text ('' when absent): DATE-OBS, EXPTIME
+{
+    QFile f(file); if (!f.open(QIODevice::ReadOnly)) return QString();
+    for (int block = 0; block < 10; ++block) {
+        const QByteArray b = f.read(2880); if (b.size() < 2880) break;
+        for (int i = 0; i < 2880; i += 80) {
+            const QString card = QString::fromLatin1(b.mid(i, 80)), k = card.left(8).trimmed();
+            if (k == "END") return QString();
+            if (k == key && card.mid(8, 2) == "= ") return card.mid(10).section('/', 0, 0).trimmed().remove('\'');
+        }
+    }
+    return QString();
+}
+}
+
+bool runActive();
+QJsonObject cmdTrack(const Parsed& p, const Cmd& c)
+{
+    if (!Ephemeris::available()) return failure("SPICE is not active: " + Ephemeris::description());
+    const QStringList known = loadSpkBodies();
+    const QString name = str(p, "name").toLower();
+    const Astro::Site site{num(p, c, "lat"), num(p, c, "lon")};
+    const double minAlt = num(p, c, "min-alt"), frac = num(p, c, "recentre"), exposure = num(p, c, "exposure"), hours = num(p, c, "hours");
+    const int iso = int(num(p, c, "iso"));
+    const double fieldShortDeg = 0.84, recentreDeg = std::clamp(frac, 0.05, 0.45) * fieldShortDeg;
+    auto where = [&](const QDateTime& t, Astro::BodyView* b) { return Astro::bodyPosition(name, site, t, b); };
+    QDateTime now = QDateTime::currentDateTimeUtc();
+    Astro::BodyView b;
+    if (!where(now, &b)) return failure("unknown object " + name + (known.isEmpty() ? QString(" (fetch its SPK first: tools/fetch_spk.py)") : " (loaded: " + known.join(", ") + ")"));
+    auto rateArcsecPerS = [&](const QDateTime& t, double* dRa, double* dDec) {                  // sky motion: RA*cos(Dec) and Dec, arcsec per second
+        Astro::BodyView a, z; where(t.addSecs(-30), &a); where(t.addSecs(30), &z);
+        double dra = (z.eq.raHours - a.eq.raHours) * 15.0; if (dra > 180) dra -= 360; if (dra < -180) dra += 360;
+        *dRa = dra * std::cos(b.eq.decDeg * M_PI / 180.0) * 3600.0 / 60.0; *dDec = (z.eq.decDeg - a.eq.decDeg) * 3600.0 / 60.0;
+        return std::hypot(*dRa, *dDec);
+    };
+    const QDateTime until = now.addSecs(qint64(hours * 3600));
+    double dRa = 0, dDec = 0; const double rate = rateArcsecPerS(now, &dRa, &dDec);
+    const double trailPx = rate * exposure / 1.48;
+    if (p.v.contains("dry-run")) {
+        QJsonArray rows; QDateTime aimT = now; Astro::BodyView aim = b; QJsonArray recentres;
+        for (QDateTime t = now; t <= until; t = t.addSecs(60)) {
+            Astro::BodyView x; where(t, &x); const Astro::AltAz aa = Astro::altAz(x.eq, site, t);
+            if (Astro::separationDeg(x.eq, aim.eq) > recentreDeg) { aim = x; aimT = t; recentres.append(t.toString(Qt::ISODate)); }
+            if (t.secsTo(now) % 600 == 0) rows.append(QJsonObject{{"utc", t.toString(Qt::ISODate)}, {"ra_hours", x.eq.raHours}, {"dec_deg", x.eq.decDeg}, {"alt_deg", std::round(aa.alt * 10) / 10}, {"az_deg", std::round(aa.az)}});
+        }
+        return {{"ok", true}, {"dry_run", true}, {"object", name}, {"rate_arcsec_per_min", std::round(rate * 600) / 10}, {"trail_px_per_frame", std::round(trailPx * 10) / 10},
+                {"recentre_after_deg", recentreDeg}, {"recentres", recentres}, {"track", rows}};
+    }
+    { const QString early = tooEarlyToSlew(str(p, "not-before", "dusk"), site); if (!early.isEmpty()) return failure("too early: " + early + "; refusing to slew"); }
+    if (runActive()) return failure("an unattended run is in progress (run_state.json): stop it first (tools/run_control.py stop)");
+    if (!call("status", {}, 10000)["connected"].toBool()) return failure("the daemon is not connected to the telescope");
+    if (!initialised()) return failure("the telescope is not initialised (IsAligned and IsReady): run autorun or initialize first");
+    if (call("sequence", {{"action", "status"}}, 10000)["status"].toObject()["active"].toBool()) return failure("a sequence is running");
+    { const Astro::AltAz aa = Astro::altAz(b.eq, site, now); if (aa.alt < minAlt) return failure(QString("%1 is at altitude %2 deg, under --min-alt %3").arg(name).arg(aa.alt, 0, 'f', 1).arg(minAlt)); }
+    if (trailPx > 3) note({{"warning", QString("the object moves %1 px in a %2 s frame: it will trail; consider a shorter --exposure").arg(trailPx, 0, 'f', 1).arg(exposure)}});
+
+    const QString safe = QString(name).replace(QRegularExpression("[^a-z0-9]+"), "_");
+    const QString logPath = originDataDir() + "/track_" + safe + "_" + QDateTime::currentDateTime().toString("yyyyMMdd") + ".jsonl";
+    QFile logf(logPath); if (!logf.open(QIODevice::Append)) return failure("cannot write " + logPath);
+    auto log = [&](const QString& what, QJsonObject o) { o["event"] = what; o["time"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs); logf.write(QJsonDocument(o).toJson(QJsonDocument::Compact) + "\n"); logf.flush(); note(o); };
+    auto state = [&](const QString& phase) {
+        const QJsonObject blk{{"key", name}, {"name", name}, {"start", now.toString(Qt::ISODate)}, {"end", until.toString(Qt::ISODate)}, {"ra_hours", b.eq.raHours}, {"dec_deg", b.eq.decDeg},
+                              {"minutes", int(hours * 60)}, {"priority", 0}};
+        const QJsonObject st{{"pid", double(QCoreApplication::applicationPid())}, {"night", Planner::currentNightDate("Europe/London").toString(Qt::ISODate)}, {"phase", phase},
+                             {"updated", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}, {"current", QJsonObject{{"key", name}, {"name", name}, {"tracking", true}}}, {"block", 0},
+                             {"plan", QJsonArray{blk}}, {"log", logPath}};
+        QSaveFile f(originDataDir() + "/run_state.json"); if (f.open(QIODevice::WriteOnly)) { f.write(QJsonDocument(st).toJson()); f.commit(); }
+    };
+    state("tracking");
+    const QString stackName = "track " + name + " " + QDateTime::currentDateTime().toString("yyyyMMdd");
+    call("monitor", {{"lat_deg", site.latDeg}, {"lon_deg", site.lonDeg}, {"auto_stack", !p.v.contains("no-stack")}});
+    Astro::BodyView aim = b; QDateTime aimT;
+    auto point = [&](const QString& why) {
+        now = QDateTime::currentDateTimeUtc(); where(now.addSecs(20), &aim);            // aim where it will be when the goto has settled
+        call("target", {{"name", stackName}, {"ra_hours", aim.eq.raHours}, {"dec_deg", aim.eq.decDeg}});
+        const QJsonObject g = call("goto", {{"ra_hours", aim.eq.raHours}, {"dec_deg", aim.eq.decDeg}, {"timeout", 240}}, 300000);
+        waitIdle(180); aimT = QDateTime::currentDateTimeUtc();
+        log("point", {{"why", why}, {"ok", g["ok"]}, {"error", g["error"]}, {"ra_hours", aim.eq.raHours}, {"dec_deg", aim.eq.decDeg}, {"mount", call("mount_status", {{"fresh", true}}, 15000)["mount"]}});
+        return g["ok"].toBool();
+    };
+    auto startSequence = [&]() {
+        const QJsonObject r = call("sequence", {{"action", "start"}, {"exposure", exposure}, {"iso", iso}, {"pipeline", true}, {"focus_pause", true}, {"auto_exposure", false}, {"lat_deg", site.latDeg}});
+        return r["ok"].toBool() && r["status"].toObject()["active"].toBool();
+    };
+    log("track_start", {{"object", name}, {"until", until.toString(Qt::ISODate)}, {"exposure_s", exposure}, {"iso", iso}, {"rate_arcsec_per_min", rate * 60}, {"recentre_after_deg", recentreDeg},
+                        {"ephemeris", Ephemeris::description()}});
+    if (!point("start")) { state("finished"); return failure("the first goto failed; see " + logPath); }
+    call("set", {{"exposure", 0.5}, {"iso", iso}});
+    // --firmware: hand the mount the object's path (Mount/TrackMovingTarget with TargetTrack points, the schema of the Celestron app's imaging request) and let
+    // it follow; re-pointing then only happens if the firmware does not take it up (IsTrackingMovingTarget stays false)
+    bool firmware = false;
+    if (p.v.contains("firmware")) {
+        const int stepS = std::max(10, int(num(p, c, "track-step") * 60));
+        QJsonArray track;
+        for (QDateTime t = QDateTime::currentDateTimeUtc().addSecs(-120); t <= until.addSecs(600); t = t.addSecs(stepS)) {
+            Astro::BodyView x; where(t, &x);
+            track.append(QJsonObject{{"ra_hours", x.eq.raHours}, {"dec_deg", x.eq.decDeg}, {"jd", Astro::julianDate(t)}});
+        }
+        const QJsonObject r = call("track_moving", {{"track", track}}, 20000);
+        sleepMs(5000);
+        const QJsonObject ms = call("mount_status", {{"fresh", true}}, 15000)["mount"].toObject();
+        firmware = ms["IsTrackingMovingTarget"].toBool();
+        log("firmware_track", {{"sent", r["ok"]}, {"points", track.size()}, {"step_s", stepS}, {"ack", r["ack"]}, {"error", r["error"]}, {"is_tracking_moving_target", firmware}, {"mount", ms}});
+    }
+    if (!startSequence()) { state("finished"); return failure("the sequence would not start"); }
+    QString endWhy; int frames = 0, recentres = 0, restarts = 0; QString lastFile;
+    while (endWhy.isEmpty()) {
+        sleepMs(10000); now = QDateTime::currentDateTimeUtc(); state("tracking");
+        Control k; if (takeControl(&k) && k.action == "stop") { endWhy = "stop requested"; break; }
+        if (now >= until) { endWhy = "time"; break; }
+        if (Astro::altAz(Astro::sunPosition(now), site, now).alt > -12) { endWhy = "dawn"; break; }
+        where(now, &b);
+        if (Astro::altAz(b.eq, site, now).alt < minAlt) { endWhy = "below --min-alt"; break; }
+        const QJsonObject st = call("sequence", {{"action", "status"}}, 20000)["status"].toObject();
+        const QString file = st["last"].toObject()["file"].toString();
+        if (!file.isEmpty() && file != lastFile) {
+            lastFile = file; ++frames;
+            // the frame's time: DATE-OBS, taken as the start of the exposure (tools/track_check.py fits the offset if not); the motion lets it shift the prediction
+            const QString dobs = fitsCard(file, "DATE-OBS"); const double ex = fitsCard(file, "EXPTIME").toDouble();
+            QDateTime t0 = QDateTime::fromString(dobs, Qt::ISODate); t0.setTimeZone(QTimeZone::utc());
+            const QDateTime mid = t0.isValid() ? t0.addMSecs(qint64(ex * 500)) : now;
+            Astro::BodyView m; where(mid, &m); double vr = 0, vd = 0; rateArcsecPerS(mid, &vr, &vd);
+            const QJsonObject last = st["last"].toObject();
+            log("frame", {{"file", file}, {"date_obs", dobs}, {"exptime", ex}, {"mid_utc", mid.toString(Qt::ISODateWithMs)}, {"ra_hours", m.eq.raHours}, {"dec_deg", m.eq.decDeg},
+                          {"rate_ra_arcsec_s", vr}, {"rate_dec_arcsec_s", vd}, {"verdict", last["verdict"]}, {"stars", last["stars"]},
+                          {"offset_from_aim_arcmin", Astro::separationDeg(m.eq, aim.eq) * 60}});
+        }
+        if (!st["active"].toBool()) {
+            if (++restarts > 5) { endWhy = "the sequence kept stopping"; break; }
+            log("sequence_restart", {{"reason", st["stop_reason"]}}); startSequence(); continue;
+        }
+        if (firmware) {                                                                   // the mount should be following: compare its position with the object's
+            const QJsonObject ms = call("mount_status", {}, 15000)["mount"].toObject();
+            const Astro::Equatorial mp{ms["Ra"].toDouble() * 12.0 / M_PI, ms["Dec"].toDouble() * 180.0 / M_PI};
+            const double off = Astro::separationDeg(mp, b.eq) * 60;
+            if (!ms["IsTrackingMovingTarget"].toBool()) { firmware = false; log("firmware_track_lost", {{"mount_offset_arcmin", off}}); }
+            else if (frames % 6 == 0) log("firmware_follow", {{"mount_offset_arcmin", off}, {"from_aim_arcmin", Astro::separationDeg(b.eq, aim.eq) * 60}});
+            if (firmware) continue;
+        }
+        if (Astro::separationDeg(b.eq, aim.eq) > recentreDeg) {
+            call("sequence", {{"action", "stop"}, {"reason", "re-pointing at the moving object"}});
+            ++recentres; if (!point(QString("drifted %1' from the last pointing").arg(Astro::separationDeg(b.eq, aim.eq) * 60, 0, 'f', 1))) { endWhy = "a goto failed"; break; }
+            startSequence();
+        }
+    }
+    call("sequence", {{"action", "stop"}, {"reason", "track end: " + endWhy}});
+    const QJsonObject sk = call("stack", {}, 60000);
+    log("track_end", {{"why", endWhy}, {"frames", frames}, {"recentres", recentres}, {"restarts", restarts}, {"stack", sk["stack"]}});
+    state("finished");
+    return {{"ok", true}, {"object", name}, {"why", endWhy}, {"frames", frames}, {"recentres", recentres}, {"log", logPath}};
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------
@@ -2101,6 +2285,7 @@ int main(int argc, char* argv[])
     else if (cmd->name == "goto-altaz") out = cmdGotoAltAz(p, *cmd);
     else if (cmd->name == "body") out = cmdBody(p, *cmd);
     else if (cmd->name == "goto-body") out = cmdGotoBody(p, *cmd);
+    else if (cmd->name == "track") out = cmdTrack(p, *cmd);
     else if (cmd->name == "now") out = cmdNow(p, *cmd);
     else if (cmd->name == "weather") out = cmdWeather(p, *cmd);
     else if (cmd->name == "go") out = cmdGo(p, *cmd);
