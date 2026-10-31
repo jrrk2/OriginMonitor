@@ -1134,7 +1134,7 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
         const QString bad = recoverCapture("the sequence would not start");
         if (!bad.isEmpty()) return captureFailed(bad);
     }
-    int trailedFrames = 0, regotos = 0; QDateTime cloudSince, blockCloudStart; double cloudMinTotal = 0; QDateTime lastTick = QDateTime::currentDateTimeUtc();
+    int trailedFrames = 0, regotos = 0; bool defocusIsCloud = false; QDateTime cloudSince, blockCloudStart; double cloudMinTotal = 0; QDateTime lastTick = QDateTime::currentDateTimeUtc();
     qint64 seq = call("events", {{"since", 1e12}})["next"].toDouble();            // only events from now on
     bool obstructed = false; int failures = 0, blockRestarts = 0;
     while (true) {
@@ -1240,32 +1240,51 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
         }
         // trailed stars are the mount's fault, not cloud: re-centre with a fresh goto (at most 3 times per block) instead of counting cloud time or leaving for a backup
         const QString lastV = s["last_verdict"].toString();
-        // defocus is only worth a re-centre (which repeats the telescope's autofocus) while the sky is clear enough for that autofocus to see stars
+        // defocused stars: a re-centre (which repeats the telescope's autofocus) first while the sky is clear enough for that autofocus to see stars, then our own focus sweep.
+        // Under cloud the sweep comes first. Only a sweep that finds sharp stars is applied; one that cannot says the soft, sparse stars are cloud, and from then on this block's
+        // defocused frames run the cloud timer (2026-10-31: moonlit cloud read as "defocused" for 2 h 17 min on M82, which never counted as cloud, so the run never left it)
         bool defocusFix = false;
-        if (lastV == "defocused") { const QJsonObject nc = Weather::metarNowcast(g_run.o.site.latDeg, g_run.o.site.lonDeg, originDataDir(), 10, nullptr); defocusFix = !nc["ok"].toBool() || nc["cover_pct"].toDouble() < 60; }
-        if (lastV == "trailed" || defocusFix) {
-            if (lastV == "defocused" && regotos >= 1 && ++trailedFrames >= 3 && g_run.refocuses < 6) {
-                // a re-centre (the telescope's own autofocus) already failed to fix it: sweep the focuser ourselves, wide enough to reach the usual best position from wherever it is
-                call("sequence", {{"action", "stop"}, {"reason", "defocused: refocusing"}});
-                runLog("refocus", {{"target", t["key"]}, {"why", "still defocused after a re-centre"}});
-                const Cmd* fs = nullptr; for (const Cmd& c : commands()) if (c.name == "focus-sweep") fs = &c;
-                Parsed fp; fp.v["span"] = 900; fp.v["step"] = 100; fp.v["frames"] = 2; fp.v["exposure"] = 4; fp.v["apply"] = true;
-                const QJsonObject sw = cmdFocusSweep(fp, *fs);
-                runLog("refocus_done", {{"ok", sw["ok"]}, {"best", sw["best"]}}); ++g_run.refocuses; g_run.lastRefocus = QDateTime::currentDateTimeUtc();
+        if (lastV == "defocused") {
+            const QJsonObject nc = Weather::metarNowcast(g_run.o.site.latDeg, g_run.o.site.lonDeg, originDataDir(), 10, nullptr);
+            const bool clearish = !nc["ok"].toBool() || nc["cover_pct"].toDouble() < 60;
+            defocusFix = !defocusIsCloud;
+            if (defocusFix && ++trailedFrames >= 3 && (!clearish || regotos >= 1)) {
+                if (g_run.refocuses >= 6) defocusIsCloud = true;                       // tonight's sweeps are used up: treat it as the sky
+                else {
+                    call("sequence", {{"action", "stop"}, {"reason", "defocused: refocusing"}});
+                    runLog("refocus", {{"target", t["key"]}, {"why", regotos >= 1 ? "still defocused after a re-centre" : QString("defocused under %1% cloud: checking focus before calling it cloud").arg(nc["cover_pct"].toInt())}});
+                    const Cmd* fs = nullptr; for (const Cmd& c : commands()) if (c.name == "focus-sweep") fs = &c;
+                    Parsed fp; fp.v["span"] = 900; fp.v["step"] = 100; fp.v["frames"] = 2; fp.v["exposure"] = 4;      // not "apply": the focuser goes back unless the result is sharp
+                    const QJsonObject sw = cmdFocusSweep(fp, *fs);
+                    const QJsonObject best = sw["best"].toObject();
+                    const bool sharp = sw["ok"].toBool() && best["hfr_px"].toDouble() > 0 && best["hfr_px"].toDouble() <= 4.0 && best["stars"].toInt() >= 15;
+                    if (sharp) call("focuser_move", {{"position", best["position"]}, {"max_step", 2100}}, 90000);
+                    else defocusIsCloud = true;
+                    runLog("refocus_done", {{"ok", sw["ok"]}, {"best", best}, {"applied", sharp}, {"verdict", sharp ? "focus" : "cloud: no sharp stars at any focus"}});
+                    ++g_run.refocuses; g_run.lastRefocus = QDateTime::currentDateTimeUtc();
+                    trailedFrames = 0; call("set", {{"exposure", 0.5}, {"iso", iso}}); startSeq(exposure, iso, endUtc, true); lastTick = now; continue;
+                }
+            } else if (defocusFix && trailedFrames >= 3 && clearish && regotos < 3) {
+                call("sequence", {{"action", "stop"}, {"reason", "defocused stars: re-centring"}});
+                const QJsonObject g = call("goto", {{"ra_hours", t["ra_hours"]}, {"dec_deg", t["dec_deg"]}, {"timeout", 240}}, 300000);
+                runLog("regoto", {{"target", t["key"]}, {"why", "defocused stars (the autofocus after the last goto ran without stars)"}, {"ok", g["ok"]}, {"count", ++regotos}});
                 trailedFrames = 0; call("set", {{"exposure", 0.5}, {"iso", iso}}); startSeq(exposure, iso, endUtc, true); lastTick = now; continue;
             }
-            if (++trailedFrames >= (lastV == "trailed" ? 2 : 3) && regotos < 3) {
+        } else if (lastV == "trailed") {
+            if (++trailedFrames >= 2 && regotos < 3) {
                 call("sequence", {{"action", "stop"}, {"reason", "trailed stars: re-centring"}});
                 const QJsonObject g = call("goto", {{"ra_hours", t["ra_hours"]}, {"dec_deg", t["dec_deg"]}, {"timeout", 240}}, 300000);
-                runLog("regoto", {{"target", t["key"]}, {"why", lastV == "trailed" ? "trailed stars (mount not tracking correctly)" : "defocused stars (the autofocus after the last goto ran without stars)"}, {"ok", g["ok"]}, {"count", ++regotos}});
+                runLog("regoto", {{"target", t["key"]}, {"why", "trailed stars (mount not tracking correctly)"}, {"ok", g["ok"]}, {"count", ++regotos}});
                 trailedFrames = 0; call("set", {{"exposure", 0.5}, {"iso", iso}}); startSeq(exposure, iso, endUtc, true); lastTick = now; continue;
             }
-        } else trailedFrames = 0;
+        } else if (lastV == "clear" || lastV == "hazy" || lastV == "patchy" || lastV == "moon_glow") { trailedFrames = 0; defocusIsCloud = false; }   // only a good frame clears the count: under cloud "defocused" alternates with "unknown"
         // "reference" (sharp stars that would not register: a bad or stale stack reference) and "focus" frames say nothing about the sky: they do not run the cloud timer (2026-10-13: soft M27 frames
         // read "unknown", counted as cloud, and the supervisor left a clear sky; 6 of that night's 16 switches were of that kind)
         const QString lastCause = s["last"].toObject()["cause"].toString();
-        const bool probing = s["state"].toString() == "probing" && lastV != "trailed" && lastV != "defocused" && lastCause != "reference" && lastCause != "focus";
-        if (probing) { if (!cloudSince.isValid()) cloudSince = now; cloudMinTotal += lastTick.secsTo(now) / 60.0; } else cloudSince = QDateTime();
+        const bool cloudyDefocus = lastV == "defocused" && defocusIsCloud;
+        const bool probing = (s["state"].toString() == "probing" || cloudyDefocus) && lastV != "trailed" && (lastV != "defocused" || cloudyDefocus) && lastCause != "reference" && lastCause != "focus";
+        const bool undecided = lastV == "defocused" && !defocusIsCloud;                // focus or cloud, not known until the sweep: leave the cloud timer as it is
+        if (probing) { if (!cloudSince.isValid()) cloudSince = now; cloudMinTotal += lastTick.secsTo(now) / 60.0; } else if (!undecided) cloudSince = QDateTime();
         lastTick = now;
         // a high ISO whose dark baseline was never learned reads as cloud on a clear forecast: fall back once to ISO 200
         if (!g_run.isoFallbackDone && iso > 200 && s["frames"].toInt() >= 6 && s["good"].toInt() == 0 && !obstructed) {

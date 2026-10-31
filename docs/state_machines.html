@@ -239,7 +239,10 @@ flowchart TD
   RS --> TK
   TK -- "verdict trailed × 2" --> RT["re-goto (3 per block)"]:::rec --> TK
   TK -- "verdict defocused × 3,<br/>sky &lt; 60% cloud" --> RT
-  RT -- "still defocused after a re-goto" --> WF["focus sweep ±900"]:::rec --> TK
+  TK -- "verdict defocused × 3,<br/>sky ≥ 60% cloud" --> WF
+  RT -- "still defocused after a re-goto" --> WF["focus sweep ±900"]:::rec
+  WF -- "sharp stars: apply" --> TK
+  WF -- "no sharp stars: defocused<br/>counts as cloud this block" --> CL
   TK -- "probing (cloud)" --> CL{"cloud for 10 min?"}
   CL -- "no" --> TK
   CL -- "60 min on this block" --> X4(["give up: Done, next block"])
