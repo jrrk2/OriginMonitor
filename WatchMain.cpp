@@ -565,16 +565,27 @@ private:
         connect(m_list, &QListWidget::currentItemChanged, this, [this](QListWidgetItem* it) { if (it) showStack(it->data(Qt::UserRole).toString()); });
         return sp;
     }
-    struct StackInfo { int frames = 0, w = 0, h = 0; double exposure = 0; bool ok = false; };
-    static StackInfo readHeader(const QString& file)      // state.bin: "LST1", w, h, frames (int32), total exposure (double)
+    struct StackInfo { int frames = 0, w = 0, h = 0; double exposure = 0; QString filter; bool ok = false; };
+    // state.bin: magic, w, h, frames (int32), [LST2+: reference ISO (int32)] [LST3: filter length (int32), filter], total exposure (double).
+    // Reading only LST1 showed every stack saved since 2026-10-28 (LST2/3) as "(no state)".
+    static StackInfo readHeader(const QString& file)
     {
         StackInfo s; QFile f(file);
         if (!f.open(QIODevice::ReadOnly)) return s;
-        const QByteArray b = f.read(32);
+        const QByteArray b = f.read(128);
         if (b.size() < 24) return s;
-        quint32 magic; qint32 w, h, n; double e;
-        memcpy(&magic, b.constData(), 4); memcpy(&w, b.constData() + 4, 4); memcpy(&h, b.constData() + 8, 4); memcpy(&n, b.constData() + 12, 4); memcpy(&e, b.constData() + 16, 8);
-        if (magic != 0x4C535431) return s;
+        quint32 magic; qint32 w, h, n; double e; qsizetype pos = 16;
+        memcpy(&magic, b.constData(), 4); memcpy(&w, b.constData() + 4, 4); memcpy(&h, b.constData() + 8, 4); memcpy(&n, b.constData() + 12, 4);
+        if (magic != 0x4C535431 && magic != 0x4C535432 && magic != 0x4C535433) return s;
+        if (magic != 0x4C535431) pos += 4;
+        if (magic == 0x4C535433) {
+            qint32 len = 0; if (b.size() < pos + 4) return s;
+            memcpy(&len, b.constData() + pos, 4); len = std::clamp(len, 0, 64); pos += 4;
+            if (b.size() < pos + len) return s;
+            s.filter = QString::fromUtf8(b.constData() + pos, len); pos += len;
+        }
+        if (b.size() < pos + 8) return s;
+        memcpy(&e, b.constData() + pos, 8);
         s.w = w; s.h = h; s.frames = n; s.exposure = e; s.ok = true; return s;
     }
     void reloadStacks()
@@ -583,8 +594,10 @@ private:
         m_list->clear();
         const QFileInfoList dirs = QDir(m_dir + "/stacks").entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);   // newest first
         for (const QFileInfo& d : dirs) {
+            if (d.fileName().startsWith('_')) continue;                                  // stacks/_fragments_<date>: superseded fragments (tools/consolidate.py)
             const StackInfo s = readHeader(d.absoluteFilePath() + "/state.bin");
-            const QString text = s.ok ? QString("%1\n  %2 frames, %3 s   %4").arg(d.fileName()).arg(s.frames).arg(s.exposure, 0, 'f', 0).arg(d.lastModified().toString("yyyy-MM-dd HH:mm"))
+            const QString text = s.ok ? QString("%1\n  %2 frames, %3 min%4   %5").arg(d.fileName()).arg(s.frames).arg(s.exposure / 60, 0, 'f', 0)
+                                            .arg(s.filter.isEmpty() ? QString() : ", " + s.filter).arg(d.lastModified().toString("yyyy-MM-dd HH:mm"))
                                       : QString("%1\n  (no state)   %2").arg(d.fileName(), d.lastModified().toString("yyyy-MM-dd HH:mm"));
             auto* it = new QListWidgetItem(text); it->setData(Qt::UserRole, d.absoluteFilePath()); m_list->addItem(it);
             if (d.absoluteFilePath() == keep) m_list->setCurrentItem(it);
@@ -595,7 +608,8 @@ private:
     {
         const StackInfo s = readHeader(dir + "/state.bin");
         const QFileInfo prev(dir + "/preview.png");
-        m_stackInfo->setText(QString("%1 - %2 frames, %3 s (%4 x %5 px); preview written %6").arg(QFileInfo(dir).fileName()).arg(s.frames).arg(s.exposure, 0, 'f', 0).arg(s.w).arg(s.h)
+        m_stackInfo->setText(QString("%1 - %2 frames, %3 min%4 (%5 x %6 px); preview written %7").arg(QFileInfo(dir).fileName()).arg(s.frames).arg(s.exposure / 60, 0, 'f', 0)
+                                 .arg(s.filter.isEmpty() ? QString() : ", filter " + s.filter).arg(s.w).arg(s.h)
                                  .arg(prev.exists() ? prev.lastModified().toString("yyyy-MM-dd HH:mm") : "never"));
         m_stackView->setImage(prev.exists() ? QImage(prev.absoluteFilePath()) : QImage(), prev.exists() ? QFileInfo(dir).fileName() : QString("no preview.png in this stack"));
     }

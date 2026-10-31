@@ -58,9 +58,16 @@ void applyNovelty(QList<Target>& targets)
     if (g_stacksDir.isEmpty()) { for (Target& t : targets) { const QString id = catalogId(t.key.isEmpty() ? t.name : t.key); if (g_boost.contains(id)) { t.prio += g_boost[id]; t.boosted = true; } } return; }
     for (const QFileInfo& d : QDir(g_stacksDir).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
         const QString id = catalogId(d.fileName()); if (id.isEmpty() || copy.match(d.fileName()).hasMatch()) continue;
-        // state.bin: magic, width, height, frames as 32-bit ints, then the total exposure as a double
+        // state.bin: magic, width, height, frames as 32-bit ints, [LST2+: reference ISO] [LST3: filter length, filter], then the total exposure as a double
+        // (until 2026-10-31 this read LST1's offset, so every LST2/3 stack counted ~0 s and every target looked under-covered)
         QFile sf(d.absoluteFilePath() + "/state.bin"); double exposureS = 0;
-        if (sf.open(QIODevice::ReadOnly)) { const QByteArray h = sf.read(24); if (h.size() == 24) memcpy(&exposureS, h.constData() + 16, 8); }
+        if (sf.open(QIODevice::ReadOnly)) {
+            const QByteArray h = sf.read(128); quint32 magic = 0; qsizetype pos = 16;
+            if (h.size() >= 24) memcpy(&magic, h.constData(), 4);
+            if (magic == 0x4C535432 || magic == 0x4C535433) pos += 4;
+            if (magic == 0x4C535433 && h.size() >= pos + 4) { qint32 len = 0; memcpy(&len, h.constData() + pos, 4); pos += 4 + std::clamp(len, 0, 64); }
+            if ((magic == 0x4C535431 || magic == 0x4C535432 || magic == 0x4C535433) && h.size() >= pos + 8) memcpy(&exposureS, h.constData() + pos, 8);
+        }
         if (!(exposureS > 0)) continue;
         covered[id] += exposureS;
         if (!last.contains(id) || d.lastModified() > last[id]) last[id] = d.lastModified();
