@@ -193,9 +193,14 @@ const QList<Cmd>& commands()
                   {P("name", 's', "the object: its name, number or file name as in DATA/spk (e.g. 524522, zoozve, 363790)"), O("hours", 'd', "how long to follow it", "2"), O("exposure", 'd', "seconds per frame (keep the object's trail short)", "10"),
                    O("iso", 'i', "ISO", "800"), O("recentre", 'd', "re-point when the object has drifted this fraction of the field's short side (0.84 deg)", "0.25"), O("min-alt", 'd', "stop when the object is lower than this, deg", "30"),
                    O("firmware", 'b', "also give the mount the object's path (TrackMovingTarget with TargetTrack points) and let it follow; falls back to re-pointing if IsTrackingMovingTarget stays false"),
-                   O("track-step", 'd', "minutes between TargetTrack points with --firmware", "2"),
+                   O("track-style", 's', "with --firmware: app (16 points 30-45 s ahead, as the Celestron app sends, re-sent every --refresh min) or long (the whole session)", "app"),
+                   O("refresh", 'd', "minutes between re-sends of the app-style path", "5"), O("track-step", 'd', "minutes between points of the long path", "2"),
                    O("no-stack", 'b', "do not stack the frames"), O("not-before", 's', "\"dusk\" (Sun below -12) or a local HH:MM", "dusk"), O("dry-run", 'b', "list the track and the re-pointings; no motion"),
                    O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218")}});
+        v.append({"extras", "planning", "Sessions slotted into a night by hand (~/.config/origin/extras.json), which the unattended run starts when they fall due and resumes its plan afterwards: list, add, remove. A track extra runs 'track' with --options. Example: extras add --night 2026-11-03 --start dark --end 18:55 --object zoozve --options '{\"firmware\":true,\"exposure\":20}'", "", false, false,
+                  {P("action", 's', "list (default), add or remove", false), O("night", 's', "the evening's date, YYYY-MM-DD"), O("start", 's', "local HH:MM, or \"dark\" (Sun below -12)", "dark"),
+                   O("end", 's', "local HH:MM: the session ends then (and is dropped if it has not started)"), O("kind", 's', "what to run", "track"), O("object", 's', "for track: the object (as in DATA/spk)"),
+                   O("options", 's', "JSON object of options for the kind, e.g. {\"firmware\":true,\"exposure\":20}"), O("id", 's', "identifier (default <object>_<night>); remove needs it")}});
         v.append({"forecast-accuracy", "planning", "How good the weather forecast has been: compares the archived dusk forecast of each night with the frames the sequencer took (usable fraction per hour). Writes forecast_accuracy.csv/.json in the data dir; reports bias (positive = the sky was better than forecast).", "", false, true, {}});
         v.append({"autorun", "planning", "Dusk launcher for cron (every 5 minutes): once per night, if the telescope is out and reachable, starts the daemon, connects, initializes the mount if needed and starts 'run --unattended --mail' in the background. Does nothing (quietly) when the telescope does not answer, when nothing is observable, when rain is forecast, or when ~/.config/origin/autorun.off exists. Slews the telescope: only schedule it if that is wanted.", "", true, false,
                   [] { QList<Arg> a = {O("telescope", 's', "telescope host", "192.168.1.195"), O("start-after", 's', "\"dusk\" (autorun begins when the Sun is below --probe-sun-alt; the run itself waits for -12 deg) or a local HH:MM; never act before this", "dusk"), O("probe-sun-alt", 'd', "Sun altitude below which autorun starts: raises the tube, probes with plate solves (exposure scaled to the sky brightness) and initializes; the run still waits for -12", "-7"), O("stop-before-dawn", 'd', "minutes before the end of darkness after which no run is started", "60"),
@@ -901,6 +906,11 @@ struct Control { qint64 id = 0; QString action; QJsonObject req; };
 QString controlPath() { return originDataDir() + "/run_control.json"; }
 QJsonObject readJsonFile(const QString& path) { QFile f(path); return f.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(f.readAll()).object() : QJsonObject(); }
 
+// Extras (~/.config/origin/extras.json): sessions slotted into a night by hand, e.g. an asteroid track; see cmdExtras. The run calls this between blocks
+// and every poll inside a block: when one is due it runs it (the caller has stopped the sequence) and returns true.
+QJsonObject dueExtra(const QDateTime& now);
+bool runExtra(const QJsonObject& e);
+
 void writeRunState(const QString& phase = "running")
 {
     QJsonObject st{{"pid", double(QCoreApplication::applicationPid())}, {"night", g_run.night}, {"phase", phase}, {"updated", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
@@ -1165,6 +1175,13 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
                 }
             }
         }
+        if (const QJsonObject ex = dueExtra(now); !ex.isEmpty()) {                      // a hand-slotted session is due: hand it the telescope, then resume this block
+            call("sequence", {{"action", "stop"}, {"reason", "extra: " + ex["id"].toString()}}); call("stack", {}, 60000);
+            runExtra(ex);
+            if (g_run.stop) { g_run.current = outer; return RunResult::Stopped; }
+            if (QDateTime::currentDateTimeUtc() < endUtc && QDateTime::currentDateTimeUtc() < g_run.darkEnd) { runLog("resume", {{"target", t["key"]}, {"after", ex["id"]}}); g_run.current = outer; return runTarget(t, endUtc, depth); }
+            g_run.current = outer; return RunResult::Done;
+        }
         if (now >= endUtc.addSecs(isOverride ? 0 : 300) || now >= g_run.darkEnd) { call("sequence", {{"action", "stop"}, {"reason", isOverride ? "override end" : "block end"}}); runLog(isOverride ? "override_end" : "block_end", {{"target", t["key"]}}); g_run.current = outer; return RunResult::Done; }
         if (!g_run.lastForecast.isValid() || g_run.lastForecast.secsTo(now) > 1200) {
             g_run.lastForecast = now;
@@ -1375,6 +1392,7 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
 
     // a request that arrives between blocks (waiting for a block to start, or for dusk)
     auto between = [&]() -> RunResult {
+        if (const QJsonObject ex = dueExtra(QDateTime::currentDateTimeUtc()); !ex.isEmpty()) { runExtra(ex); return g_run.stop ? RunResult::Stopped : RunResult::Done; }
         Control k; if (!takeControl(&k)) return RunResult::Done;
         if (k.action == "stop") { g_run.stop = true; return RunResult::Stopped; }
         if (k.action == "replan") { g_run.replan = true; return RunResult::Done; }
@@ -1621,7 +1639,8 @@ QJsonObject cmdTrack(const Parsed& p, const Cmd& c)
                 {"recentre_after_deg", recentreDeg}, {"recentres", recentres}, {"track", rows}};
     }
     { const QString early = tooEarlyToSlew(str(p, "not-before", "dusk"), site); if (!early.isEmpty()) return failure("too early: " + early + "; refusing to slew"); }
-    if (runActive()) return failure("an unattended run is in progress (run_state.json): stop it first (tools/run_control.py stop)");
+    const bool insideRun = p.v.contains("inside-run");                           // called by the run for an extra: the run holds the telescope and reports for us
+    if (!insideRun && runActive()) return failure("an unattended run is in progress (run_state.json): stop it first (tools/run_control.py stop), or slot the session in with 'extras add'");
     if (!call("status", {}, 10000)["connected"].toBool()) return failure("the daemon is not connected to the telescope");
     if (!initialised()) return failure("the telescope is not initialised (IsAligned and IsReady): run autorun or initialize first");
     if (call("sequence", {{"action", "status"}}, 10000)["status"].toObject()["active"].toBool()) return failure("a sequence is running");
@@ -1633,6 +1652,7 @@ QJsonObject cmdTrack(const Parsed& p, const Cmd& c)
     QFile logf(logPath); if (!logf.open(QIODevice::Append)) return failure("cannot write " + logPath);
     auto log = [&](const QString& what, QJsonObject o) { o["event"] = what; o["time"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs); logf.write(QJsonDocument(o).toJson(QJsonDocument::Compact) + "\n"); logf.flush(); note(o); };
     auto state = [&](const QString& phase) {
+        if (insideRun) { g_run.current = QJsonObject{{"key", name}, {"name", name}, {"tracking", true}, {"until", until.toString(Qt::ISODate)}}; writeRunState(); return; }
         const QJsonObject blk{{"key", name}, {"name", name}, {"start", now.toString(Qt::ISODate)}, {"end", until.toString(Qt::ISODate)}, {"ra_hours", b.eq.raHours}, {"dec_deg", b.eq.decDeg},
                               {"minutes", int(hours * 60)}, {"priority", 0}};
         const QJsonObject st{{"pid", double(QCoreApplication::applicationPid())}, {"night", Planner::currentNightDate("Europe/London").toString(Qt::ISODate)}, {"phase", phase},
@@ -1662,25 +1682,32 @@ QJsonObject cmdTrack(const Parsed& p, const Cmd& c)
     call("set", {{"exposure", 0.5}, {"iso", iso}});
     // --firmware: hand the mount the object's path (Mount/TrackMovingTarget with TargetTrack points, the schema of the Celestron app's imaging request) and let
     // it follow; re-pointing then only happens if the firmware does not take it up (IsTrackingMovingTarget stays false)
-    bool firmware = false;
-    if (p.v.contains("firmware")) {
-        const int stepS = std::max(10, int(num(p, c, "track-step") * 60));
-        QJsonArray track;
-        for (QDateTime t = QDateTime::currentDateTimeUtc().addSecs(-120); t <= until.addSecs(600); t = t.addSecs(stepS)) {
-            Astro::BodyView x; where(t, &x);
-            track.append(QJsonObject{{"ra_hours", x.eq.raHours}, {"dec_deg", x.eq.decDeg}, {"jd", Astro::julianDate(t)}});
+    // Two shapes of path: "app" (default) is what the Celestron app puts in an imaging job for a planet, the Moon, an asteroid or a comet: 16 points one second
+    // apart, 30-45 s ahead (decoded from the iOS app, 2026-10-31), so the firmware presumably takes a rate from them; it is re-sent every --refresh minutes so a
+    // changing rate (Apophis) is followed. "long" covers the whole session, a point every --track-step minutes (what was tried first, 2026-10-31: also followed).
+    bool firmware = false; QDateTime lastSent;
+    const bool appStyle = str(p, "track-style", "app") != "long";
+    auto sendTrack = [&](const QString& why) {
+        QJsonArray track; const QDateTime t0 = QDateTime::currentDateTimeUtc();
+        if (appStyle) for (int k = 0; k < 16; ++k) { const QDateTime t = t0.addSecs(30 + k); Astro::BodyView x; where(t, &x); track.append(QJsonObject{{"ra_hours", x.eq.raHours}, {"dec_deg", x.eq.decDeg}, {"jd", Astro::julianDate(t)}}); }
+        else {
+            const int stepS = std::max(10, int(num(p, c, "track-step") * 60));
+            for (QDateTime t = t0.addSecs(-120); t <= until.addSecs(600); t = t.addSecs(stepS)) { Astro::BodyView x; where(t, &x); track.append(QJsonObject{{"ra_hours", x.eq.raHours}, {"dec_deg", x.eq.decDeg}, {"jd", Astro::julianDate(t)}}); }
         }
         const QJsonObject r = call("track_moving", {{"track", track}}, 20000);
+        lastSent = t0;
         sleepMs(5000);
         const QJsonObject ms = call("mount_status", {{"fresh", true}}, 15000)["mount"].toObject();
         firmware = ms["IsTrackingMovingTarget"].toBool();
-        log("firmware_track", {{"sent", r["ok"]}, {"points", track.size()}, {"step_s", stepS}, {"ack", r["ack"]}, {"error", r["error"]}, {"is_tracking_moving_target", firmware}, {"mount", ms}});
-    }
+        log("firmware_track", {{"why", why}, {"style", appStyle ? "app" : "long"}, {"sent", r["ok"]}, {"points", track.size()}, {"ack", r["ack"]}, {"error", r["error"]},
+                               {"is_tracking_moving_target", firmware}, {"mount", ms}});
+    };
+    if (p.v.contains("firmware")) sendTrack("start");
     if (!startSequence()) { state("finished"); return failure("the sequence would not start"); }
     QString endWhy; int frames = 0, recentres = 0, restarts = 0; QString lastFile;
     while (endWhy.isEmpty()) {
         sleepMs(10000); now = QDateTime::currentDateTimeUtc(); state("tracking");
-        Control k; if (takeControl(&k) && k.action == "stop") { endWhy = "stop requested"; break; }
+        Control k; if (takeControl(&k) && k.action == "stop") { endWhy = "stop requested"; if (insideRun) g_run.stop = true; break; }
         if (now >= until) { endWhy = "time"; break; }
         if (Astro::altAz(Astro::sunPosition(now), site, now).alt > -12) { endWhy = "dawn"; break; }
         where(now, &b);
@@ -1708,7 +1735,9 @@ QJsonObject cmdTrack(const Parsed& p, const Cmd& c)
             const Astro::Equatorial mp{ms["Ra"].toDouble() * 12.0 / M_PI, ms["Dec"].toDouble() * 180.0 / M_PI};
             const double off = Astro::separationDeg(mp, b.eq) * 60;
             if (!ms["IsTrackingMovingTarget"].toBool()) { firmware = false; log("firmware_track_lost", {{"mount_offset_arcmin", off}}); }
-            else if (frames % 6 == 0) log("firmware_follow", {{"mount_offset_arcmin", off}, {"from_aim_arcmin", Astro::separationDeg(b.eq, aim.eq) * 60}});
+            else if (frames % 6 == 0) log("firmware_follow", {{"mount_offset_arcmin", off}, {"from_aim_arcmin", Astro::separationDeg(b.eq, aim.eq) * 60},
+                                                             {"alt_deg", ms["Alt"].toDouble() * 180 / M_PI}, {"az_deg", ms["Azm"].toDouble() * 180 / M_PI}});
+            if (firmware && appStyle && lastSent.secsTo(now) >= num(p, c, "refresh") * 60) sendTrack("refresh");
             if (firmware) continue;
         }
         if (Astro::separationDeg(b.eq, aim.eq) > recentreDeg) {
@@ -1722,6 +1751,94 @@ QJsonObject cmdTrack(const Parsed& p, const Cmd& c)
     log("track_end", {{"why", endWhy}, {"frames", frames}, {"recentres", recentres}, {"restarts", restarts}, {"stack", sk["stack"]}});
     state("finished");
     return {{"ok", true}, {"object", name}, {"why", endWhy}, {"frames", frames}, {"recentres", recentres}, {"log", logPath}};
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------
+// extras: sessions slotted into a night by hand. ~/.config/origin/extras.json is a list of
+//   {"id", "night": "YYYY-MM-DD" (the evening's date), "start": "HH:MM" local or "dark" (Sun below -12), "end": "HH:MM" local, "kind": "track", "object", "options": {...}}
+// The unattended run starts each one when it falls due (between blocks or in the middle of one, which it resumes afterwards) and records it in
+// DATA/extras_done.json so it runs once. Nothing has to be stopped or scheduled elsewhere; if the night is cloudy the session simply waits until "end".
+// ---------------------------------------------------------------------------------------------------------------------------------------
+QString extrasPath() { return QDir::homePath() + "/.config/origin/extras.json"; }
+
+QJsonObject dueExtra(const QDateTime& now)
+{
+    QFile f(extrasPath()); if (!f.open(QIODevice::ReadOnly)) return {};
+    const QJsonArray list = QJsonDocument::fromJson(f.readAll()).array();
+    const QJsonObject done = readJsonFile(originDataDir() + "/extras_done.json");
+    const QDateTime loc = now.toTimeZone(g_run.zone.isValid() ? g_run.zone : QTimeZone::systemTimeZone());
+    auto at = [&](const QString& hm) {                                              // HH:MM on the evening of the night (after midnight: the next day)
+        const QTime t = QTime::fromString(hm, "HH:mm"); if (!t.isValid()) return QDateTime();
+        QDate d = QDate::fromString(g_run.night, Qt::ISODate); if (t.hour() < 12) d = d.addDays(1);
+        return QDateTime(d, t, loc.timeZone());
+    };
+    for (const QJsonValue& v : list) {
+        const QJsonObject e = v.toObject();
+        if (e["night"].toString() != g_run.night || done.contains(e["id"].toString())) continue;
+        const QDateTime end = at(e["end"].toString());
+        if (!end.isValid() || now >= end) continue;
+        const QString st = e["start"].toString("dark");
+        if (st == "dark") { if (!tooEarlyToSlew("dusk", g_run.o.site).isEmpty()) continue; }
+        else { const QDateTime s0 = at(st); if (!s0.isValid() || now < s0) continue; }
+        return e;
+    }
+    return {};
+}
+
+bool runExtra(const QJsonObject& e)
+{
+    const QString id = e["id"].toString();
+    const QDateTime end = [&] { const QTime t = QTime::fromString(e["end"].toString(), "HH:mm"); QDate d = QDate::fromString(g_run.night, Qt::ISODate); if (t.hour() < 12) d = d.addDays(1); return QDateTime(d, t, g_run.zone); }();
+    runLog("extra_start", {{"extra", e}});
+    QJsonObject r;
+    if (e["kind"].toString("track") == "track") {
+        const Cmd* tc = nullptr; for (const Cmd& c : commands()) if (c.name == "track") tc = &c;
+        Parsed tp; const QJsonObject o = e["options"].toObject();
+        for (auto it = o.begin(); it != o.end(); ++it) if (!(it.value().isBool() && !it.value().toBool())) tp.v[it.key()] = it.value().toVariant();
+        tp.v["name"] = e["object"].toString(); tp.v["inside-run"] = true;
+        if (!tp.v.contains("hours")) tp.v["hours"] = std::max(0.1, QDateTime::currentDateTimeUtc().secsTo(end) / 3600.0);
+        r = cmdTrack(tp, *tc);
+    } else r = failure("unknown extra kind " + e["kind"].toString());
+    // a session refused for something that may pass (not initialised, the object still low) is retried at the next poll until its end; anything else is done
+    const QString err = r["error"].toString();
+    const bool retry = !r["ok"].toBool() && (err.contains("not initialised") || err.contains("under --min-alt") || err.contains("not connected") || err.contains("too early"));
+    if (!retry) {
+        QJsonObject done = readJsonFile(originDataDir() + "/extras_done.json");
+        done[id] = QJsonObject{{"time", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}, {"result", r}};
+        QSaveFile f(originDataDir() + "/extras_done.json"); if (f.open(QIODevice::WriteOnly)) { f.write(QJsonDocument(done).toJson()); f.commit(); }
+    }
+    runLog("extra_end", {{"id", id}, {"result", r}, {"will_retry", retry}});
+    if (retry) sleepMs(60000);
+    return r["ok"].toBool();
+}
+
+QJsonObject cmdExtras(const Parsed& p, const Cmd& c)
+{
+    Q_UNUSED(c)
+    QFile f(extrasPath()); QJsonArray list;
+    if (f.open(QIODevice::ReadOnly)) { list = QJsonDocument::fromJson(f.readAll()).array(); f.close(); }
+    const QString action = str(p, "action", "list");
+    const QJsonObject done = readJsonFile(originDataDir() + "/extras_done.json");
+    auto save = [&] { QDir().mkpath(QFileInfo(extrasPath()).absolutePath()); QSaveFile o(extrasPath()); if (!o.open(QIODevice::WriteOnly)) return false; o.write(QJsonDocument(list).toJson()); return o.commit(); };
+    if (action == "add") {
+        if (!p.v.contains("night") || !p.v.contains("end") || !p.v.contains("object")) return failure("add needs --night YYYY-MM-DD, --end HH:MM and --object");
+        QJsonObject opts; if (p.v.contains("options")) { const QJsonDocument d = QJsonDocument::fromJson(str(p, "options").toUtf8()); if (!d.isObject()) return failure("--options must be a JSON object"); opts = d.object(); }
+        const QString id = p.v.contains("id") ? str(p, "id") : str(p, "object").toLower().replace(QRegularExpression("[^a-z0-9]+"), "_") + "_" + QString(str(p, "night")).remove('-');
+        for (const QJsonValue& v : list) if (v.toObject()["id"].toString() == id) return failure("there is already an extra " + id);
+        const QJsonObject e{{"id", id}, {"night", str(p, "night")}, {"start", str(p, "start", "dark")}, {"end", str(p, "end")}, {"kind", str(p, "kind", "track")}, {"object", str(p, "object")}, {"options", opts}};
+        list.append(e);
+        if (!save()) return failure("cannot write " + extrasPath());
+        return {{"ok", true}, {"added", e}, {"file", extrasPath()}};
+    }
+    if (action == "remove") {
+        QJsonArray kept; bool hit = false;
+        for (const QJsonValue& v : list) { if (v.toObject()["id"].toString() == str(p, "id")) hit = true; else kept.append(v); }
+        if (!hit) return failure("no extra " + str(p, "id"));
+        list = kept; if (!save()) return failure("cannot write " + extrasPath());
+        return {{"ok", true}, {"removed", str(p, "id")}};
+    }
+    QJsonArray out; for (const QJsonValue& v : list) { QJsonObject e = v.toObject(); if (done.contains(e["id"].toString())) e["done"] = done[e["id"].toString()]; out.append(e); }
+    return {{"ok", true}, {"file", extrasPath()}, {"extras", out}};
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------
@@ -2128,6 +2245,7 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
         st["need_real_init"] = false; save();
     }
 
+    if (runActive()) return idle("a run or track session is in progress (run_state.json)");
     // launch the supervisor, detached, logging to its own file
     QProcess run; run.setProgram(QCoreApplication::applicationFilePath());
     run.setArguments({"run", "--unattended", "--iso", str(p, "iso", "800"), "--max-exposure", str(p, "max-exposure", "20"), "--not-before", str(p, "start-after", "dusk"), "--port", QString::number(g_port)});
@@ -2286,6 +2404,7 @@ int main(int argc, char* argv[])
     else if (cmd->name == "body") out = cmdBody(p, *cmd);
     else if (cmd->name == "goto-body") out = cmdGotoBody(p, *cmd);
     else if (cmd->name == "track") out = cmdTrack(p, *cmd);
+    else if (cmd->name == "extras") out = cmdExtras(p, *cmd);
     else if (cmd->name == "now") out = cmdNow(p, *cmd);
     else if (cmd->name == "weather") out = cmdWeather(p, *cmd);
     else if (cmd->name == "go") out = cmdGo(p, *cmd);
