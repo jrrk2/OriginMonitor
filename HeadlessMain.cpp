@@ -665,10 +665,28 @@ QJsonObject cmdBriefing(const Parsed& p, const Cmd& c)
         }
         if (open) wins.append(cur);
         int best = 0, total = 0; for (const Win& w : wins) { const int m = int(w.a.secsTo(w.b) / 60); total += m; best = std::max(best, m); }
-        const QString verdict = best >= 90 ? "WORTH PUTTING OUT" : best >= 40 ? "MARGINAL" : "POOR FORECAST";
+        // rain while it would be out (now to dawn), judged as the 22:00 briefing does: >= 50% or >= 0.2 mm keeps it in, >= 25% is a risk. Parking does not keep the rain off.
+        double maxProb = 0; QString wetFrom, riskFrom, riskTo; QDateTime lastWet;
+        for (const QJsonValue& hv : wx["hours"].toArray()) {
+            const QJsonObject h = hv.toObject(); const QDateTime a = parseZ(h["utc"].toString().left(19) + "Z");
+            if (a.addSecs(3600) <= now || a >= darkEnd) continue;
+            const double pr = h["precip_prob"].toDouble(), mm = h["precip_mm"].toDouble();
+            maxProb = std::max(maxProb, pr);
+            if (pr >= 50 || mm >= 0.2) { if (wetFrom.isEmpty()) wetFrom = loc(a); lastWet = a.addSecs(3600); }
+            if (pr >= 25 || mm >= 0.2) { if (riskFrom.isEmpty()) riskFrom = loc(a); riskTo = loc(a.addSecs(3600)); if (!lastWet.isValid() || a.addSecs(3600) > lastWet) lastWet = a.addSecs(3600); }
+        }
+        const bool wet = !wetFrom.isEmpty(), risky = !wet && !riskFrom.isEmpty();
+        int afterRain = 0; for (const Win& w : wins) if (lastWet.isValid() && w.a >= lastWet) afterRain += int(w.a.secsTo(w.b) / 60);
+        const QString verdict = wet ? "KEEP IT IN" : risky ? "RAIN RISK" : best >= 90 ? "WORTH PUTTING OUT" : best >= 40 ? "MARGINAL" : "POOR FORECAST";
         QString when; for (const Win& w : wins) when += (when.isEmpty() ? "" : ", ") + loc(w.a) + "-" + loc(w.b);
-        subject = QString("[Origin] Dusk: %1%2").arg(verdict, wins.isEmpty() ? " - no usable hours forecast (but it has been wrong before)" : " - clear " + when);
-        body = QString("%1 (night of %2)\n\nVERDICT: %3\n").arg(verdict, title, best >= 90 ? "put the telescope out." : best >= 40 ? "only short gaps are forecast; worth trying." : "the forecast is poor, but forecasts here have often been too pessimistic, so it is not a reason to stay in. Trying costs only the put-out; if it is out and answering, autorun will image whatever breaks.");
+        const QString rainSpan = riskFrom + "-" + riskTo;      // the risky hours include the wet ones
+        subject = QString("[Origin] Dusk: %1%2%3").arg(verdict, wet || risky ? QString(" - rain %1 (up to %2%)").arg(rainSpan).arg(maxProb, 0, 'f', 0) : QString(),
+                                                     wins.isEmpty() ? (wet || risky ? QString() : QString(" - no usable hours forecast (but it has been wrong before)")) : " - clear " + when);
+        const QString afterNote = afterRain > 0 ? QString(" The clear spell after it (%1 min) is only worth it if someone puts the telescope out once the rain has passed.").arg(afterRain) : QString();
+        body = QString("%1 (night of %2)\n\nVERDICT: %3\n").arg(verdict, title,
+                 wet ? "keep the telescope in: rain is forecast " + rainSpan + " (>= 50% chance or >= 0.2 mm in an hour) and parking does not keep it dry." + afterNote
+                 : risky ? QString("do not leave it out unattended: up to %1% chance of rain %2.").arg(maxProb, 0, 'f', 0).arg(rainSpan) + afterNote
+                 : best >= 90 ? "put the telescope out." : best >= 40 ? "only short gaps are forecast; worth trying." : "the forecast is poor, but forecasts here have often been too pessimistic, so it is not a reason to stay in. Trying costs only the put-out; if it is out and answering, autorun will image whatever breaks.");
         body += QString("Sunset %1, astronomical dark %2 to %3. %4 of the %5 dark minutes are forecast usable; longest clear stretch %6 min.\n").arg(loc(sunset), loc(darkStart), loc(darkEnd)).arg(total).arg(int(darkStart.secsTo(darkEnd) / 60)).arg(best);
         if (wx.contains("rain_from")) body += "Rain is forecast from " + locJ(wx["rain_from"]) + ".\n";
         { const QJsonObject acc = forecastAccuracy(); body += "\n" + trackRecordLine(acc) + "\n"; }
