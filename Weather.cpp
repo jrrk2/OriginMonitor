@@ -271,7 +271,7 @@ QJsonObject allSkyStars(const QByteArray& jpeg, const QDateTime& utc, const QStr
     }
     const double ox = off["dx"].toDouble(), oy = off["dy"].toDouble(), orot = off["drot"].toDouble();
     // each V <= 3.5 star: its brightest pixel within 1 px of the prediction over the median of a 5..9 px annulus, in the annulus' noise; seen above 4
-    int tested = 0, seen = 0;
+    int tested = 0, seen = 0; QJsonArray each;                       // each: [alt, az, seen] per tested star, for where on the sky it is clear
     for (const Up& u : up) {
         double x, y; fisheyeProject(g, orot, u.alt, u.az, &x, &y); const int xi = int(std::lround(x + ox)), yi = int(std::lround(y + oy));
         if (xi < 10 || yi < 40 || xi >= w - 10 || yi >= h - 10) continue;
@@ -280,13 +280,14 @@ QJsonObject allSkyStars(const QByteArray& jpeg, const QDateTime& utc, const QStr
             if (r >= 5 && r <= 9) ann.push_back(c);
             if (std::abs(i) <= 1 && std::abs(j) <= 1) pk = std::max(pk, c); }
         const double b = medianOf(ann); for (int& c : ann) c = int(std::lround(std::abs(c - b) * 2)); const double s = std::max(1.4826 * medianOf(ann) / 2, 1.0);
-        ++tested; if ((pk - b) / s > 4) ++seen;
+        const bool vis = (pk - b) / s > 4;
+        ++tested; if (vis) ++seen; each.append(QJsonArray{std::round(u.alt * 10) / 10, std::round(u.az * 10) / 10, vis ? 1 : 0});
     }
     if (tested < 20) return {{"ok", false}, {"error", "too few catalogue stars in the frame"}, {"tested", tested}};
     // Clear frames show 65-85% of them (the Moon 79% up; the dome, the wall and the trees hide some for good), overcast 0-3% (11 nights, 2026-10-11..22): 75% counts as clear.
     const double frac = double(seen) / tested, cover = std::clamp(1.0 - frac / 0.75, 0.0, 1.0);
     return {{"ok", true}, {"method", "stars"}, {"cover", cover}, {"tested", tested}, {"visible", seen}, {"visible_frac", frac}, {"bright_matches", best}, {"bright_up", nBright},
-            {"offset_fitted", fitted}, {"offset", off}, {"noise", sd}};
+            {"offset_fitted", fitted}, {"offset", off}, {"noise", sd}, {"stars", each}};
 }
 
 /// Cloud fraction (0..1) from the latest frame. With the Sun below -15 deg: allSkyStars (catalogue stars seen). Otherwise, over the central 75% of the fisheye radius
@@ -472,3 +473,7 @@ const Hour* at(const QVector<Hour>& hours, const QDateTime& utc)
 }
 
 }   // namespace Weather
+
+namespace Weather {
+QJsonObject allSkyNow(const QString& cacheDir, double sunAlt) { double c = 0; QDateTime t; return allSkyCover(cacheDir, &c, &t, sunAlt); }
+}

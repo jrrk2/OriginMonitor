@@ -56,4 +56,8 @@ QJsonObject toJson(const Hour& h);
 /// for frames that cannot fit (cloud). Returns {ok, cover, tested, visible, offset...}; ok=false with an error when the frame cannot be read or too few stars are up.
 QJsonObject allSkyStars(const QByteArray& jpeg, const QDateTime& utc, const QString& stateDir, bool saveOffset);
 
+/// The latest IoA all-sky frame judged now (fetched if over 5 min old): with the Sun below -15 deg allSkyStars' result, whose "stars" ([alt, az, seen] per tested star)
+/// say where on the sky it is clear. ok=false when stale, in deep twilight, or unreadable.
+QJsonObject allSkyNow(const QString& cacheDir, double sunAlt);
+
 }   // namespace Weather

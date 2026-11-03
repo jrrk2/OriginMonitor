@@ -158,11 +158,11 @@ const QList<Cmd>& commands()
                             O("not-before", 's', "\"dusk\" (Sun below -12 deg at the site) or a local HH:MM; refuse to slew earlier", "dusk")};
             v.append({"go", "planning", "Slew to a target that is observable now: set site and target, goto, wait for centring/autofocus, re-send exposure and ISO.", "", true, false, a + plannerArgs()});
         }
-        v.append({"run", "planning", "UNATTENDED night supervisor: follows the plan, goes to a backup target on obstruction or prolonged cloud, refocuses on drift, parks on a rain forecast or at dawn. Needs --unattended (it slews); --dry-run only prints the plan.", "", true, false,
+        v.append({"run", "planning", "UNATTENDED night supervisor: follows the plan, goes to a backup target on obstruction or prolonged cloud, refocuses on drift, parks at dawn (and on a rain forecast with --stop-for-rain). Needs --unattended (it slews); --dry-run only prints the plan.", "", true, false,
                   [] { QList<Arg> a = {O("unattended", 'b', "confirm that the supervisor may slew and run all night"), O("dry-run", 'b', "print the plan and backups, do nothing"),
                                        O("iso", 'i', "ISO for the frames (falls back once to 200 if the first frames are all rejected on a clear forecast)", "800"),
                                        O("max-exposure", 'd', "longest exposure, s: used for faint targets, 40% of it for the brightest, and further limited by field rotation for each block", "20"),
-                                       O("cloud-patience", 'd', "minutes of cloud before going to a backup target", "10"), O("give-up", 'd', "minutes of cloud on one block before moving to the next block", "60"),
+                                       O("cloud-patience", 'd', "minutes of cloud before going to a backup target", "10"), O("stop-for-rain", 'b', "park and end the night on a rain forecast (off by default: there is no dome, so parking keeps nothing dry, and the dew heater copes with light rain; rain is handled as cloud)"), O("give-up", 'd', "minutes of cloud on one block before moving to the next block", "60"),
                                        O("not-before", 's', "\"dusk\" (Sun below -12 deg at the site) or a local HH:MM; no slewing before this", "dusk"), O("connect", 's', "telescope host to reconnect to (default: the server's)"),
                                        O("mail", 'b', "e-mail a summary of the night when the run ends")};
                        QList<Arg> pa = plannerArgs();
@@ -197,13 +197,19 @@ const QList<Cmd>& commands()
                    O("refresh", 'd', "minutes between re-sends of the app-style path", "5"), O("track-step", 'd', "minutes between points of the long path", "2"),
                    O("no-stack", 'b', "do not stack the frames"), O("not-before", 's', "\"dusk\" (Sun below -12) or a local HH:MM", "dusk"), O("dry-run", 'b', "list the track and the re-pointings; no motion"),
                    O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218")}});
+        v.append({"mosaic", "action", "Cover an area bigger than the field: a grid of pointings over --width x --height deg around --ra-hours/--dec-deg, visited in turn for --visit minutes each (round robin, serpentine order) until --hours are up. The grid step is the square that stays inside the field at any rotation (0.84 deg / sqrt 2), so field rotation never leaves a hole; tools/canvas_stack.py builds the picture from the log DATA/mosaic_<name>_<date>.jsonl. Frames are analysed but not live-stacked. Slews: refuses before Sun -12 deg, while an unattended run is active (slot it in with 'extras add --kind mosaic') or uninitialised. --dry-run lists the grid.", "", true, false,
+                  {O("name", 's', "a label for the log and the frames", "mosaic"), O("ra-hours", 'd', "centre RA, hours (J2000)"), O("dec-deg", 'd', "centre Dec, deg (J2000)"),
+                   O("width", 'd', "extent east-west on the sky, deg", "2"), O("height", 'd', "extent north-south, deg", "1.5"), O("step", 'd', "grid step, deg (default: 0.84/sqrt 2 = 0.59, safe at any rotation)", "0.594"),
+                   O("visit", 'd', "minutes per pointing per round", "3"), O("hours", 'd', "how long", "2"), O("max-exposure", 'd', "longest frame, s (field rotation may shorten it)", "20"),
+                   O("iso", 'i', "ISO", "800"), O("min-alt", 'd', "skip pointings lower than this, deg", "30"), O("not-before", 's', "\"dusk\" (Sun below -12) or a local HH:MM", "dusk"),
+                   O("dry-run", 'b', "list the grid; no motion"), O("lat", 'd', "site latitude", "52.2054"), O("lon", 'd', "site longitude", "0.1218")}});
         v.append({"extras", "planning", "Sessions slotted into a night by hand (~/.config/origin/extras.json), which the unattended run starts when they fall due and resumes its plan afterwards: list, add, remove. A track extra runs 'track' with --options. Example: extras add --night 2026-11-03 --start dark --end 18:55 --object zoozve --options '{\"firmware\":true,\"exposure\":20}'", "", false, false,
                   {P("action", 's', "list (default), add or remove", false), O("night", 's', "the evening's date, YYYY-MM-DD"), O("start", 's', "local HH:MM, or \"dark\" (Sun below -12)", "dark"),
                    O("end", 's', "local HH:MM: the session ends then (and is dropped if it has not started)"), O("kind", 's', "what to run", "track"), O("object", 's', "for track: the object (as in DATA/spk)"),
                    O("options", 's', "JSON object of options for the kind, e.g. {\"firmware\":true,\"exposure\":20}"), O("id", 's', "identifier (default <object>_<night>); remove needs it")}});
         v.append({"forecast-accuracy", "planning", "How good the weather forecast has been: compares the archived dusk forecast of each night with the frames the sequencer took (usable fraction per hour). Writes forecast_accuracy.csv/.json in the data dir; reports bias (positive = the sky was better than forecast).", "", false, true, {}});
-        v.append({"autorun", "planning", "Dusk launcher for cron (every 5 minutes): once per night, if the telescope is out and reachable, starts the daemon, connects, initializes the mount if needed and starts 'run --unattended --mail' in the background. Does nothing (quietly) when the telescope does not answer, when nothing is observable, when rain is forecast, or when ~/.config/origin/autorun.off exists. Slews the telescope: only schedule it if that is wanted.", "", true, false,
-                  [] { QList<Arg> a = {O("telescope", 's', "telescope host", "192.168.1.195"), O("start-after", 's', "\"dusk\" (autorun begins when the Sun is below --probe-sun-alt; the run itself waits for -12 deg) or a local HH:MM; never act before this", "dusk"), O("probe-sun-alt", 'd', "Sun altitude below which autorun starts: raises the tube, probes with plate solves (exposure scaled to the sky brightness) and initializes; the run still waits for -12", "-7"), O("stop-before-dawn", 'd', "minutes before the end of darkness after which no run is started", "60"),
+        v.append({"autorun", "planning", "Dusk launcher for cron (every 5 minutes): once per night, if the telescope is out and reachable, starts the daemon, connects, initializes the mount if needed and starts 'run --unattended --mail' in the background. Does nothing (quietly) when the telescope does not answer, when nothing is observable, when rain is forecast (with --stop-for-rain), or when ~/.config/origin/autorun.off exists. Slews the telescope: only schedule it if that is wanted.", "", true, false,
+                  [] { QList<Arg> a = {O("telescope", 's', "telescope host", "192.168.1.195"), O("stop-for-rain", 'b', "do not launch on a rain forecast, and pass --stop-for-rain to the run (off by default)"), O("start-after", 's', "\"dusk\" (autorun begins when the Sun is below --probe-sun-alt; the run itself waits for -12 deg) or a local HH:MM; never act before this", "dusk"), O("probe-sun-alt", 'd', "Sun altitude below which autorun starts: raises the tube, probes with plate solves (exposure scaled to the sky brightness) and initializes; the run still waits for -12", "-7"), O("stop-before-dawn", 'd', "minutes before the end of darkness after which no run is started", "60"),
                                        O("dry-run", 'b', "say what would be done, do nothing"), O("init-fallback", 'o', "off | fake-init: after a failed initialize, fake-initialize, goto sky on the other side of the meridian and retry (UNTESTED on the real mount; off by default)", "off"), O("ignore-time", 'b', "skip the evening/dawn time gates (testing)"), O("no-mail", 'b', "send no e-mails (testing)"), O("iso", 'i', "ISO for the run", "800"), O("max-exposure", 'd', "longest exposure for the run, s", "20")};
                        return a + plannerArgs(); }()});
         v.append({"park", "planning", "Save the stack and slew to Polaris (safe park).", "", true, false, {}});
@@ -971,13 +977,17 @@ QJsonObject overrideTarget(const QJsonObject& req)
     return t;
 }
 
-bool rainSoon()
+// Rain stops nothing unless --stop-for-rain: the telescope has no dome, so parking does not keep it dry, and the dew heater copes with light rain (the user, 3 Nov 2026).
+// Without the flag rain is handled as cloud: the frames show it, and the cloud handling waits, moves on or picks a backup.
+bool g_stopForRain = false;
+bool rainSoon(int aheadMin = 60)
 {
+    if (!g_stopForRain) return false;
     QVector<Weather::Hour> hrs;
     if (!Weather::fetch(g_run.o.site.latDeg, g_run.o.site.lonDeg, 2, 20, originDataDir(), &hrs)["ok"].toBool()) return false;
     const QDateTime now = QDateTime::currentDateTimeUtc();
     for (const Weather::Hour& h : hrs)
-        if (h.utc >= now.addSecs(-1800) && h.utc <= now.addSecs(3600) && (h.precipProb >= 60 || h.precip >= 0.2)) return true;
+        if (h.utc >= now.addSecs(-1800) && h.utc <= now.addSecs(aheadMin * 60) && (h.precipProb >= 60 || h.precip >= 0.2)) return true;
     return false;
 }
 
@@ -1400,6 +1410,7 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
 
     g_run = RunState();
     g_run.o = o; g_run.zone = QTimeZone(o.timeZone.toUtf8()); g_run.darkEnd = parseZ(S["dark_end"].toString());
+    g_stopForRain = p.v.contains("stop-for-rain");
     g_run.maxExposure = num(p, c, "max-exposure"); g_run.iso = int(num(p, c, "iso")); g_run.patienceMin = num(p, c, "cloud-patience"); g_run.giveUpMin = num(p, c, "give-up");
     g_run.host = p.v.contains("connect") ? str(p, "connect") : call("status", {}, 10000)["host"].toString();
     g_run.logPath = originDataDir() + "/run_" + S["night"].toString().remove('-') + ".jsonl";
@@ -1624,6 +1635,7 @@ QString fitsCard(const QString& file, const QString& key)                 // a h
 }
 
 bool runActive();
+QJsonObject cmdMosaic(const Parsed& p, const Cmd& c);
 QJsonObject cmdTrack(const Parsed& p, const Cmd& c)
 {
     if (!Ephemeris::available()) return failure("SPICE is not active: " + Ephemeris::description());
@@ -1771,6 +1783,134 @@ QJsonObject cmdTrack(const Parsed& p, const Cmd& c)
     return {{"ok", true}, {"object", name}, {"why", endWhy}, {"frames", frames}, {"recentres", recentres}, {"log", logPath}};
 }
 
+// mosaic: an area bigger than the field, as a grid of pointings visited in turn. Field rotation turns the frame on the sky through the night, so the grid step is the
+// square that stays inside the 0.84 x 1.25 deg field at any angle (0.84/sqrt 2): every grid cell is covered on every visit whatever the rotation, and the frames
+// overlap generously, which tools/canvas_stack.py (each frame through its own plate solution onto one canvas) turns into depth rather than seams.
+// Short visits in turn rather than one long block per pointing: each pointing collects frames across the whole session's sky (twilight, Moon, haze), so the
+// joins do not show steps in level, and a cloudy spell costs every pointing a little rather than one pointing all.
+QJsonObject cmdMosaic(const Parsed& p, const Cmd& c)
+{
+    if (!p.v.contains("ra-hours") || !p.v.contains("dec-deg")) return failure("--ra-hours and --dec-deg (the centre) are needed");
+    const QString name = str(p, "name", "mosaic");
+    const Astro::Site site{num(p, c, "lat"), num(p, c, "lon")};
+    const double ra0 = num(p, c, "ra-hours") * 15.0 * M_PI / 180.0, dec0 = num(p, c, "dec-deg") * M_PI / 180.0;
+    const double W = num(p, c, "width"), H = num(p, c, "height"), step = std::max(0.1, num(p, c, "step")), visitMin = std::max(1.0, num(p, c, "visit"));
+    const double hours = num(p, c, "hours"), maxExp = num(p, c, "max-exposure"), minAlt = num(p, c, "min-alt"); const int iso = int(num(p, c, "iso"));
+    const int nx = std::max(1, int(std::ceil(W / step - 1e-6))), ny = std::max(1, int(std::ceil(H / step - 1e-6)));
+    struct Tile { int i, j; Astro::Equatorial eq; };
+    QList<Tile> tiles;
+    for (int j = 0; j < ny; ++j)
+        for (int k = 0; k < nx; ++k) {
+            const int i = (j % 2 == 0) ? k : nx - 1 - k;                                // serpentine: neighbours follow each other
+            // tangent-plane offsets (xi east, eta north) of the cell centre, back to RA/Dec (inverse gnomonic)
+            const double xi = ((i + 0.5) * step - nx * step / 2) * M_PI / 180.0, eta = ((j + 0.5) * step - ny * step / 2) * M_PI / 180.0;
+            const double den = std::cos(dec0) - eta * std::sin(dec0);
+            const double ra = ra0 + std::atan2(xi, den), dec = std::atan2(std::sin(dec0) + eta * std::cos(dec0), std::hypot(xi, den));
+            tiles.append({i, j, {std::fmod(ra * 180.0 / M_PI / 15.0 + 24.0, 24.0), dec * 180.0 / M_PI}});
+        }
+    QDateTime now = QDateTime::currentDateTimeUtc();
+    const QDateTime until = now.addSecs(qint64(hours * 3600));
+    auto tileJson = [&](const Tile& t) {
+        const Astro::AltAz aa = Astro::altAz(t.eq, site, now); const Planner::RotLimit r = Planner::maxExposure(t.eq.raHours, t.eq.decDeg, site, now, 2.0);
+        return QJsonObject{{"tile", QString("%1,%2").arg(t.i).arg(t.j)}, {"ra_hours", t.eq.raHours}, {"dec_deg", t.eq.decDeg}, {"alt_deg", std::round(aa.alt * 10) / 10}, {"az_deg", std::round(aa.az)},
+                           {"exposure_limit_s", std::isfinite(r.tMax) ? QJsonValue(std::round(r.tMax * 10) / 10) : QJsonValue()}};
+    };
+    const double cycleMin = tiles.size() * (visitMin + 0.75);                              // ~45 s per goto and settle
+    if (p.v.contains("dry-run")) {
+        QJsonArray ts; for (const Tile& t : tiles) ts.append(tileJson(t));
+        return {{"ok", true}, {"dry_run", true}, {"name", name}, {"grid", QString("%1 x %2").arg(nx).arg(ny)}, {"step_deg", step}, {"covers_deg", QString("%1 x %2").arg(nx * step, 0, 'f', 2).arg(ny * step, 0, 'f', 2)},
+                {"round_minutes", std::round(cycleMin)}, {"rounds", std::round(hours * 60 / cycleMin * 10) / 10}, {"tiles", ts}};
+    }
+    { const QString early = tooEarlyToSlew(str(p, "not-before", "dusk"), site); if (!early.isEmpty()) return failure("too early: " + early + "; refusing to slew"); }
+    const bool insideRun = p.v.contains("inside-run");
+    if (!insideRun && runActive()) return failure("an unattended run is in progress (run_state.json): stop it first (tools/run_control.py stop), or slot the session in with 'extras add --kind mosaic'");
+    if (!call("status", {}, 10000)["connected"].toBool()) return failure("the daemon is not connected to the telescope");
+    if (!initialised()) return failure("the telescope is not initialised (IsAligned and IsReady): run autorun or initialize first");
+    if (call("sequence", {{"action", "status"}}, 10000)["status"].toObject()["active"].toBool()) return failure("a sequence is running");
+
+    const QString safe = QString(name).toLower().replace(QRegularExpression("[^a-z0-9]+"), "_");
+    const QString logPath = originDataDir() + "/mosaic_" + safe + "_" + QDateTime::currentDateTime().toString("yyyyMMdd") + ".jsonl";
+    QFile logf(logPath); if (!logf.open(QIODevice::Append)) return failure("cannot write " + logPath);
+    auto log = [&](const QString& what, QJsonObject o) { o["event"] = what; o["time"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs); logf.write(QJsonDocument(o).toJson(QJsonDocument::Compact) + "\n"); logf.flush(); note(o); };
+    auto state = [&](const QString& phase, const QJsonObject& cur) {
+        if (insideRun) { g_run.current = cur; writeRunState(); return; }
+        const QJsonObject blk{{"key", name}, {"name", name}, {"start", now.toString(Qt::ISODate)}, {"end", until.toString(Qt::ISODate)}, {"ra_hours", num(p, c, "ra-hours")}, {"dec_deg", num(p, c, "dec-deg")},
+                              {"minutes", int(hours * 60)}, {"priority", 0}};
+        const QJsonObject st{{"pid", double(QCoreApplication::applicationPid())}, {"night", Planner::currentNightDate("Europe/London").toString(Qt::ISODate)}, {"phase", phase},
+                             {"updated", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}, {"current", cur}, {"block", 0}, {"plan", QJsonArray{blk}}, {"log", logPath}};
+        QSaveFile f(originDataDir() + "/run_state.json"); if (f.open(QIODevice::WriteOnly)) { f.write(QJsonDocument(st).toJson()); f.commit(); }
+    };
+    { QJsonArray ts; for (const Tile& t : tiles) ts.append(tileJson(t));
+      log("mosaic_start", {{"name", name}, {"centre_ra_hours", num(p, c, "ra-hours")}, {"centre_dec_deg", num(p, c, "dec-deg")}, {"width_deg", W}, {"height_deg", H}, {"step_deg", step},
+                           {"grid", QString("%1 x %2").arg(nx).arg(ny)}, {"visit_min", visitMin}, {"until", until.toString(Qt::ISODate)}, {"iso", iso}, {"tiles", ts}}); }
+    call("monitor", {{"lat_deg", site.latDeg}, {"lon_deg", site.lonDeg}, {"auto_stack", false}});      // frames analysed (verdicts), not live-stacked: canvas_stack.py builds the picture
+    QString endWhy; int frames = 0, visits = 0, round = 0, cloudyVisits = 0; QString lastFile; QMap<QString, int> perTile;
+    // a session that stood aside for cloud (or was restarted) carries on after the last pointing it visited tonight, not from the first
+    { QFile prev(logPath); QString lastTile;
+      if (prev.open(QIODevice::ReadOnly)) for (const QByteArray& l : prev.readAll().split('\n')) { const QJsonObject j = QJsonDocument::fromJson(l).object(); if (j["event"].toString() == "visit") lastTile = j["tile"].toString(); }
+      for (int k = 0; k < tiles.size(); ++k) if (QString("%1,%2").arg(tiles[k].i).arg(tiles[k].j) == lastTile) { for (int r = 0; r <= k; ++r) tiles.append(tiles.takeFirst()); break; } }
+    auto stopSeq = [&](const QString& why) { call("sequence", {{"action", "stop"}, {"reason", why}}); sleepMs(2000); };
+    while (endWhy.isEmpty()) {
+        ++round; int visitedThisRound = 0;
+        for (const Tile& t : tiles) {
+            now = QDateTime::currentDateTimeUtc();
+            if (now >= until) { endWhy = "time"; break; }
+            if (Astro::altAz(Astro::sunPosition(now), site, now).alt > -12) { endWhy = "dawn"; break; }
+            if (insideRun && rainSoon()) { endWhy = "rain forecast"; g_run.rain = true; break; }
+            const QString tid = QString("%1,%2").arg(t.i).arg(t.j);
+            const Astro::AltAz aa = Astro::altAz(t.eq, site, now);
+            if (aa.alt < minAlt) { log("skip", {{"tile", tid}, {"why", QString("altitude %1").arg(aa.alt, 0, 'f', 1)}}); continue; }
+            const QString key = name + " " + tid;
+            const QJsonObject cur{{"key", key}, {"name", name + " tile " + tid}, {"mosaic", true}, {"ra_hours", t.eq.raHours}, {"dec_deg", t.eq.decDeg}, {"until", until.toString(Qt::ISODate)}};
+            state("mosaic", cur);
+            call("target", {{"name", key}, {"ra_hours", t.eq.raHours}, {"dec_deg", t.eq.decDeg}});
+            const QJsonObject g = call("goto", {{"ra_hours", t.eq.raHours}, {"dec_deg", t.eq.decDeg}, {"timeout", 240}}, 300000);
+            waitIdle(180);
+            const QJsonObject ms = call("mount_status", {{"fresh", true}}, 15000)["mount"].toObject();
+            log("visit", {{"tile", tid}, {"round", round}, {"ok", g["ok"]}, {"error", g["error"]}, {"ra_hours", t.eq.raHours}, {"dec_deg", t.eq.decDeg}, {"alt_deg", aa.alt}, {"az_deg", aa.az},
+                          {"mount_ra_hours", ms["Ra"].toDouble() * 12.0 / M_PI}, {"mount_dec_deg", ms["Dec"].toDouble() * 180.0 / M_PI}});
+            if (!g["ok"].toBool()) { if (++visits > 3 && frames == 0) { endWhy = "gotos fail"; break; } continue; }
+            ++visits; ++visitedThisRound;
+            const Planner::RotLimit rl = Planner::maxExposure(t.eq.raHours, t.eq.decDeg, site, now, 2.0);
+            const double expo = std::max(1.0, std::floor(std::min(maxExp, std::isfinite(rl.tMax) ? rl.tMax : maxExp)));
+            const QDateTime visitEnd = std::min(until, QDateTime::currentDateTimeUtc().addSecs(qint64(visitMin * 60)));
+            const QJsonObject sr = call("sequence", {{"action", "start"}, {"exposure", expo}, {"iso", iso}, {"pipeline", true}, {"focus_pause", true}, {"auto_exposure", true},
+                                                     {"min_exposure", 1.0}, {"max_exposure", std::max(maxExp, expo)}, {"lat_deg", site.latDeg}});
+            if (!(sr["ok"].toBool() && sr["status"].toObject()["active"].toBool())) { log("sequence_refused", {{"tile", tid}, {"error", sr["error"]}}); continue; }
+            int visitFrames = 0, visitGood = 0;
+            while (QDateTime::currentDateTimeUtc() < visitEnd) {
+                sleepMs(5000);
+                Control k; if (takeControl(&k) && k.action == "stop") { endWhy = "stop requested"; if (insideRun) g_run.stop = true; break; }
+                const QJsonObject st = call("sequence", {{"action", "status"}}, 20000)["status"].toObject();
+                const QJsonObject last = st["last"].toObject(); const QString file = last["file"].toString();
+                if (!file.isEmpty() && file != lastFile) {
+                    lastFile = file; ++frames; ++perTile[tid]; ++visitFrames; if (last["stars"].toInt() >= 30) ++visitGood;
+                    log("frame", {{"file", file}, {"tile", tid}, {"round", round}, {"exptime", fitsCard(file, "EXPTIME").toDouble()}, {"date_obs", fitsCard(file, "DATE-OBS")},
+                                  {"verdict", last["verdict"]}, {"stars", last["stars"]}, {"hfr_px", last["hfr_px"]}});
+                }
+                if (!st["active"].toBool()) { log("sequence_stopped", {{"tile", tid}, {"reason", st["stop_reason"]}}); break; }
+            }
+            stopSeq("mosaic: next pointing");
+            // the frame in flight when the sequence stopped belongs to this pointing too
+            const QJsonObject st = call("sequence", {{"action", "status"}}, 20000)["status"].toObject(); const QString file = st["last"].toObject()["file"].toString();
+            if (!file.isEmpty() && file != lastFile) { lastFile = file; ++frames; ++perTile[tid];
+                log("frame", {{"file", file}, {"tile", tid}, {"round", round}, {"exptime", fitsCard(file, "EXPTIME").toDouble()}, {"date_obs", fitsCard(file, "DATE-OBS")},
+                              {"verdict", st["last"].toObject()["verdict"]}, {"stars", st["last"].toObject()["stars"]}}); }
+            if (!endWhy.isEmpty()) break;
+            // cloud: a visit whose frames mostly show under 30 stars (clear frames here show 50-130). Two such visits running and the session stands aside, so the run can
+            // look for clear sky elsewhere with its own cloud handling; the run offers the session again later (runExtra: retry after 20 min)
+            if (visitFrames >= 2 && visitGood * 2 < visitFrames) { if (++cloudyVisits >= 2) { endWhy = "cloudy"; log("cloudy", {{"tile", tid}, {"good", visitGood}, {"frames", visitFrames}}); break; } }
+            else if (visitFrames >= 2) cloudyVisits = 0;
+        }
+        if (endWhy.isEmpty() && visitedThisRound == 0) endWhy = "no pointing is above --min-alt";
+    }
+    stopSeq("mosaic end: " + endWhy);
+    QJsonObject pt; for (auto it = perTile.begin(); it != perTile.end(); ++it) pt[it.key()] = it.value();
+    log("mosaic_end", {{"why", endWhy}, {"rounds", round}, {"visits", visits}, {"frames", frames}, {"frames_per_tile", pt}});
+    state("finished", QJsonObject{{"key", name}, {"name", name}});
+    return {{"ok", true}, {"name", name}, {"why", endWhy}, {"rounds", round}, {"visits", visits}, {"frames", frames}, {"frames_per_tile", pt}, {"log", logPath}};
+}
+
 // ---------------------------------------------------------------------------------------------------------------------------------------
 // extras: sessions slotted into a night by hand. ~/.config/origin/extras.json is a list of
 //   {"id", "night": "YYYY-MM-DD" (the evening's date), "start": "HH:MM" local or "dark" (Sun below -12), "end": "HH:MM" local, "kind": "track", "object", "options": {...}}
@@ -1779,6 +1919,7 @@ QJsonObject cmdTrack(const Parsed& p, const Cmd& c)
 // ---------------------------------------------------------------------------------------------------------------------------------------
 QString extrasPath() { return QDir::homePath() + "/.config/origin/extras.json"; }
 
+QMap<QString, QDateTime> g_extraCooldown;                                         // extras that stood aside (a mosaic under cloud): not offered again before this
 QJsonObject dueExtra(const QDateTime& now)
 {
     QFile f(extrasPath()); if (!f.open(QIODevice::ReadOnly)) return {};
@@ -1793,6 +1934,7 @@ QJsonObject dueExtra(const QDateTime& now)
     for (const QJsonValue& v : list) {
         const QJsonObject e = v.toObject();
         if (e["night"].toString() != g_run.night || done.contains(e["id"].toString())) continue;
+        if (g_extraCooldown.contains(e["id"].toString()) && now < g_extraCooldown[e["id"].toString()]) continue;
         const QDateTime end = at(e["end"].toString());
         if (!end.isValid() || now >= end) continue;
         const QString st = e["start"].toString("dark");
@@ -1801,6 +1943,89 @@ QJsonObject dueExtra(const QDateTime& now)
         return e;
     }
     return {};
+}
+
+// Large targets for mosaics, as areas on the sky (centre J2000, extent east-west x north-south in deg; my estimates of the full nebulae, not catalogue sizes).
+// A mosaic extra with "alternatives": "auto" may switch to one of these when its own area is under cloud and the all-sky camera shows this one clear.
+struct MosaicArea { const char* name; double raHours, decDeg, w, h; };
+const QList<MosaicArea>& mosaicAreas()
+{
+    static const QList<MosaicArea> a = {
+        {"IC 1805 Heart", 2.524, 61.48, 2.1, 1.6}, {"IC 1848 Soul", 2.883, 60.43, 2.0, 1.3}, {"NGC 1499 California", 4.0, 36.42, 2.6, 1.0},
+        {"NGC 7000 North America and Pelican", 20.93, 44.2, 2.4, 2.0}, {"IC 1396 Elephant Trunk", 21.65, 57.5, 2.8, 2.8}, {"M31 Andromeda", 0.712, 41.27, 3.0, 1.8},
+        {"Veil complex", 20.85, 31.0, 3.4, 3.0}, {"M45 Pleiades", 3.79, 24.12, 2.0, 2.0}};
+    return a;
+}
+// the share of all-sky catalogue stars within radiusDeg of (alt, az) that were seen; -1 when fewer than 4 were tested there
+double clearNear(const QJsonObject& sky, double alt, double az, double radiusDeg = 25)
+{
+    int n = 0, seen = 0;
+    for (const QJsonValue& v : sky["stars"].toArray()) {
+        const QJsonArray a = v.toArray(); const double sa = a[0].toDouble() * M_PI / 180, sz = a[1].toDouble() * M_PI / 180, ta = alt * M_PI / 180, tz = az * M_PI / 180;
+        const double sep = std::acos(std::clamp(std::sin(sa) * std::sin(ta) + std::cos(sa) * std::cos(ta) * std::cos(sz - tz), -1.0, 1.0)) * 180 / M_PI;
+        if (sep <= radiusDeg) { ++n; seen += a[2].toInt(); }
+    }
+    return n >= 4 ? double(seen) / n : -1;
+}
+// The all-sky camera is at the IoA, 2.05 km from the telescope at bearing 293 deg. Low cloud is close: at a 1 km base, cloud 45 deg up is only 1 km away, so the
+// camera looking the same way sees a different patch. This turns the telescope's direction into the camera's for cloud at `baseKm`: where the line of sight meets the
+// cloud layer, seen from the camera.
+void toCameraView(double alt, double az, double baseKm, double* altC, double* azC)
+{
+    const double a = std::max(alt, 5.0) * M_PI / 180, z = az * M_PI / 180, r = baseKm / std::tan(a);
+    const double camE = 2.05 * std::sin(293 * M_PI / 180), camN = 2.05 * std::cos(293 * M_PI / 180);
+    const double qe = r * std::sin(z) - camE, qn = r * std::cos(z) - camN;
+    *altC = std::atan2(baseKm, std::hypot(qe, qn)) * 180 / M_PI; *azC = std::fmod(std::atan2(qe, qn) * 180 / M_PI + 360, 360);
+}
+// the lowest reported cloud base of the latest METARs (scattered or more), km; 1.5 when none is reported
+double cloudBaseKm()
+{
+    QFile f(originDataDir() + "/metar_history.jsonl"); if (!f.open(QIODevice::ReadOnly)) return 1.5;
+    QByteArray last; for (const QByteArray& l : f.readAll().split('\n')) if (!l.trimmed().isEmpty()) last = l;
+    double ft = 0;
+    for (const QJsonValue& rv : QJsonDocument::fromJson(last).object()["reports"].toArray())
+        for (const QJsonValue& cv : rv.toObject()["clouds"].toArray()) { const QJsonObject c = cv.toObject(); const QString cov = c["cover"].toString();
+            if ((cov == "SCT" || cov == "BKN" || cov == "OVC") && c["base"].toDouble() > 0 && (ft == 0 || c["base"].toDouble() < ft)) ft = c["base"].toDouble(); }
+    return ft > 0 ? ft * 0.3048 / 1000 : 1.5;
+}
+// a mosaic extra's area to image now: its own, or with alternatives the clearest of them (all-sky camera) that is above min-alt now and in an hour.
+// `avoid` is an area that has just stood aside for cloud. Returns the options for cmdMosaic, or {} when none is clear (or the camera cannot tell and only `avoid` is left).
+QJsonObject pickMosaicArea(const QJsonObject& e, const QString& avoid, QJsonObject* why)
+{
+    const QJsonObject o = e["options"].toObject();
+    struct Cand { QJsonObject opt; double clear = -1, alt = 0, az = 0; };
+    QList<Cand> cs;
+    QJsonObject own = o; if (!own.contains("name")) own["name"] = e["object"].toString(); own.remove("alternatives"); cs.append({own});
+    if (o["alternatives"].toString() == "auto")
+        for (const MosaicArea& m : mosaicAreas()) if (QString(m.name) != own["name"].toString())
+            cs.append({QJsonObject{{"name", m.name}, {"ra-hours", m.raHours}, {"dec-deg", m.decDeg}, {"width", m.w}, {"height", m.h}, {"visit", own["visit"].toDouble(3)}}});
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    const double sunAlt = Astro::altAz(Astro::sunPosition(now), g_run.o.site, now).alt;
+    const QJsonObject sky = cs.size() > 1 ? Weather::allSkyNow(originDataDir(), sunAlt) : QJsonObject();
+    const double minAlt = own.contains("min-alt") ? own["min-alt"].toDouble() : 30, base = cloudBaseKm();
+    QJsonArray report; const Cand* best = nullptr;
+    for (Cand& c : cs) {
+        const Astro::Equatorial eq{c.opt["ra-hours"].toDouble(), c.opt["dec-deg"].toDouble()};
+        const Astro::AltAz a = Astro::altAz(eq, g_run.o.site, now), a1 = Astro::altAz(eq, g_run.o.site, now.addSecs(3600));
+        c.alt = a.alt; c.az = a.az;
+        if (sky["ok"].toBool()) {
+            double ac, zc; toCameraView(a.alt, a.az, base, &ac, &zc); c.clear = clearNear(sky, ac, zc);
+            // low cloud puts the patch on the telescope's line of sight low in the camera's sky, where it tests no stars: then the whole sky's share stands in
+            // (75% of the stars seen counts as clear, as in allSkyStars)
+            if (c.clear < 0) c.clear = std::clamp(sky["visible_frac"].toDouble() / 0.75, 0.0, 1.0);
+        }
+        const QString name = c.opt["name"].toString();
+        const bool up = a.alt >= minAlt + 5 && a1.alt >= minAlt;
+        report.append(QJsonObject{{"name", name}, {"alt", std::round(a.alt)}, {"az", std::round(a.az)}, {"clear", c.clear < 0 ? QJsonValue() : QJsonValue(std::round(c.clear * 100) / 100)}, {"up", up}});
+        if (!up || name == avoid) continue;
+        const double score = (c.clear < 0 ? 0.5 : c.clear) + (&c == &cs[0] ? 0.1 : 0);    // unknown counts as middling; the booked area is preferred a little
+        if (!best || score > (best->clear < 0 ? 0.5 : best->clear) + (best == &cs[0] ? 0.1 : 0)) best = &c;
+    }
+    if (why) *why = QJsonObject{{"cloud_base_km", base}, {"allsky", sky["ok"].toBool() ? QString("%1 of %2 stars seen").arg(sky["visible"].toInt()).arg(sky["tested"].toInt()) : sky["error"].toString()}, {"areas", report}};
+    if (!best) return {};
+    if (cs.size() > 1 && sky["ok"].toBool() && best->clear >= 0 && best->clear < 0.5) return {};   // the camera says none of them is clear
+    if (!avoid.isEmpty() && best->clear < 0) return {};                                           // after cloud, switch only to an area seen to be clear
+    return best->opt;
 }
 
 bool runExtra(const QJsonObject& e)
@@ -1816,17 +2041,36 @@ bool runExtra(const QJsonObject& e)
         tp.v["name"] = e["object"].toString(); tp.v["inside-run"] = true;
         if (!tp.v.contains("hours")) tp.v["hours"] = std::max(0.1, QDateTime::currentDateTimeUtc().secsTo(end) / 3600.0);
         r = cmdTrack(tp, *tc);
+    } else if (e["kind"].toString() == "mosaic") {
+        // the booked area, or (with "alternatives": "auto") the clearest large area by the all-sky camera; one that stands aside for cloud hands over to another clear one
+        const Cmd* mc = nullptr; for (const Cmd& c : commands()) if (c.name == "mosaic") mc = &c;
+        QString avoid;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            QJsonObject why; const QJsonObject o = pickMosaicArea(e, avoid, &why);
+            runLog("mosaic_pick", {{"avoid", avoid}, {"picked", o["name"]}, {"why", why}});
+            if (o.isEmpty()) { r = attempt == 0 ? QJsonObject{{"ok", true}, {"why", "cloudy"}, {"note", "no mosaic area is clear"}} : r; break; }
+            Parsed mp;
+            for (auto it = o.begin(); it != o.end(); ++it) if (!(it.value().isBool() && !it.value().toBool())) mp.v[it.key()] = it.value().toVariant();
+            mp.v["inside-run"] = true;
+            if (!mp.v.contains("hours")) mp.v["hours"] = std::max(0.1, QDateTime::currentDateTimeUtc().secsTo(end) / 3600.0);
+            r = cmdMosaic(mp, *mc);
+            if (r["why"].toString() != "cloudy") break;
+            avoid = o["name"].toString();
+        }
     } else r = failure("unknown extra kind " + e["kind"].toString());
     // a session refused for something that may pass (not initialised, the object still low) is retried at the next poll until its end; anything else is done
     const QString err = r["error"].toString();
-    const bool retry = !r["ok"].toBool() && (err.contains("not initialised") || err.contains("under --min-alt") || err.contains("not connected") || err.contains("too early"));
-    if (!retry) {
+    const bool cloudy = r["ok"].toBool() && r["why"].toString() == "cloudy";       // a mosaic standing aside for cloud: back to the plan, offered again in 20 min
+    const bool stopped = r["ok"].toBool() && r["why"].toString() == "stop requested"; // the run was stopped (to restart it, say): a relaunched run takes the session up again
+    const bool retry = cloudy || (!r["ok"].toBool() && (err.contains("not initialised") || err.contains("under --min-alt") || err.contains("not connected") || err.contains("too early")));
+    if (cloudy) g_extraCooldown[id] = QDateTime::currentDateTimeUtc().addSecs(20 * 60);
+    if (!retry && !stopped) {
         QJsonObject done = readJsonFile(originDataDir() + "/extras_done.json");
         done[id] = QJsonObject{{"time", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}, {"result", r}};
         QSaveFile f(originDataDir() + "/extras_done.json"); if (f.open(QIODevice::WriteOnly)) { f.write(QJsonDocument(done).toJson()); f.commit(); }
     }
     runLog("extra_end", {{"id", id}, {"result", r}, {"will_retry", retry}});
-    if (retry) sleepMs(60000);
+    if (retry && !cloudy) sleepMs(60000);
     return r["ok"].toBool();
 }
 
@@ -2131,6 +2375,7 @@ bool pidAlive(qint64 pid) {
 
 QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
 {
+    g_stopForRain = p.v.contains("stop-for-rain");
     const QString off = QDir::homePath() + "/.config/origin/autorun.off";
     if (QFile::exists(off)) return {{"ok", true}, {"acted", false}, {"note", "disabled: " + off + " exists"}};
     Planner::Options o = plannerOptions(p, c); o.date = Planner::currentNightDate(o.timeZone);
@@ -2160,14 +2405,18 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
         // all of a night's runs share one log: the last "parked" line says how the last run ended
         QString lastOutcome;
         for (const QByteArray& line : rl.split('\n')) { const QJsonObject j = QJsonDocument::fromJson(line).object(); if (j["decision"].toString() == "parked") lastOutcome = j["outcome"].toString(); }
-        if (!lastOutcome.isEmpty() && lastOutcome != "failed") return idle("tonight's run has finished");
+        // a run that stopped for rain is taken up again once no rain is forecast for the next 90 minutes (unpark, solve and initialise as at dusk): a shower or a
+        // forecast blip at 23:00 should not cost a clear spell after midnight (3 Nov 2026: 0.2 mm at 0% chance forecast for 23:00, clear 01:00-03:00)
+        const bool afterRain = lastOutcome == "rain";
+        if (afterRain) { g_run.o = o; if (rainSoon(90)) return idle("the run stopped for rain; waiting until none is forecast for 90 minutes"); }
+        if (!lastOutcome.isEmpty() && lastOutcome != "failed" && !afterRain) return idle("tonight's run has finished");
         const bool failed = lastOutcome == "failed";
         // relaunch unless the same failure has ended the last two runs (it will not fix itself; the e-mail says why) or this is the 6th launch
         QStringList reasons;
         for (const QByteArray& line : rl.split('\n')) { const QJsonObject j = QJsonDocument::fromJson(line).object(); if (j["decision"].toString() == "run_end" && j["outcome"].toString() == "failed") reasons << j["reason"].toString().section(':', 0, 0); }
         if (reasons.size() >= 2 && !reasons.last().isEmpty() && reasons.last() == reasons[reasons.size() - 2]) return idle("the run failed twice for the same reason (" + reasons.last() + "); not relaunching tonight");
         if (st["launches"].toInt() >= 6) return idle("the run was launched 6 times tonight; giving up");
-        note({{"autorun", failed ? "run ended in failure; relaunching" : "run process died before parking; relaunching"}});
+        note({{"autorun", afterRain ? "the rain forecast has cleared; relaunching" : failed ? "run ended in failure; relaunching" : "run process died before parking; relaunching"}});
     }
     if (S["plan"].toArray().isEmpty()) return idle("nothing observable tonight");
     if (p.v.contains("dry-run")) return {{"ok", true}, {"acted", false}, {"dry_run", true}, {"night", night}, {"would", "start the daemon if needed, connect, initialize if needed, launch run --unattended --mail"}, {"blocks", S["plan"].toArray().size()}};
@@ -2268,6 +2517,7 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
     QProcess run; run.setProgram(QCoreApplication::applicationFilePath());
     run.setArguments({"run", "--unattended", "--iso", str(p, "iso", "800"), "--max-exposure", str(p, "max-exposure", "20"), "--not-before", str(p, "start-after", "dusk"), "--port", QString::number(g_port)});
     if (!p.v.contains("no-mail")) run.setArguments(run.arguments() << "--mail");
+    if (p.v.contains("stop-for-rain")) run.setArguments(run.arguments() << "--stop-for-rain");
     run.setStandardOutputFile(originDataDir() + "/autorun_" + QString(night).remove('-') + ".log", QIODevice::Append);
     run.setStandardErrorFile(originDataDir() + "/autorun_" + QString(night).remove('-') + ".log", QIODevice::Append);
     qint64 pid = 0;
@@ -2422,6 +2672,7 @@ int main(int argc, char* argv[])
     else if (cmd->name == "body") out = cmdBody(p, *cmd);
     else if (cmd->name == "goto-body") out = cmdGotoBody(p, *cmd);
     else if (cmd->name == "track") out = cmdTrack(p, *cmd);
+    else if (cmd->name == "mosaic") out = cmdMosaic(p, *cmd);
     else if (cmd->name == "extras") out = cmdExtras(p, *cmd);
     else if (cmd->name == "now") out = cmdNow(p, *cmd);
     else if (cmd->name == "weather") out = cmdWeather(p, *cmd);
