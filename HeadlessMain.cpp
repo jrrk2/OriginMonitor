@@ -1300,6 +1300,12 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
             const QJsonObject nc = Weather::metarNowcast(g_run.o.site.latDeg, g_run.o.site.lonDeg, originDataDir(), 10, nullptr);
             const bool clearish = !nc["ok"].toBool() || nc["cover_pct"].toDouble() < 60;
             defocusFix = !defocusIsCloud;
+            // overcast (90% or more reported): no sweep can find sharp stars through it, so the soft, sparse stars are cloud at once (3 Nov 2026: a sweep
+            // under 100% cloud on M82); at 66% one found a real focus error the same evening, so the sweep stays for broken cloud
+            if (defocusFix && nc["ok"].toBool() && nc["cover_pct"].toDouble() >= 90) {
+                defocusIsCloud = true; defocusFix = false;
+                runLog("defocus_is_cloud", {{"target", t["key"]}, {"cover_pct", nc["cover_pct"]}});
+            }
             if (defocusFix && ++trailedFrames >= 3 && (!clearish || regotos >= 1)) {
                 if (g_run.refocuses >= 6) defocusIsCloud = true;                       // tonight's sweeps are used up: treat it as the sky
                 else {
@@ -1829,7 +1835,8 @@ QJsonObject cmdMosaic(const Parsed& p, const Cmd& c)
     if (call("sequence", {{"action", "status"}}, 10000)["status"].toObject()["active"].toBool()) return failure("a sequence is running");
 
     const QString safe = QString(name).toLower().replace(QRegularExpression("[^a-z0-9]+"), "_");
-    const QString logPath = originDataDir() + "/mosaic_" + safe + "_" + QDateTime::currentDateTime().toString("yyyyMMdd") + ".jsonl";
+    // named by the night (the evening's date), not the calendar day: a session that stands aside before midnight carries on after it from the same log
+    const QString logPath = originDataDir() + "/mosaic_" + safe + "_" + Planner::currentNightDate("Europe/London").toString("yyyyMMdd") + ".jsonl";
     QFile logf(logPath); if (!logf.open(QIODevice::Append)) return failure("cannot write " + logPath);
     auto log = [&](const QString& what, QJsonObject o) { o["event"] = what; o["time"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs); logf.write(QJsonDocument(o).toJson(QJsonDocument::Compact) + "\n"); logf.flush(); note(o); };
     auto state = [&](const QString& phase, const QJsonObject& cur) {
@@ -1993,7 +2000,7 @@ double cloudBaseKm()
 QJsonObject pickMosaicArea(const QJsonObject& e, const QString& avoid, QJsonObject* why)
 {
     const QJsonObject o = e["options"].toObject();
-    struct Cand { QJsonObject opt; double clear = -1, alt = 0, az = 0; };
+    struct Cand { QJsonObject opt; double clear = -1, alt = 0, az = 0, score = 0; };
     QList<Cand> cs;
     QJsonObject own = o; if (!own.contains("name")) own["name"] = e["object"].toString(); own.remove("alternatives"); cs.append({own});
     if (o["alternatives"].toString() == "auto")
@@ -2016,10 +2023,14 @@ QJsonObject pickMosaicArea(const QJsonObject& e, const QString& avoid, QJsonObje
         }
         const QString name = c.opt["name"].toString();
         const bool up = a.alt >= minAlt + 5 && a1.alt >= minAlt;
-        report.append(QJsonObject{{"name", name}, {"alt", std::round(a.alt)}, {"az", std::round(a.az)}, {"clear", c.clear < 0 ? QJsonValue() : QJsonValue(std::round(c.clear * 100) / 100)}, {"up", up}});
+        // frames near the zenith are cut short by field rotation (the Heart at 79 deg: 5 s, 3-12 stars a frame, 4 Nov 2026): an area that allows full frames is worth more
+        const Planner::RotLimit rl = Planner::maxExposure(eq.raHours, eq.decDeg, g_run.o.site, now, 2.0);
+        const double tmax = std::isfinite(rl.tMax) ? rl.tMax : 60, expoFactor = 0.4 + 0.6 * std::min(1.0, tmax / 15.0);
+        c.score = ((c.clear < 0 ? 0.5 : c.clear) + (&c == &cs[0] ? 0.1 : 0)) * expoFactor;       // unknown counts as middling; the booked area is preferred a little
+        report.append(QJsonObject{{"name", name}, {"alt", std::round(a.alt)}, {"az", std::round(a.az)}, {"clear", c.clear < 0 ? QJsonValue() : QJsonValue(std::round(c.clear * 100) / 100)}, {"up", up},
+                                  {"exposure_limit_s", std::round(tmax * 10) / 10}, {"score", std::round(c.score * 100) / 100}});
         if (!up || name == avoid) continue;
-        const double score = (c.clear < 0 ? 0.5 : c.clear) + (&c == &cs[0] ? 0.1 : 0);    // unknown counts as middling; the booked area is preferred a little
-        if (!best || score > (best->clear < 0 ? 0.5 : best->clear) + (best == &cs[0] ? 0.1 : 0)) best = &c;
+        if (!best || c.score > best->score) best = &c;
     }
     if (why) *why = QJsonObject{{"cloud_base_km", base}, {"allsky", sky["ok"].toBool() ? QString("%1 of %2 stars seen").arg(sky["visible"].toInt()).arg(sky["tested"].toInt()) : sky["error"].toString()}, {"areas", report}};
     if (!best) return {};

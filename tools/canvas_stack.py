@@ -12,7 +12,9 @@ For every frame:
     --flat self (default) measures the vignetting from the frames: star-masked block medians of up to 60 of them, each over its own centre level, median-combined and fitted per
     plane with 1 + a r^2 + b r^4 + c r^6 plus a tilt (the tilt is sky gradient, fixed to the horizon and so to the sensor of an alt-az mount, and is not kept).
     The twilight master flats in DATA/flats (--flat master) over-correct the corners (0.7 where the frames show 0.8) and carry the twilight gradient.
-  * plate-solved (solve-field -z2 on the green plane within 0.5 deg of the header position; cached in OUT/wcs/), so the canvas position and turn of every pixel is the frame's own
+  * plate-solved on the green plane within 0.5 deg of the header position (cached in OUT/wcs/), so the canvas position and turn of every pixel is the frame's own:
+    first all of them in one tools/SolveFrames process (StellarSolver, after ~/stellina_processor: 136 Veil frames in 24 s, within 0.4" of solve-field at the centre),
+    then solve-field -z2 for any it could not solve
   * a low-order sky surface fitted to the star-free sky and subtracted per plane (frames of different hours and pointings then meet at one level)
   * mapped onto the canvas (bilinear), weighted by 1/noise^2 and by a taper over the outer --taper of the frame, so no frame edge prints through
 Two passes: the first gives each canvas pixel's weighted mean and scatter, the second keeps only samples whose green is within --clip sigma of it (satellites, planes, hot pixels;
@@ -64,6 +66,21 @@ def load(path, flats):
     if flat is not None: rgb /= flat
     rgb *= np.array(WB, np.float32)[:, None, None] * (800.0 / float(h.get('ISOSPEED', 800) or 800)) / float(h.get('EXPTIME', 1) or 1)
     return rgb, h
+
+
+SOLVEFRAMES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'build', 'solveframes', 'SolveFrames')
+
+
+def solve_batch(files, wdir):
+    """all frames without a solution through tools/SolveFrames (StellarSolver, one process: ~0.2 s a frame); whatever it cannot solve is left for solve-field"""
+    todo = [f for f in files if not os.path.exists(os.path.join(wdir, os.path.splitext(os.path.basename(f))[0] + '.wcs'))]
+    if not todo or not os.path.exists(SOLVEFRAMES): return
+    lst = os.path.join(wdir, 'todo.txt'); open(lst, 'w').write('\n'.join(todo) + '\n')
+    r = subprocess.run([SOLVEFRAMES, '--out-dir', wdir, '@' + lst], capture_output=True, text=True)
+    print('  ' + r.stderr.strip().splitlines()[-1] if r.stderr.strip() else '  SolveFrames: no summary', flush=True)
+    for f in todo:                                                              # a frame StellarSolver could not solve gets its chance with solve-field
+        fail = os.path.join(wdir, os.path.splitext(os.path.basename(f))[0] + '.wcs.fail')
+        if os.path.exists(fail): os.remove(fail)
 
 
 def solve(path, wdir):
@@ -180,6 +197,7 @@ def main():
         f = fits.getdata(a.flat).astype(np.float32); flats = {'Nebula': f, 'Clear': f}
     print('%d frames -> %s' % (len(files), out), flush=True)
 
+    solve_batch(files, wdir)
     with ThreadPoolExecutor(a.jobs) as ex: wcss = list(ex.map(lambda f: solve(f, wdir), files))
     good = [(f, w) for f, w in zip(files, wcss) if w is not None]
     print('solved %d of %d' % (len(good), len(files)), flush=True)
