@@ -49,6 +49,19 @@ QVector<QPair<QDateTime, double>> nowcast(double latDeg, double lonDeg, int hour
 /// Applied automatically inside fetch(); this returns the observation used ({ok, cover, stations:[...], obs_time}) for display.
 QJsonObject metarNowcast(double latDeg, double lonDeg, const QString& cacheDir, int maxAgeMin, QVector<Hour>* hours);
 
+/// Satellite cloud fraction around the site from the EUMETSAT Meteosat (0 degree) cloud mask, every 15 min, free and keyless (view.eumetsat.int WMS layer msg_fes:clm, fetched
+/// as a greyscale JPEG: cloud 255, clear land ~113, clear sea ~29). Meteosat scans south to north, so Cambridge is seen ~12 min after the image's nominal time; images appear
+/// ~20 min after it. Checked against 3-4 Nov 2026: clear 18:45-19:45, a gap at 00:15 nominal (the telescope's clear frames 00:23-00:32), overcast otherwise.
+/// Cached for 5 min in cacheDir/satellite_cloud.json. Returns {ok, image_time, seen_time, cover_5km, cover_15km, cover_30km} (0..1), or ok=false with an error.
+/// The mask counts all cloud, thin cirrus included.
+QJsonObject satelliteCloud(double latDeg, double lonDeg, const QString& cacheDir);
+
+/// North Sea stratocumulus ("anticyclonic gloom"): high pressure with a light wind off the North Sea holds a moist layer under the inversion at 2000-6000 ft, fed all night
+/// from the sea. The models clear it too readily (3 Nov 2026: all seven forecast 10-25% cloud for 00-03 UT, the airports reported overcast at 4000-4500 ft all night).
+/// From the latest reports within 60 km: pattern = median pressure >= 1025 hPa, mean wind from 330..120 deg at <= 12 kt, and SCT or more based 2000-6000 ft at half the stations
+/// or more (4 stations at least). Returns {ok, pattern, stations, pressure_hpa, wind_from_deg, wind_kt, sc_stations, base_ft, why}.
+QJsonObject northSeaStratocumulus(double latDeg, double lonDeg, const QString& cacheDir);
+
 QJsonObject toJson(const Hour& h);
 
 /// Night cloud cover from an IoA all-sky frame (JPEG) taken at `utc`: the share of catalogue stars (V <= 3.5, altitude > 25 deg) seen at their predicted pixels.

@@ -347,6 +347,92 @@ static QJsonObject allSkyCover(const QString& dir, double* cover, QDateTime* whe
     return {{"ok", true}, {"cover", *cover}, {"median", med}, {"p20", p20}, {"margin", margin}, {"sun_alt", sunAlt}, {"image_time", mod.toString(Qt::ISODate)}};
 }
 
+QJsonObject satelliteCloud(double lat, double lon, const QString& cacheDir)
+{
+    const QString path = cacheDir + "/satellite_cloud.json";
+    { QFile cf(path); if (cf.open(QIODevice::ReadOnly)) { const QJsonObject c = QJsonDocument::fromJson(cf.readAll()).object();
+        if (std::abs(c["lat"].toDouble() - lat) < 1e-3 && std::abs(c["lon"].toDouble() - lon) < 1e-3
+            && QDateTime::currentMSecsSinceEpoch() - qint64(c["fetched_ms"].toDouble()) < 5 * 60000) return c; } }
+    const double dlat = 0.3, dlon = 0.5; const int W = 100, H = 60;              // 67 x 68 km, ~0.7 km a pixel (the mask itself is ~3 x 6 km here)
+    QDateTime t = QDateTime::currentDateTimeUtc().addSecs(-20 * 60);
+    t = QDateTime(t.date(), QTime(t.time().hour(), t.time().minute() / 15 * 15), QTimeZone::UTC);
+    QString lastErr;
+    for (int k = 0; k < 4; ++k, t = t.addSecs(-900)) {
+        QUrl url("https://view.eumetsat.int/geoserver/ows"); QUrlQuery q;
+        for (const auto& kv : std::initializer_list<std::pair<const char*, QString>>{{"service", "WMS"}, {"version", "1.3.0"}, {"request", "GetMap"}, {"layers", "msg_fes:clm"}, {"styles", ""},
+                 {"crs", "EPSG:4326"}, {"format", "image/jpeg"}, {"width", QString::number(W)}, {"height", QString::number(H)}, {"time", t.toString("yyyy-MM-ddTHH:mm:00Z")},
+                 {"bbox", QString("%1,%2,%3,%4").arg(lat - dlat, 0, 'f', 4).arg(lon - dlon, 0, 'f', 4).arg(lat + dlat, 0, 'f', 4).arg(lon + dlon, 0, 'f', 4)}})
+            q.addQueryItem(kv.first, kv.second);
+        url.setQuery(q);
+        QString err; const QByteArray img = httpGet(url, &err);
+        if (!err.isEmpty()) { lastErr = err; continue; }
+        if (!img.startsWith("\xFF\xD8")) { lastErr = "no image for " + t.toString("HH:mm"); continue; }   // a service exception: that image is not out yet
+        int w = 0, h = 0; std::vector<unsigned char> px;
+        if (!decodeGray(img, &w, &h, &px) || w != W || h != H) { lastErr = "satellite image unreadable"; continue; }
+        const double kmLat = 111.2, kmLon = 111.2 * std::cos(lat * 3.14159265358979 / 180);
+        double n[3] = {0, 0, 0}, c[3] = {0, 0, 0}; const double r[3] = {5, 15, 30};
+        for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
+            const double la = lat + dlat - (y + 0.5) * 2 * dlat / H, lo = lon - dlon + (x + 0.5) * 2 * dlon / W;
+            const double d = std::hypot((la - lat) * kmLat, (lo - lon) * kmLon);
+            const bool cloud = px[size_t(y) * W + x] > 190;                        // between clear land (~113) and cloud (255), clear of JPEG ringing
+            for (int i = 0; i < 3; ++i) if (d <= r[i]) { ++n[i]; c[i] += cloud; }
+        }
+        const QJsonObject out{{"ok", true}, {"lat", lat}, {"lon", lon}, {"fetched_ms", double(QDateTime::currentMSecsSinceEpoch())}, {"image_time", t.toString(Qt::ISODate)},
+                              {"seen_time", t.addSecs(12 * 60).toString(Qt::ISODate)}, {"cover_5km", c[0] / n[0]}, {"cover_15km", c[1] / n[1]}, {"cover_30km", c[2] / n[2]},
+                              {"source", "EUMETSAT Meteosat cloud mask (msg_fes:clm)"}};
+        QFile f(path); if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(out).toJson(QJsonDocument::Compact));
+        QFile hf(cacheDir + "/satellite_history.jsonl"); if (hf.open(QIODevice::Append)) hf.write(QJsonDocument(out).toJson(QJsonDocument::Compact) + "\n");
+        return out;
+    }
+    // a failure is cached too, so an outage costs one round of attempts every 5 min rather than one per call
+    const QJsonObject bad{{"ok", false}, {"lat", lat}, {"lon", lon}, {"fetched_ms", double(QDateTime::currentMSecsSinceEpoch())}, {"error", lastErr.isEmpty() ? QString("no satellite image") : lastErr}};
+    QFile f(path); if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(bad).toJson(QJsonDocument::Compact));
+    return bad;
+}
+
+QJsonObject northSeaStratocumulus(double lat, double lon, const QString& cacheDir)
+{
+    metarNowcast(lat, lon, cacheDir, 10, nullptr);                              // refreshes the cached reports
+    QFile cf(QString("%1/metar_%2_%3.json").arg(cacheDir).arg(lat, 0, 'f', 2).arg(lon, 0, 'f', 2));
+    if (!cf.open(QIODevice::ReadOnly)) return {{"ok", false}, {"error", "no METAR reports"}};
+    const QJsonArray reports = QJsonDocument::fromJson(cf.readAll()).object()["reports"].toArray();
+    QMap<QString, QJsonObject> latest;
+    for (const QJsonValue& v : reports) {
+        const QJsonObject r = v.toObject(); const QString id = r["icaoId"].toString();
+        if (!latest.contains(id) || latest[id]["obsTime"].toDouble() < r["obsTime"].toDouble()) latest[id] = r;
+    }
+    const double kmLat = 111.2, kmLon = 111.2 * std::cos(lat * 3.14159265358979 / 180);
+    std::vector<double> pres, spd, bases; double wx = 0, wy = 0; int n = 0, sc = 0; QStringList ids;
+    for (const QJsonObject& r : latest) {
+        const double d = std::hypot((r["lat"].toDouble() - lat) * kmLat, (r["lon"].toDouble() - lon) * kmLon);
+        if (d > 60 || QDateTime::fromSecsSinceEpoch(qint64(r["obsTime"].toDouble()), QTimeZone::UTC).secsTo(QDateTime::currentDateTimeUtc()) > 5400) continue;
+        ++n; ids << r["icaoId"].toString();
+        if (r["altim"].isDouble()) pres.push_back(r["altim"].toDouble());
+        if (r["wdir"].isDouble() && r["wspd"].isDouble()) {                     // "VRB" is a string: light and variable, no direction
+            const double a = r["wdir"].toDouble() * 3.14159265358979 / 180; wx += std::cos(a); wy += std::sin(a);
+        }
+        if (r["wspd"].isDouble()) spd.push_back(r["wspd"].toDouble());
+        double low = -1;
+        for (const QJsonValue& l : r["clouds"].toArray()) {
+            const QString c = l.toObject()["cover"].toString(); const double b = l.toObject()["base"].toDouble(-1);
+            if ((c == "SCT" || c == "BKN" || c == "OVC") && b >= 2000 && b <= 6000 && (low < 0 || b < low)) low = b;
+        }
+        if (low >= 0) { ++sc; bases.push_back(low); }
+    }
+    if (n < 4) return {{"ok", false}, {"error", QString("only %1 airports within 60 km reported in the last 90 min").arg(n)}};
+    auto median = [](std::vector<double> v) { if (v.empty()) return std::nan(""); std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
+    const double p = median(pres), kt = median(spd), base = median(bases);
+    const bool hasDir = wx != 0 || wy != 0;
+    const double from = hasDir ? std::fmod(std::atan2(wy, wx) * 180 / 3.14159265358979 + 360, 360) : std::nan("");
+    const bool high = p >= 1025, seaWind = hasDir && (from >= 330 || from <= 120) && kt <= 12, deck = 2 * sc >= n;
+    QStringList why;
+    why << QString("pressure %1 hPa%2").arg(p, 0, 'f', 0).arg(high ? "" : " (under 1025)")
+        << (hasDir ? QString("wind from %1 deg at %2 kt%3").arg(from, 0, 'f', 0).arg(kt, 0, 'f', 0).arg(seaWind ? "" : " (not a light wind off the North Sea)") : QString("wind variable"))
+        << QString("%1 of %2 airports report cloud at 2000-6000 ft%3").arg(sc).arg(n).arg(deck ? QString(" (median base %1 ft)").arg(base, 0, 'f', 0) : QString(" (fewer than half)"));
+    return {{"ok", true}, {"pattern", high && seaWind && deck}, {"stations", QJsonArray::fromStringList(ids)}, {"pressure_hpa", p}, {"wind_from_deg", hasDir ? QJsonValue(std::round(from)) : QJsonValue()},
+            {"wind_kt", kt}, {"sc_stations", sc}, {"base_ft", bases.empty() ? QJsonValue() : QJsonValue(base)}, {"why", why.join("; ")}};
+}
+
 QJsonObject metarNowcast(double lat, double lon, const QString& cacheDir, int maxAgeMin, QVector<Hour>* hours)
 {
     // reports from the last 3 hours of stations in a box around the site (aviationweather.gov, free, no key); cached so repeated calls are cheap
@@ -407,6 +493,16 @@ QJsonObject metarNowcast(double lat, double lon, const QString& cacheDir, int ma
       const double wCam = stars ? 0.1 : 0.1 * std::clamp((sunAlt + 6.0) / 6.0, 0.15, 1.0);
       if (a["ok"].toBool()) { sw += wCam; sc += wCam * ac; if (!newest.isValid() || at > newest) newest = at; st.append(QJsonObject{{"id", "allsky"}, {"km", 0}, {"cover", ac}, {"raw", QString(stars ? "IoA all-sky camera (%1 of %2 stars), " : "IoA all-sky camera%1%2, ").arg(stars ? QString::number(a["visible"].toInt()) : "").arg(stars ? QString::number(a["tested"].toInt()) : "") + at.toString(Qt::ISODate)}}); }
       else st.append(QJsonObject{{"id", "allsky"}, {"error", a["error"]}}); }
+    // the satellite sees the cloud over the site itself, every 15 min (3 Nov 2026: it caught the deck the airports 20-40 km away straddled, and the 00:15 gap): weight 0.2,
+    // twice the camera's, so with both it leads the airports (each under 0.01). Used while the image was seen within the last 50 min.
+    { const QJsonObject sat = satelliteCloud(lat, lon, cacheDir);
+      const QDateTime seen = QDateTime::fromString(sat["seen_time"].toString(), Qt::ISODate);
+      if (sat["ok"].toBool() && seen.isValid() && seen.secsTo(QDateTime::currentDateTimeUtc()) < 50 * 60) {
+          const double wSat = 0.2, cs = sat["cover_15km"].toDouble();
+          sw += wSat; sc += wSat * cs; if (!newest.isValid() || seen > newest) newest = seen;
+          st.append(QJsonObject{{"id", "satellite"}, {"km", 0}, {"cover", cs}, {"raw", QString("Meteosat cloud mask %1: %2% within 5 km, %3% within 15 km, %4% within 30 km").arg(seen.toString("HH:mm"))
+                                   .arg(std::round(sat["cover_5km"].toDouble() * 100)).arg(std::round(cs * 100)).arg(std::round(sat["cover_30km"].toDouble() * 100))}});
+      } else st.append(QJsonObject{{"id", "satellite"}, {"error", sat["ok"].toBool() ? QString("image too old") : sat["error"].toString()}}); }
     if (sw <= 0) return {{"ok", false}, {"error", "no recent METAR within 60 km"}};
     const double obs = sc / sw * 100;   // % low/mid cover now
 

@@ -683,18 +683,37 @@ QJsonObject cmdBriefing(const Parsed& p, const Cmd& c)
         }
         const bool wet = !wetFrom.isEmpty(), risky = !wet && !riskFrom.isEmpty();
         int afterRain = 0; for (const Win& w : wins) if (lastWet.isValid() && w.a >= lastWet) afterRain += int(w.a.secsTo(w.b) / 60);
-        const QString verdict = wet ? "KEEP IT IN" : risky ? "RAIN RISK" : best >= 90 ? "WORTH PUTTING OUT" : best >= 40 ? "MARGINAL" : "POOR FORECAST";
+        // North Sea stratocumulus at dusk: the forecast clearing of the low deck is not to be trusted (3 Nov 2026: 0.74-0.90 forecast for 00-03 UT, overcast all night; on the four
+        // evenings of Oct-Nov 2026 with the pattern the deck stayed at least half the night). It lowers a good verdict one step; it does not keep the telescope in.
+        const QJsonObject nsc = Weather::northSeaStratocumulus(o.site.latDeg, o.site.lonDeg, originDataDir());
+        const bool gloom = nsc["pattern"].toBool();
+        QString clearsFrom;                                                            // the first dark hour the forecast has the low cloud gone
+        for (const QJsonValue& hv : wx["hours"].toArray()) {
+            const QJsonObject h = hv.toObject(); const QDateTime a = parseZ(h["utc"].toString().left(19) + "Z");
+            if (a.addSecs(3600) > std::max(darkStart, now) && a < darkEnd && h["low"].toDouble() < 30 && h["quality"].toDouble() >= o.minQuality) { clearsFrom = loc(a); break; }
+        }
+        const QString verdict = wet ? "KEEP IT IN" : risky ? "RAIN RISK" : best >= 90 && !gloom ? "WORTH PUTTING OUT" : best >= 40 ? "MARGINAL" : "POOR FORECAST";
         QString when; for (const Win& w : wins) when += (when.isEmpty() ? "" : ", ") + loc(w.a) + "-" + loc(w.b);
         const QString rainSpan = riskFrom + "-" + riskTo;      // the risky hours include the wet ones
-        subject = QString("[Origin] Dusk: %1%2%3").arg(verdict, wet || risky ? QString(" - rain %1 (up to %2%)").arg(rainSpan).arg(maxProb, 0, 'f', 0) : QString(),
-                                                     wins.isEmpty() ? (wet || risky ? QString() : QString(" - no usable hours forecast (but it has been wrong before)")) : " - clear " + when);
+        subject = QString("[Origin] Dusk: %1%2%3%4").arg(verdict, wet || risky ? QString(" - rain %1 (up to %2%)").arg(rainSpan).arg(maxProb, 0, 'f', 0) : QString(),
+                                                     wins.isEmpty() ? (wet || risky ? QString() : QString(" - no usable hours forecast (but it has been wrong before)")) : " - clear " + when,
+                                                     gloom ? " - North Sea stratocumulus, clearing doubtful" : "");
         const QString afterNote = afterRain > 0 ? QString(" The clear spell after it (%1 min) is only worth it if someone puts the telescope out once the rain has passed.").arg(afterRain) : QString();
         body = QString("%1 (night of %2)\n\nVERDICT: %3\n").arg(verdict, title,
                  wet ? "keep the telescope in: rain is forecast " + rainSpan + " (>= 50% chance or >= 0.2 mm in an hour) and parking does not keep it dry." + afterNote
                  : risky ? QString("do not leave it out unattended: up to %1% chance of rain %2.").arg(maxProb, 0, 'f', 0).arg(rainSpan) + afterNote
-                 : best >= 90 ? "put the telescope out." : best >= 40 ? "only short gaps are forecast; worth trying." : "the forecast is poor, but forecasts here have often been too pessimistic, so it is not a reason to stay in. Trying costs only the put-out; if it is out and answering, autorun will image whatever breaks.");
+                 : best >= 90 && !gloom ? "put the telescope out." : best >= 90 ? "the forecast is good, but the low cloud now overhead is the kind the models clear too soon (see below); worth trying, expect less than forecast."
+                 : best >= 40 ? "only short gaps are forecast; worth trying."
+                 : gloom ? "the forecast is poor and the low cloud overhead is the kind that stays all night (see below): only worth putting out if you can see stars."
+                 : "the forecast is poor, but forecasts here have often been too pessimistic, so it is not a reason to stay in. Trying costs only the put-out; if it is out and answering, autorun will image whatever breaks.");
         body += QString("Sunset %1, astronomical dark %2 to %3. %4 of the %5 dark minutes are forecast usable; longest clear stretch %6 min.\n").arg(loc(sunset), loc(darkStart), loc(darkEnd)).arg(total).arg(int(darkStart.secsTo(darkEnd) / 60)).arg(best);
         if (wx.contains("rain_from")) body += "Rain is forecast from " + locJ(wx["rain_from"]) + ".\n";
+        if (const QJsonObject sat = Weather::satelliteCloud(o.site.latDeg, o.site.lonDeg, originDataDir()); sat["ok"].toBool())
+            body += QString("Satellite (Meteosat cloud mask, %1): %2% cloud within 5 km, %3% within 15 km, %4% within 30 km.\n").arg(loc(QDateTime::fromString(sat["seen_time"].toString(), Qt::ISODate)))
+                        .arg(std::round(sat["cover_5km"].toDouble() * 100)).arg(std::round(sat["cover_15km"].toDouble() * 100)).arg(std::round(sat["cover_30km"].toDouble() * 100));
+        if (gloom) body += QString("\nNORTH SEA STRATOCUMULUS: %1. High pressure with a light wind off the North Sea keeps a damp layer under the inversion and feeds it all night; "
+                                   "the models tend to clear it too soon (3 Nov: forecast clear 00-03, overcast all night)%2. Showers can fall from it even when the forecast says 0-2%.\n")
+                           .arg(nsc["why"].toString(), clearsFrom.isEmpty() ? QString() : ". The forecast has the low cloud gone from " + clearsFrom + ": treat that as doubtful");
         { const QJsonObject acc = forecastAccuracy(); body += "\n" + trackRecordLine(acc) + "\n"; }
         body += "\nUsable windows (local): " + (when.isEmpty() ? "none" : when) + "\n\nHour by hour (local): mean cloud (low/mid/high) of 7 models, rain chance, blended quality (range across models)\n";
         for (const QJsonValue& hv : wx["hours"].toArray()) {
