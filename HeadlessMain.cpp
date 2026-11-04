@@ -890,6 +890,8 @@ QJsonObject cmdFocusSweep(const Parsed& p, const Cmd& c)
 //   sequence keeps stopping             -> wait for the server's own reconnect (else connect; 13 min at most), restart the sequence; a 7th stop in one block skips it
 //   daemon stops answering              -> restart it (twice a night), reconnect, re-initialise if needed, go back to the target
 //   camera stuck in a capture           -> cancel twice; still stuck: reboot the telescope, wait for the link, initialize, go back to the target, resume (twice a night)
+//   aux bus down (mount or focuser not answering, -802/-809, for 90 s) -> stop capturing (the frames are not cloud), e-mail, reboot once; still down: e-mail for a power cycle and wait
+//                                          for it until dawn, then initialize and go back to the target
 //   a request from OriginWatch's Tasks tab -> see "run control" below (override the target, end the override, replan, stop)
 // A block that cannot be observed is skipped and the night goes on; the run ends early only for rain, a stop, a fault a reboot did not clear, a telescope gone from the network,
 // or the same trouble three blocks running. Then it hands straight back to autorun, which relaunches unless the same failure ended the last two runs.
@@ -908,6 +910,7 @@ struct RunState {
     QString night; QJsonArray plan; int block = -1;         // tonight's plan and the block being run (for run_state.json)
     QJsonObject current;                                    // what is being observed now: {key, until, override}
     qint64 controlDone = 0; bool replan = false, stop = false;
+    bool mail = false; int auxReboots = 0;                  // --mail (alerts as well as the summary); reboots tried tonight for a dead aux bus
 };
 RunState g_run;
 
@@ -1068,6 +1071,58 @@ QString rebootRecover(const QJsonObject& t)
     return bad.isEmpty() ? QString() : "initialize after the reboot: " + bad;
 }
 
+// The telescope's internal aux bus can die with the link and the camera still up (4 Nov 2026 00:50: Mount, Focuser and Environment answered -809 "Timed out before response
+// from aux device" for 4 h 40 min). The frames then look like cloud and every goto and initialize fails, so the run used to probe "cloud" and skip blocks. Two System Reboots
+// came back with -28 "Failed to initialize LED ring due to Unknown aux bus error code"; only a power cycle at the telescope cleared it.
+// The daemon reports the devices that stopped answering in status "aux_lost" {device: seconds}; the run acts when the mount or the focuser has been down 90 s.
+double auxDownS(QJsonObject* devices = nullptr)
+{
+    const QJsonObject aux = call("status", {{"fresh", true}}, 20000)["aux_lost"].toObject();
+    if (devices) *devices = aux;
+    return std::max(aux["Mount"].toDouble(0), aux["Focuser"].toDouble(0));
+}
+
+void mailAlert(const QString& subject, const QString& body)
+{
+    if (!g_run.mail) return;
+    const QJsonObject r = Mail::send("[Origin] " + subject, body + "\n\nRun log: " + g_run.logPath + "\n");
+    note({{"alert_mail", r["ok"]}, {"subject", subject}, {"error", r["error"]}});
+}
+
+// Recover from a dead aux bus: one reboot a night (it costs the alignment, and on 4 Nov it did not help), then wait for someone to power-cycle the telescope, until `until`.
+// Returns "" when the mount answers again (the caller initializes and goes back to the target), else why not. A stop request ends the wait (g_run.stop).
+QString auxRecover(const QJsonObject& t, const QDateTime& until)
+{
+    QJsonObject dev; const double down = auxDownS(&dev);
+    runLog("aux_lost", {{"target", t["key"]}, {"devices", dev}, {"down_s", down}});
+    auto restored = [&]() { return call("status", {{"fresh", true}}, 20000)["connected"].toBool() && auxDownS() <= 0
+                                   && call("mount_status", {}, 15000)["mount"].toObject()["ErrorCode"].toInt(-1) == 0; };
+    if (g_run.auxReboots < 1 && g_run.reboots < 2) {
+        ++g_run.auxReboots; ++g_run.reboots;
+        mailAlert("aux bus down: rebooting", QString("The telescope's mount%1 stopped answering over its internal aux bus %2 min ago (link and camera still up). Rebooting it once.")
+                                                   .arg(dev.contains("Focuser") ? " and focuser" : "").arg(int(down / 60)));
+        const QJsonObject rb = call("reboot", {{"reason", "aux bus down"}}, 30000);
+        runLog("telescope_reboot", {{"target", t["key"]}, {"ok", rb["ok"]}, {"error", rb["error"]}, {"count", g_run.reboots}, {"why", "aux bus down"}});
+        if (rb["ok"].toBool()) {
+            sleepMs(15000);
+            const bool up = waitLink(300, 120);
+            sleepMs(60000);                                                      // long enough for the devices to answer, or for -809 to come back
+            const bool ok = up && restored();
+            runLog("aux_after_reboot", {{"target", t["key"]}, {"link", up}, {"restored", ok}});
+            if (ok) return QString();
+        }
+    }
+    mailAlert("aux bus down: power-cycle the telescope", QString("The mount still does not answer over the telescope's aux bus (a reboot %1). It cannot track, park or initialize until the telescope is "
+                                                                 "switched off and on at its power button. The run waits for that until %2 and then carries on by itself.")
+                                                             .arg(g_run.auxReboots ? "did not clear it" : "was not possible").arg(until.toTimeZone(g_run.zone).toString("HH:mm")));
+    g_run.current = QJsonObject{{"waiting", "aux bus down: power-cycle the telescope"}}; writeRunState("waiting");
+    while (QDateTime::currentDateTimeUtc() < until) {
+        for (int s = 0; s < 4; ++s) { sleepMs(15000); Control k; if (takeControl(&k) && k.action == "stop") { g_run.stop = true; return "stopped"; } }
+        if (restored()) { sleepMs(30000); if (restored()) { runLog("aux_restored", {{"target", t["key"]}}); return QString(); } }   // twice: a telescope just switched on answers before its aux devices do
+    }
+    return "the mount did not answer again before dawn";
+}
+
 // Skipped: this block could not be observed (see g_run.lastSkip), but the night goes on with the next one. Failed: something that needs a person; the run ends.
 enum class RunResult { Done, Failed, Rain, Stopped, Skipped };
 
@@ -1133,6 +1188,11 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
     runLog("start", {{"target", t["key"]}, {"exposure_s", exposure}, {"iso", iso}, {"until", endUtc.toTimeZone(g_run.zone).toString("HH:mm")}, {"backup", depth > 0}, {"override", isOverride}});
     const QJsonObject outer = g_run.current;
     g_run.current = {{"key", t["key"]}, {"name", t["name"]}, {"ra_hours", t["ra_hours"]}, {"dec_deg", t["dec_deg"]}, {"until", endUtc.toString(Qt::ISODate)}, {"override", isOverride}, {"backup", depth > 0}}; writeRunState();
+    if (auxDownS() >= 90) {
+        const QString bad = auxRecover(t, g_run.darkEnd);
+        if (g_run.stop) { g_run.current = outer; return RunResult::Stopped; }
+        if (!bad.isEmpty()) { g_run.failReason = "aux bus: " + bad + "; power-cycle the telescope"; g_run.current = outer; return RunResult::Failed; }
+    }
     // the telescope must be initialised before a goto: repair it here (raise the tube, initialize; wait for stars while the block lasts) rather than fail the night
     {
         const QString bad = waitForReady(t, endUtc);
@@ -1232,6 +1292,15 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
             continue;
         }
         failures = 0;
+        if (auxDownS() >= 90) {
+            call("sequence", {{"action", "stop"}, {"reason", "aux bus down"}}); call("stack", {}, 60000);
+            const QString bad = auxRecover(t, g_run.darkEnd);
+            g_run.current = outer;
+            if (g_run.stop) return RunResult::Stopped;
+            if (!bad.isEmpty()) { g_run.failReason = "aux bus: " + bad + "; power-cycle the telescope"; return RunResult::Failed; }
+            if (QDateTime::currentDateTimeUtc() < endUtc && QDateTime::currentDateTimeUtc() < g_run.darkEnd) { runLog("resume", {{"target", t["key"]}, {"after", "aux bus recovery"}}); return runTarget(t, endUtc, depth, isOverride); }
+            return RunResult::Done;
+        }
         const QJsonObject s = st["status"].toObject();
         const QJsonObject ev = call("events", {{"since", double(seq)}}, 20000);
         if (ev["ok"].toBool()) { seq = qint64(ev["next"].toDouble()); for (const QJsonValue& v : ev["events"].toArray()) if (v.toObject()["kind"].toString() == "sequence_obstructed") obstructed = true; }
@@ -1416,7 +1485,7 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
 
     g_run = RunState();
     g_run.o = o; g_run.zone = QTimeZone(o.timeZone.toUtf8()); g_run.darkEnd = parseZ(S["dark_end"].toString());
-    g_stopForRain = p.v.contains("stop-for-rain");
+    g_stopForRain = p.v.contains("stop-for-rain"); g_run.mail = p.v.contains("mail");
     g_run.maxExposure = num(p, c, "max-exposure"); g_run.iso = int(num(p, c, "iso")); g_run.patienceMin = num(p, c, "cloud-patience"); g_run.giveUpMin = num(p, c, "give-up");
     g_run.host = p.v.contains("connect") ? str(p, "connect") : call("status", {}, 10000)["host"].toString();
     g_run.logPath = originDataDir() + "/run_" + S["night"].toString().remove('-') + ".jsonl";

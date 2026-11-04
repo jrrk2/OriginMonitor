@@ -637,6 +637,7 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
                 last[k] = it.value();
         }
         r["last"] = last;
+        if (const QJsonObject aux = m_backend->auxLostDevices(); !aux.isEmpty()) r["aux_lost"] = aux;      // {device: seconds down}
         return r;
     }
 

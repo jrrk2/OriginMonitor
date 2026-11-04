@@ -861,8 +861,9 @@ void OriginBackend::onTextMessageReceived(const QString &message)
         const QString lower = (cmd + " " + type + " " + state).toLower();
         const QString src = obj["Source"].toString();
         // -802 is the telescope computer failing to read a device over its internal aux bus (one garbled reply, 30 Oct 2026 06:30, the next poll fine):
-        // report it as a lost link and its recovery, once each, instead of an error per poll
-        if (errCode == -802) {
+        // report it as a lost link and its recovery, once each, instead of an error per poll. -809 is a device not answering at all (4 Nov 2026 00:50: Mount, Focuser
+        // and Environment timed out for 4 h 40 min; System Reboots did not clear it, a power cycle did): the run reads these from "status" and stops treating the frames as cloud
+        if (errCode == -802 || errCode == -809) {
             if (!m_auxLost.contains(src)) {
                 m_auxLost.insert(src, QDateTime::currentDateTimeUtc());
                 recordEvent("aux_lost", QString("lost communication with aux device %1 (%2: %3)").arg(src, cmd, errMsg), obj);

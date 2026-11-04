@@ -150,6 +150,8 @@ public:
     int currentISO() const { return m_currentISO; }
     int currentBinning() const { return m_currentBinning; }
     QString connectedHost() const { return m_connectedHost; }
+    // devices whose aux link is down (-802/-809 until a clean reply), with seconds since they stopped answering
+    QJsonObject auxLostDevices() const { QJsonObject o; for (auto it = m_auxLost.constBegin(); it != m_auxLost.constEnd(); ++it) o[it.key()] = double(it.value().secsTo(QDateTime::currentDateTimeUtc())); return o; }
     int connectedPort() const { return m_connectedPort; }
     int lastSequenceId() const { return m_nextSequenceId - 1; }   // ID of the most recently sent command
     double radiansToHours(double radians);
@@ -209,7 +211,7 @@ private:
     
     // Pending operations
     QMap<int, QString> m_pendingCommands;
-    QHash<QString, QDateTime> m_auxLost;      // device (Source) -> when it first answered -802, until it answers cleanly again
+    QHash<QString, QDateTime> m_auxLost;      // device (Source) -> when it first answered -802 or -809, until it answers cleanly again
     QString m_currentImagingSession;
     QFile* m_logFile;
     QTextStream* m_logStream;
