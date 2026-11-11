@@ -2534,7 +2534,10 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
         if (!call("status", {}, 10000)["connected"].toBool()) return idle("telescope does not answer (not put out, or off)");
     }
     if (!initialised() || st["need_real_init"].toBool()) {
-        if (st["init_attempts"].toInt() >= 3) return idle("mount will not align (3 attempts); needs a look");
+        // satellite cloud overhead (5 km): the night's attempt limits below are lifted while it is clear, so cloudy-evening failures cannot cost a clear spell after midnight
+        const QJsonObject sat = Weather::satelliteCloud(o.site.latDeg, o.site.lonDeg, originDataDir());
+        const bool satClear = sat["ok"].toBool() && sat["cover_5km"].toDouble() < 0.3, satCloudy = sat["ok"].toBool() && sat["cover_5km"].toDouble() >= 0.7;
+        if (st["init_attempts"].toInt() >= (satClear ? 6 : 3)) return idle(QString("mount will not align (%1 attempts); needs a look").arg(st["init_attempts"].toInt()));
         // Before the first init: raise the tube if the tilt sensor says it is low (the GUI's unpark, at most 3 times a night), then take a frame and plate-solve it.
         // The solve proves there are stars to align on and tells us where the tube points; it is advisory for now: after 2 failed solves the initialize is tried anyway.
         {
@@ -2586,10 +2589,11 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
         if (!r["ok"].toBool() || r["outcome"].toString().toLower() == "failed") {
             // a failed initialize can leave the tube low, looking into the trees (37 deg, 30 Oct 2026): raise it now so the next try sees sky
             { const QJsonObject u = raiseTubeIfLow(); if (u["raised"].toBool()) note({{"autorun", "tube left low by the failed initialize; raised"}, {"result", u}}); }
-            if (starFailure(r)) {
-                // no stars (cloud, twilight, or trees in the way): that is weather, not a mount fault, so it does not use up one of the 3 attempts (at most 12 such tries a night)
+            if (starFailure(r) || satCloudy) {
+                // no stars (cloud, twilight, or trees in the way): that is weather, not a mount fault, so it does not use up one of the 3 attempts (at most 12 such tries a night,
+                // more while the satellite shows it clear overhead). Any failure under satellite cloud counts as weather too (the firmware's -36 "Failed to find focus!" under overcast)
                 st["init_attempts"] = st["init_attempts"].toInt() - 1; st["star_fails"] = st["star_fails"].toInt() + 1; save();
-                if (st["star_fails"].toInt() > 12) return idle("the alignment found too few stars 12 times tonight; giving up until the sky clears (touch nothing; it will keep trying tomorrow)");
+                if (st["star_fails"].toInt() > (satClear ? 24 : 12)) return idle("the alignment found too few stars 12 times tonight; waiting for the satellite to show clear sky overhead");
                 return idle("initialize: not enough stars for alignment (cloud?); will retry next tick");
             }
             if (str(p, "init-fallback", "off") != "fake-init") return idle("initialize failed: " + r["error"].toString() + r["summary"].toString() + " (will retry; --init-fallback fake-init is off)");
