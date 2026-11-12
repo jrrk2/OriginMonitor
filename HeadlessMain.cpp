@@ -2520,7 +2520,8 @@ QString stateDir() { return qEnvironmentVariable("ORIGIN_HOSTALIGN_DIR", QDir::h
 // rates for moves under encoder feedback and their speeds, deg/s (PI.N.S., measured 2026-11-07): {rate, speed, used above this error}
 struct Rung { int rate; double speed, above; };
 const Rung kLadder[] = {{9, 4.0, 8}, {8, 2.0, 3}, {7, 0.97, 0.8}, {6, 0.27, 0}};
-const double kTolerance = 0.05;      // deg
+const double kTolerance = 0.05;      // deg, for the reserve rate ladder
+const double kArrived = 0.5;         // deg: a GotoAltAzm this close has arrived; the plate solve, not the encoders, says exactly where
 
 bool encoders(Ctx& c, double* e0, double* e1, QJsonObject* mountOut = nullptr)
 {
@@ -2546,6 +2547,46 @@ bool step(double error, int* rate, double* secs)
 void halt() { call("slew_rates", {{"alt", 0}, {"azm", 0}}, 8000); sleepMs(300); call("slew_rates", {{"alt", 0}, {"azm", 0}}, 8000); }
 
 // Both axes at once by timed rate moves, checked against the encoders, up to 10 rounds. Azimuth is planned in the cable count, never across the far side.
+QString ensureFirmwareReady(const Astro::Site& site);
+
+// The coarse part of a move by the firmware's own GotoAltAzm, in its (fake-initialised) frame = encoders + two constants read from the mount now. Legs of at
+// most 120 deg of azimuth in the direction the cables need, so the firmware's shortest way is the way wanted; the encoders are polled through each leg so the
+// cable count follows the move. Tracking is switched off at the end of each leg. Returns an error; the caller then finishes (or does the whole move) by rates.
+QString firmwareGoto(Ctx& c, double target0, double enc1)
+{
+    QJsonObject m = call("mount_status", {{"fresh", true}}, 15000)["mount"].toObject();
+    if (!m.contains("Alt") || !m.contains("Azm")) {
+        if (const QString bad = ensureFirmwareReady(c.site); !bad.isEmpty()) return bad;
+        m = call("mount_status", {{"fresh", true}}, 15000)["mount"].toObject();
+        if (!m.contains("Alt") || !m.contains("Azm")) return "the firmware reports no Alt/Azm after a fake initialisation";
+    }
+    const double altOff = HostAlign::wrap180((m["Alt"].toDouble() - m["Enc1"].toDouble()) * 180.0 / M_PI);
+    const double azOff = (m["Azm"].toDouble() - m["Enc0"].toDouble()) * 180.0 / M_PI;
+    for (int leg = 0; leg < 4; ++leg) {
+        double now0, now1;
+        if (!encoders(c, &now0, &now1)) return "no encoder reading";
+        const double d = target0 - c.wrap.turned();
+        if (std::fabs(d) < kArrived && std::fabs(enc1 - now1) < kArrived) return QString();
+        const double stepDeg = std::clamp(d, -120.0, 120.0);
+        const double alt = enc1 + altOff, az = std::fmod(std::fmod(now0 + stepDeg + azOff, 360.0) + 360.0, 360.0);
+        const QJsonObject r = call("goto_altaz", {{"alt_deg", alt}, {"az_deg", az}, {"wait", false}}, 15000);
+        if (!r["ok"].toBool()) return "GotoAltAzm: " + r["error"].toString();
+        QElapsedTimer t; t.start(); bool started = false;
+        while (t.elapsed() < 150000) {
+            sleepMs(400);
+            double a, b; encoders(c, &a, &b);                           // keeps the cable count through the move
+            const QJsonObject cur = call("mount_status", {{"fresh", true}}, 15000)["mount"].toObject();
+            if (!cur["IsGotoOver"].toBool()) started = true;
+            if ((started || t.elapsed() > 8000) && cur["IsGotoOver"].toBool()) break;
+            if (std::fabs(c.wrap.turned()) > c.wrap.limit() + 10) { halt(); return QString("the firmware's goto took the cables %1 deg from neutral: stopped").arg(c.wrap.turned(), 0, 'f', 0); }
+        }
+        call("tracking", {{"enabled", false}}, 10000);
+        sleepMs(800);
+        if (std::fabs(d) <= 120) break;
+    }
+    return QString();
+}
+
 QString moveTo(Ctx& c, double enc0, double enc1)
 {
     double now0, now1;
@@ -2556,6 +2597,21 @@ QString moveTo(Ctx& c, double enc0, double enc1)
         const Astro::AltAz to = c.cal.model.toSky(enc0, enc1); const QDateTime t = now();
         const Astro::AltAz sun = Astro::altAz(Astro::sunPosition(t), c.site, t);
         if (HostAlign::separationDeg(to.alt, to.az, sun.alt, sun.az) < 30) return QString("refusing to aim within 30 deg of the Sun (alt %1 az %2)").arg(to.alt, 0, 'f', 0).arg(to.az, 0, 'f', 0);
+    }
+    // Moves are the firmware's GotoAltAzm (within 0.001 deg on the encoders, 12 Nov 2026), checked against the encoders and repeated once if more than kArrived out. The timed
+    // rate ladder below is kept in reserve: it runs only if GotoAltAzm fails or misses twice, or with ORIGIN_HOSTALIGN_RATE_MOVES=1.
+    if (qEnvironmentVariable("ORIGIN_HOSTALIGN_RATE_MOVES") != "1") {
+        QString g;
+        for (int tryNo = 0; tryNo < 2; ++tryNo) {
+            g = firmwareGoto(c, target0, enc1);
+            if (!g.isEmpty()) break;
+            if (!encoders(c, &now0, &now1)) { g = "no encoder reading after GotoAltAzm"; break; }
+            // the exact position is the plate solve's (each calibration point, and --centre for gotos): the encoders need only show that the goto arrived
+            const double m0 = std::fabs(target0 - c.wrap.turned()), m1 = std::fabs(enc1 - now1);
+            if (m0 < kArrived && m1 < kArrived) return QString();
+            g = QString("GotoAltAzm ended %1 / %2 deg from the target").arg(target0 - c.wrap.turned(), 0, 'f', 3).arg(enc1 - now1, 0, 'f', 3);
+        }
+        note({{"hostalign", "GotoAltAzm move did not arrive; finishing by rates (reserve)"}, {"why", g}});
     }
     for (int attempt = 0; attempt < 10; ++attempt) {
         if (!encoders(c, &now0, &now1)) return "lost the encoder reading during a move";
@@ -2587,15 +2643,21 @@ QString moveTo(Ctx& c, double enc0, double enc1)
         .arg(target0, 0, 'f', 2).arg(enc1, 0, 'f', 2).arg(c.wrap.turned(), 0, 'f', 2).arg(now1, 0, 'f', 2);
 }
 
-// A frame here, plate-solved: the encoders (read after the frame, the mount being still) against the solved apparent alt/az at mid-exposure.
+// A frame here, plate-solved: the encoders at mid-exposure against the solved apparent alt/az then. The encoders are read just before and just after the
+// frame and interpolated: the firmware may still be tracking (if EnableTracking was refused), and the solve takes some seconds after the exposure.
 QJsonObject measure(Ctx& c, double exposure, int iso, HostAlign::Point* out, double* raDeg = nullptr, double* decDeg = nullptr)
 {
-    const QDateTime t0 = HA::now();
+    double a0, a1, e0, e1;
+    if (!encoders(c, &a0, &a1)) return failure("no encoder reading");
+    const QDateTime ta = HA::now(), t0 = ta;
     const QJsonObject s = call("solve", {{"exposure", exposure}, {"iso", iso}, {"binning", 1}, {"snapshot_timeout", int(exposure) + 60}}, int(exposure * 1000) + 240000);
-    double e0, e1;
     if (!encoders(c, &e0, &e1)) return failure("no encoder reading");
+    const QDateTime tb = HA::now();
     if (!s["solved"].toBool()) { QJsonObject r = failure("no solve: " + s["error"].toString()); r["enc0"] = e0; r["enc1"] = e1; return r; }
     const QDateTime mid = t0.addMSecs(qint64(exposure * 500) + 1500);      // the snapshot starts a second or two after the request
+    const double span = ta.msecsTo(tb), f = span > 0 ? std::clamp(ta.msecsTo(mid) / span, 0.0, 1.0) : 1.0;
+    const double d0 = HostAlign::wrap180(e0 - a0), d1 = HostAlign::wrap180(e1 - a1);
+    e0 = HostAlign::wrap180(a0 + f * d0); e1 = HostAlign::wrap180(a1 + f * d1);
     const double ra = s["ra_deg"].toDouble(), dec = s["dec_deg"].toDouble();
     const Astro::AltAz h = HostAlign::toHorizon(ra, dec, mid, c.site, true, c.pressure, c.tempC);
     *out = {e0, e1, h.alt, h.az, mid};
@@ -2608,9 +2670,12 @@ QString ensureFirmwareReady(const Astro::Site& site)
 {
     const QJsonObject tc = call("status", {{"fresh", true}}, 10000)["last"].toObject()["TaskController/GetStatus"].toObject();
     if (tc["IsReady"].toBool()) return QString();
-    note({{"hostalign", "fake initialisation, so that the firmware takes tracks"}});
+    note({{"hostalign", "fake initialisation, so that the firmware takes GotoAltAzm moves and tracks"}});
     const QJsonObject r = call("initialize", {{"fake", true}, {"lat_deg", site.latDeg}, {"lon_deg", site.lonDeg}, {"wait", true}, {"timeout", 180}}, 240000);
     if (!r["ok"].toBool() && r["outcome"].toString() != "succeeded") return "fake initialisation failed: " + (r["summary"].toString().isEmpty() ? r["error"].toString() : r["summary"].toString());
+    // the initialisation leaves the mount tracking (18.6"/s in azimuth, 12 Nov 2026): off at once, so nothing moves that the host did not ask for
+    const QJsonObject off = call("tracking", {{"enabled", false}}, 10000);
+    note({{"hostalign", off["ok"].toBool() ? "tracking switched off after the fake initialisation" : "could not switch tracking off after the fake initialisation"}, {"result", off}});
     return QString();
 }
 
@@ -2732,8 +2797,19 @@ QJsonObject cmdHostAlign(const Parsed& p, const Cmd& c)
         return out;
     }
 
-    if (const QString bad = HA::ensureFirmwareReady(x.site); !bad.isEmpty()) return failure(bad);
+    // calibrate, goto and focus need no firmware alignment: positions come from plate solves. Moves are GotoAltAzm, which fake-initialises the firmware on
+    // first use (firmwareGoto); a track needs it too, because TargetTrack paths are in its frame
+    if (action == "track") { if (const QString bad = HA::ensureFirmwareReady(x.site); !bad.isEmpty()) return failure(bad); }
     if (!HA::encoders(x, &e0, &e1, &mount)) return failure("no encoder reading");
+    // An initialisation (real or fake) leaves the firmware tracking (18.6"/s in azimuth, 12 Nov 2026), which moves the encoders under rate moves and solves.
+    // Mount/EnableTracking {"Value": false} stops it (StopTracking, a zero Slew and rate moves do not); a track turns it back on through TrackMovingTarget.
+    // measure() also interpolates the encoders to mid-exposure, in case it could not be stopped.
+    if (action != "track" && mount["IsTracking"].toBool()) {
+        const QJsonObject r = call("tracking", {{"enabled", false}}, 10000);
+        note({{"hostalign", r["ok"].toBool() ? "firmware tracking stopped" : "could not stop the firmware's tracking; encoders interpolated to mid-exposure"}, {"result", r}});
+        ::sleepMs(500);
+        if (!HA::encoders(x, &e0, &e1, &mount)) return failure("no encoder reading");
+    }
 
     if (action == "calibrate") {
         QJsonArray log;

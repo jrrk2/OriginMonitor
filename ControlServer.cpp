@@ -580,7 +580,7 @@ QJsonObject ControlServer::handle(const QJsonObject& req)
     }
     if (cmd == "commands" || cmd == "help")
         return QJsonObject{{"ok", true}, {"note", "server commands; the OriginHeadless CLI has a fuller catalogue: OriginHeadless commands"},
-                           {"commands", QJsonArray{"ping", "connect", "status", "manual", "auto", "set", "snapshot", "mount_status", "goto", "focus_status", "analysis", "events", "target", "stack",
+                           {"commands", QJsonArray{"ping", "connect", "status", "manual", "auto", "set", "snapshot", "mount_status", "goto", "goto_altaz", "tracking", "slew_rates", "focus_status", "analysis", "events", "target", "stack",
                                                    "sky_map", "preview", "monitor", "focuser_status", "focuser_move", "focuser_settings", "filter", "initialize", "unpark", "solve", "frame_stats", "sky_note", "sequence", "cancel_capture", "reboot", "send", "cache", "quit"}}};
     int ttl = cacheTtlMs(cmd);
     if (cmd == "target" && req.contains("name")) ttl = 0;                       // that form changes the target
@@ -808,6 +808,46 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
 
     // Mount/Slew at signed firmware rates (-9..9, rate 9 about 4 deg/s): {"alt": n, "azm": n}; {"alt": 0, "azm": 0} stops (a running goto or track carries on).
     // Host alignment (hostalign) moves the mount by these, timed and checked against the encoders, instead of firmware gotos.
+    // Sidereal tracking on or off: {"enabled": false}. Mount/EnableTracking {"Value": bool} (found 12 Nov 2026 on firmware 1.5.6286: StopTracking is an
+    // "Unknown command", EnableTracking answers -801 to any other parameter name). An initialisation leaves the firmware tracking, which moves the encoders under
+    // the host's rate moves and solves; hostalign calibrate/goto switch it off first. Rate moves do not turn it back on.
+    // Absolute alt/az goto in the firmware's frame (Mount/GotoAltAzm, radians): {"alt_deg", "az_deg", "wait": true, "timeout": 120, "keep_tracking": false}.
+    // Needs the firmware initialised (a fake initialisation will do: its frame is then the encoders plus two constants). A goto leaves the mount tracking, so
+    // tracking is switched off when it ends (EnableTracking Value false) unless keep_tracking. With "wait": false it returns after the acknowledgement and the
+    // caller polls IsGotoOver (hostalign does, to keep its cable count through the move).
+    if (cmd == "goto_altaz") {
+        if (!m_backend->isConnected()) return fail("not connected");
+        if (m_seq->active()) return fail("a sequence is running; stop it first");
+        if (!req.contains("alt_deg") || !req.contains("az_deg")) return fail("need 'alt_deg' and 'az_deg'");
+        const double alt = req["alt_deg"].toDouble(), az = std::fmod(std::fmod(req["az_deg"].toDouble(), 360.0) + 360.0, 360.0);
+        if (alt < -5 || alt > 89) return fail("alt_deg must be -5..89 (the firmware's frame)");
+        m_backend->sendCommand("GotoAltAzm", "Mount", QJsonObject{{"Alt", alt * M_PI / 180.0}, {"Azm", az * M_PI / 180.0}});
+        const QJsonObject ack = waitResponse(m_backend->lastSequenceId(), 5000);
+        if (ack.isEmpty()) return fail("no acknowledgement from GotoAltAzm");
+        if (ack["ErrorCode"].toInt() != 0) return fail("GotoAltAzm rejected: " + ack["ErrorMessage"].toString());
+        if (!req["wait"].toBool(true)) return QJsonObject{{"ok", true}, {"waiting", false}};
+        QElapsedTimer t; t.start(); bool started = false; QJsonObject cur;
+        while (t.elapsed() < req["timeout"].toInt(120) * 1000) {
+            QEventLoop loop; QTimer::singleShot(500, &loop, &QEventLoop::quit); loop.exec();
+            cur = queryMount(3000);
+            if (cur.isEmpty()) continue;
+            if (!cur["IsGotoOver"].toBool()) started = true;
+            if ((started || t.elapsed() > 8000) && cur["IsGotoOver"].toBool()) {
+                if (!req["keep_tracking"].toBool(false)) { m_backend->sendCommand("EnableTracking", "Mount", QJsonObject{{"Value", false}}); waitResponse(m_backend->lastSequenceId(), 5000); }
+                return QJsonObject{{"ok", true}, {"mount", cur}, {"elapsed_ms", (int)t.elapsed()}};
+            }
+        }
+        return QJsonObject{{"ok", false}, {"error", "GotoAltAzm did not complete"}, {"mount", cur}};
+    }
+    if (cmd == "tracking") {
+        if (!m_backend->isConnected()) return fail("not connected");
+        if (m_seq->active()) return fail("a sequence is running; stop it first");
+        const bool on = req["enabled"].toBool(false);
+        m_backend->sendCommand("EnableTracking", "Mount", QJsonObject{{"Value", on}});
+        const QJsonObject ack = waitResponse(m_backend->lastSequenceId(), req["timeout"].toInt(5) * 1000);
+        if (ack.isEmpty()) return fail("no acknowledgement");
+        return QJsonObject{{"ok", ack["ErrorCode"].toInt() == 0}, {"enabled", on}, {"error", ack["ErrorMessage"].toString()}};
+    }
     if (cmd == "slew_rates") {
         if (!m_backend->isConnected()) return fail("not connected");
         if (m_seq->active()) return fail("a sequence is running; stop it first");
