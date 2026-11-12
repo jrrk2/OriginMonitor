@@ -33,7 +33,8 @@ SOURCES += \
     Image16.cpp \
     FlatAnalyzer.cpp \
     SkyMonitor.cpp \
-    Astro.cpp
+    Astro.cpp \
+    HostAlign.cpp
 
 HEADERS += \
     Planner.hpp \
@@ -46,6 +47,7 @@ HEADERS += \
     Image16.hpp \
     SkyMonitor.hpp \
     Astro.hpp \
+    HostAlign.hpp \
     CoordinateUtils.hpp \
     MessierCatalog.hpp \
     AllSkyStars.hpp \

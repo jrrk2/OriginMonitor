@@ -806,6 +806,19 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
         return QJsonObject{{"ok", ack["ErrorCode"].toInt() == 0}, {"ack", ack}, {"points", pts.size()}, {"error", ack["ErrorMessage"].toString()}};
     }
 
+    // Mount/Slew at signed firmware rates (-9..9, rate 9 about 4 deg/s): {"alt": n, "azm": n}; {"alt": 0, "azm": 0} stops (a running goto or track carries on).
+    // Host alignment (hostalign) moves the mount by these, timed and checked against the encoders, instead of firmware gotos.
+    if (cmd == "slew_rates") {
+        if (!m_backend->isConnected()) return fail("not connected");
+        if (m_seq->active()) return fail("a sequence is running; stop it first");
+        const int alt = req["alt"].toInt(0), azm = req["azm"].toInt(0);
+        if (std::abs(alt) > 9 || std::abs(azm) > 9) return fail("rates are -9..9");
+        m_backend->sendCommand("Slew", "Mount", QJsonObject{{"AltRate", alt}, {"AzmRate", azm}});
+        const QJsonObject ack = waitResponse(m_backend->lastSequenceId(), req["timeout"].toInt(5) * 1000);
+        if (ack.isEmpty()) return fail("no acknowledgement from Slew");
+        return QJsonObject{{"ok", ack["ErrorCode"].toInt() == 0}, {"error", ack["ErrorMessage"].toString()}};
+    }
+
     if (cmd == "send") {
         if (!m_allowRaw) return fail("raw commands disabled (start with --control-raw)");
         if (!m_backend->isConnected()) return fail("not connected");
