@@ -129,7 +129,13 @@ struct Calibration {
  * form; c is the best position, a the HFR there. ok is false when the curve does not open upward, or its vertex lies outside the positions measured
  * (then extend the sweep toward edge: -1 lower, +1 higher).
  */
-struct FocusFit { bool ok = false; double best = 0, minHfr = 0, slope = 0, rms = 0, r2 = 0; int edge = 0; QString why; };
+struct FocusFit { bool ok = false; double best = 0, minHfr = 0, slope = 0, rms = 0, r2 = 0; int edge = 0; QString why;
+                  double hypA = 0, hypB = 0, hypP = 0, hypR2 = 0;                    // NINA hyperbola y = a cosh(asinh((p - x) / b))
+                  double quadA = 0, quadB = 0, quadC = 0, quadBest = 0, quadMin = 0, quadR2 = 0; };   // NINA quadratic y = A x^2 + B x + C
 FocusFit fitHyperbola(const QList<double>& pos, const QList<double>& hfr);
+// NINA's autofocus fits (PI.N.S. NINA.WPF.Base/Utility/AutoFocus, MPL-2.0): HyperbolicFitting (a, b, p by a shrinking grid search minimising the error scaled
+// by each point's HFR scatter) and QuadraticFitting (least squares weighted 1/err^2). best/minHfr are the hyperbola's, with the edge checks of fitHyperbola.
+FocusFit fitFocusNina(const QList<double>& pos, const QList<double>& hfr, const QList<double>& err);
+double hyperbolaHfr(double x, double a, double b, double p);
 
 } // namespace HostAlign

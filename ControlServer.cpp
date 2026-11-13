@@ -325,10 +325,20 @@ QJsonObject ControlServer::doInitialize(const QJsonObject& req)
 // luminance (ADU, 16-bit), the saturated fraction, background and noise, the stars the finder sees, and the sky rate (ADU/s above the black level: the
 // twilight brightness, which is what the exposure has to follow). "verdict": ok | too_bright | too_short | few_stars | unreadable, with a suggested exposure that puts the
 // sky about 6000 ADU above black (never more than maxExposureS).
+// The limits (maxExposureS, the too_short test) are in ISO 800 seconds: a frame's exposure counts as seconds x ISO/800 (ISOSPEED from its FITS header), so
+// 0.5 s at ISO 6400 is judged as 4 s at ISO 800. The suggested exposure stays in real seconds at the frame's own ISO.
 QJsonObject ControlServer::frameStats(const QString& path, double exposureS, int bins, double maxExposureS, double targetAdu)
 {
     QFile f(path); if (!f.open(QIODevice::ReadOnly)) return QJsonObject{{"ok", false}, {"verdict", "unreadable"}, {"error", "cannot open " + path}};
-    const SkyFrame F = analyseFrame(f.readAll());
+    const QByteArray raw = f.readAll();
+    int iso = 800;
+    for (int i = 0; i + 80 <= raw.size() && i < 2880 * 4; i += 80) {                // FITS header cards
+        const QByteArray card = raw.mid(i, 80);
+        if (card.startsWith("ISOSPEED=")) { bool ok = false; const int v = card.mid(10, 20).trimmed().toInt(&ok); if (ok && v > 0) iso = v; break; }
+        if (card.startsWith("END ")) break;
+    }
+    const double isoScale = iso / 800.0, effExposureS = exposureS * isoScale;
+    const SkyFrame F = analyseFrame(raw);
     if (!F.valid || F.lum.empty()) return QJsonObject{{"ok", false}, {"verdict", "unreadable"}, {"error", F.note.isEmpty() ? "not a raw 16-bit FITS frame" : F.note}};
     std::vector<float> v = F.lum; std::sort(v.begin(), v.end());
     auto pct = [&](double q) { return double(v[std::min(v.size() - 1, size_t(q * (v.size() - 1)))]); };
@@ -340,21 +350,21 @@ QJsonObject ControlServer::frameStats(const QString& path, double exposureS, int
     const StreakInfo streaks = streakInfo(F);
     double starRadius = 0; { std::vector<float> h; for (size_t i = 0; i < F.stars.size() && i < 30; ++i) h.push_back(F.stars[i].hfr); if (!h.empty()) { std::sort(h.begin(), h.end()); starRadius = h[h.size() / 2]; } }
     const double skyRate = std::max(0.0, F.background - black) / std::max(exposureS, 1e-6);
-    const double suggest = std::clamp(skyRate > 0 ? targetAdu / skyRate : maxExposureS, 1e-5, maxExposureS);
+    const double suggest = std::clamp(skyRate > 0 ? targetAdu / skyRate : maxExposureS / isoScale, 1e-5, maxExposureS / isoScale);
     QString verdict = "ok", why;
     double suggestOut = suggest;
     if (satFrac > 0.02 || F.background > 0.7 * fs) {
         verdict = "too_bright"; why = QString("saturated: %1% of the frame is at full scale, median %2 ADU").arg(satFrac * 100, 0, 'f', 1).arg(F.background, 0, 'f', 0);
         if (satFrac > 0.5) suggestOut = std::max(1e-5, exposureS / 30);      // clipped: the true brightness is hidden, so step down hard instead of trusting the rate
     }
-    else if (int(F.stars.size()) < 12 && F.background - black > 12000 && exposureS > 2e-5) { verdict = "too_bright"; why = QString("sky is %1 ADU above black and no stars show; a shorter exposure may reveal them").arg(F.background - black, 0, 'f', 0); }
+    else if (int(F.stars.size()) < 12 && F.background - black > 12000 && effExposureS > 2e-5) { verdict = "too_bright"; why = QString("sky is %1 ADU above black and no stars show; a shorter exposure may reveal them").arg(F.background - black, 0, 'f', 0); }
     else if (int(F.stars.size()) < 12) {
-        if (exposureS < maxExposureS * 0.9 && F.background - black < 2500) { verdict = "too_short"; why = QString("only %1 stars and the sky is just %2 ADU above black").arg(F.stars.size()).arg(F.background - black, 0, 'f', 0); }
+        if (effExposureS < maxExposureS * 0.9 && F.background - black < 2500) { verdict = "too_short"; why = QString("only %1 stars and the sky is just %2 ADU above black").arg(F.stars.size()).arg(F.background - black, 0, 'f', 0); }
         else { verdict = "few_stars"; why = QString("only %1 stars (cloud, or the sky is still too bright for the stars)").arg(F.stars.size()); }
     }
     return QJsonObject{{"ok", true}, {"verdict", verdict}, {"why", why}, {"median_adu", std::round(F.background)}, {"noise_adu", std::round(F.noise * 10) / 10}, {"black_level", black},
                        {"percentiles", QJsonObject{{"p1", pct(0.01)}, {"p5", pct(0.05)}, {"p25", pct(0.25)}, {"p50", pct(0.5)}, {"p75", pct(0.75)}, {"p95", pct(0.95)}, {"p99", pct(0.99)}, {"max", double(v.back())}}},
-                       {"saturated_fraction", std::round(satFrac * 10000) / 10000}, {"stars", int(F.stars.size())}, {"stars_sigma10", strong}, {"star_radius_px", std::round(starRadius * 10) / 10}, {"streaks", QJsonObject{{"elongated", streaks.elongated}, {"coherence", std::round(streaks.coherence * 100) / 100}, {"angle_deg", std::round(streaks.angleDeg)}, {"trailed", streaks.trailed}}}, {"exposure_s", exposureS},
+                       {"saturated_fraction", std::round(satFrac * 10000) / 10000}, {"stars", int(F.stars.size())}, {"stars_sigma10", strong}, {"star_radius_px", std::round(starRadius * 10) / 10}, {"streaks", QJsonObject{{"elongated", streaks.elongated}, {"coherence", std::round(streaks.coherence * 100) / 100}, {"angle_deg", std::round(streaks.angleDeg)}, {"trailed", streaks.trailed}}}, {"exposure_s", exposureS}, {"iso", iso}, {"iso800_exposure_s", effExposureS},
                        {"sky_rate_adu_per_s", std::round(skyRate)}, {"suggested_exposure_s", suggestOut}, {"histogram", hist}};
 }
 
@@ -633,11 +643,13 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
         QJsonObject last;
         for (auto it = m_last.constBegin(); it != m_last.constEnd(); ++it) {
             const QString& k = it.key();
-            if (k == "Focuser/GetStatus" || k == "TaskController/GetStatus" || k == "Camera/GetCaptureParameters")
+            if (k == "Focuser/GetStatus" || k == "TaskController/GetStatus" || k == "Camera/GetCaptureParameters" || k == "Environment/GetStatus")
                 last[k] = it.value();
         }
         r["last"] = last;
+        if (last.contains("Environment/GetStatus")) r["ambient_c"] = last["Environment/GetStatus"].toObject()["AmbientTemperature"];   // the tube's air temperature: focus follows it (~+8.6 steps/deg C)
         if (const QJsonObject aux = m_backend->auxLostDevices(); !aux.isEmpty()) r["aux_lost"] = aux;      // {device: seconds down}
+        if (!m_backend->serialNumber().isEmpty()) r["serial"] = m_backend->serialNumber();                // the connected telescope's serial number
         return r;
     }
 

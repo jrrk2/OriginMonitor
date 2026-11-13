@@ -46,6 +46,11 @@ QJsonObject Sequencer::start(const QJsonObject& req)
     m_cMsg = connect(m_b, &OriginBackend::messageReceived, this, &Sequencer::onMessage);
     m_hfrWin.clear(); m_hfrBase = req["focus_baseline"].toDouble(0); m_hfrMedian = 0; m_driftRun = m_drifts = 0;
     m_driftRatio = req["focus_drift"].toDouble(1.15); m_focusWin = qBound(3, req["focus_window"].toInt(8), 50); m_focusPause = req["focus_pause"].toBool(false);
+    m_tweak = req["focus_tweak"].toBool(qEnvironmentVariable("ORIGIN_FOCUS_TWEAK", "1") == "1");      // on by default in this build (ORIGIN_FOCUS_TWEAK=0 to disable)
+    m_tweakStep = qBound(5, req["tweak_step"].toInt(25), 200); m_tweakFrames = qBound(2, req["tweak_frames"].toInt(4), 20); m_tweakMax = qBound(25, req["tweak_max"].toInt(150), 600);
+    m_tweakRatio = std::clamp(req["tweak_ratio"].toDouble(1.08), 1.01, 2.0);
+    m_tweakState = Tweak::Idle; m_tweakRun = m_tweakSkip = 0; m_tweaks = m_tweakMoves = 0; m_tweakSamples.clear(); m_tweakCooldownUntil = 0; m_tweakInfo = QJsonObject();
+    m_baseAmbient = std::nan(""); m_focPos = -1;
     m_auto = req["auto_exposure"].toBool(false); m_minExp = req["min_exposure"].toDouble(2); m_maxExp = req["max_exposure"].toDouble(60);
     m_latDeg = req["lat_deg"].toDouble(52.2054); m_targetEff = std::clamp(req["target_efficiency"].toDouble(0.94), 0.5, 0.99);
     m_readNoise = req["read_noise_adu"].toDouble(580); m_skyVarPerAdu = req["sky_var_per_adu"].toDouble(310); m_blackAdu = req["black_level"].toDouble(4985);
@@ -120,6 +125,7 @@ void Sequencer::onWatchdog()
 
 void Sequencer::onMessage(const QJsonObject& m)
 {
+    if (m["Source"].toString() == "Focuser" && m.contains("Position")) m_focPos = m["Position"].toInt();
     if (!m_active || m_outstanding <= 0) return;
     const QString src = m["Source"].toString(), cmd = m["Command"].toString(), type = m["Type"].toString();
     // the telescope refused a request (typically the early one, made while it is still saving the previous frame)
@@ -196,6 +202,15 @@ void Sequencer::onFocus(const QJsonObject& o)
         }
     }
     if (m_hfrBase > 0) { rec["focus_median_px"] = m_hfrMedian; rec["focus_ratio"] = m_hfrMedian / m_hfrBase; }
+    if (m_tweak) {
+        if (std::isnan(m_baseAmbient) && m_hfrBase > 0) m_baseAmbient = m_b->temperature();
+        if (m_tweakSkip > 0) { --m_tweakSkip; rec["focus_tweak"] = "skipped: exposed while the focuser moved"; }
+        else if (m_tweakState == Tweak::Measuring) { if (good && o["stars"].toInt() >= 30 && hfr > 0) { m_tweakSamples.append(hfr); rec["focus_tweak"] = QString("measuring %1 at %2").arg(m_tweakSamples.size()).arg(m_focPos); } }
+        else if (m_hfrBase > 0 && m_hfrWin.size() == m_focusWin && m_hfrMedian > m_hfrBase * m_tweakRatio) ++m_tweakRun; else m_tweakRun = 0;
+        if (m_focPos >= 0) rec["focuser"] = m_focPos;
+        tweakFocus();
+        if (m_tweakState == Tweak::Measuring || m_tweakSkip > 0) drift = false;     // the tweak is handling it: no drift stop meanwhile
+    }
     m_last = rec;
     QFile log(m_logPath);
     if (log.open(QIODevice::Append)) log.write(QJsonDocument(rec).toJson(QJsonDocument::Compact) + "\n");
@@ -221,6 +236,53 @@ void Sequencer::onFocus(const QJsonObject& o)
         if (m_state == State::Shooting) requestFrame();
         else m_probeTimer.start(m_probeMs);
     }
+}
+
+void Sequencer::moveFocuserTo(int position, const QString& why)
+{
+    if (position < 0) return;
+    m_b->sendCommand("MoveTo", "Focuser", QJsonObject{{"Value", position}});
+    ++m_tweakMoves;
+    m_tweakSkip = m_outstanding + m_awaitDl;              // frames already exposing or on their way down saw the move
+    m_tweakSamples.clear();
+    m_b->recordEvent("sequence_focus_tweak", QString("focuser %1 -> %2: %3").arg(m_focPos).arg(position).arg(why), QJsonObject{{"from", m_focPos}, {"to", position}});
+    m_focPos = position;
+}
+
+void Sequencer::tweakFocus()
+{
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (m_tweakState == Tweak::Idle) {
+        if (m_tweakRun < 3 || now < m_tweakCooldownUntil || m_focPos < 0) return;
+        // start: the soft median is the one to beat; first direction from the temperature since the baseline (best focus rises ~8.6 steps/deg C)
+        m_tweakRun = 0; ++m_tweaks;
+        m_tweakOrigin = m_tweakBestPos = m_focPos; m_tweakBestHfr = m_hfrMedian; m_tweakTried = 0;
+        const double dT = m_b->temperature() - m_baseAmbient;
+        m_tweakDir = (!std::isnan(dT) && dT > 0.3) ? 1 : -1;
+        m_tweakInfo = QJsonObject{{"origin", m_tweakOrigin}, {"origin_hfr", m_hfrMedian}, {"baseline", m_hfrBase}, {"ambient_change_c", std::isnan(dT) ? QJsonValue() : QJsonValue(dT)}, {"first_dir", m_tweakDir}};
+        m_tweakState = Tweak::Measuring;
+        moveFocuserTo(m_focPos + m_tweakDir * m_tweakStep, QString("median HFR %1 px is %2 x the baseline: trying %3").arg(m_hfrMedian, 0, 'f', 2).arg(m_hfrMedian / m_hfrBase, 0, 'f', 2).arg(m_tweakDir > 0 ? "up" : "down"));
+        return;
+    }
+    if (m_tweakSamples.size() < m_tweakFrames) return;
+    QList<double> v = m_tweakSamples; std::sort(v.begin(), v.end()); const double h = v[v.size() / 2];
+    const int here = m_focPos;
+    QJsonArray tried = m_tweakInfo["tried"].toArray(); tried.append(QJsonObject{{"position", here}, {"hfr", h}}); m_tweakInfo["tried"] = tried;
+    if (h < m_tweakBestHfr * 0.97) {                      // better: keep going this way
+        m_tweakBestHfr = h; m_tweakBestPos = here;
+        if (std::abs(here + m_tweakDir * m_tweakStep - m_tweakOrigin) <= m_tweakMax) { moveFocuserTo(here + m_tweakDir * m_tweakStep, QString("HFR %1 px at %2, better: one more step").arg(h, 0, 'f', 2).arg(here)); return; }
+    } else if (m_tweakBestPos == m_tweakOrigin && m_tweakTried == 0) {   // the first step was worse: try the other side of the start
+        m_tweakTried = 1; m_tweakDir = -m_tweakDir;
+        moveFocuserTo(m_tweakOrigin + m_tweakDir * m_tweakStep, QString("HFR %1 px at %2, worse: trying the other side").arg(h, 0, 'f', 2).arg(here));
+        return;
+    }
+    // done: settle on the best position found
+    if (m_focPos != m_tweakBestPos) moveFocuserTo(m_tweakBestPos, QString("done: best %1 px at %2").arg(m_tweakBestHfr, 0, 'f', 2).arg(m_tweakBestPos));
+    m_tweakInfo["best"] = m_tweakBestPos; m_tweakInfo["best_hfr"] = m_tweakBestHfr;
+    m_b->recordEvent("sequence_focus_tweaked", QString("live focus: %1 -> %2 (median HFR %3 -> %4 px)").arg(m_tweakOrigin).arg(m_tweakBestPos).arg(m_tweakInfo["origin_hfr"].toDouble(), 0, 'f', 2).arg(m_tweakBestHfr, 0, 'f', 2), m_tweakInfo);
+    m_tweakState = Tweak::Idle; m_tweakSamples.clear(); m_hfrWin.clear(); m_driftRun = 0;
+    // if focus could not bring it back near the baseline, the softness is seeing or cloud, not focus: leave it alone for 10 minutes
+    if (m_tweakBestHfr > m_hfrBase * m_tweakRatio) m_tweakCooldownUntil = now + 10 * 60 * 1000;
 }
 
 void Sequencer::adjustExposure(const QJsonObject& o)
@@ -256,7 +318,8 @@ QJsonObject Sequencer::status() const
     QJsonObject s{{"active", m_active}, {"state", m_state == State::Shooting ? "shooting" : "probing"}, {"frames", n}, {"good", m_good}, {"bad", m_bad},
                   {"bad_run", m_badRun}, {"probes", m_probes}, {"exposure", m_exposure}, {"iso", m_iso}, {"pipeline", m_pipeline}, {"early", m_early}, {"outstanding", m_outstanding}, {"last_verdict", m_lastVerdict},
                   {"log", m_logPath}, {"stop_reason", m_stopReason}, {"last", m_last},
-                  {"focus", QJsonObject{{"baseline_px", m_hfrBase}, {"median_px", m_hfrMedian}, {"window", m_hfrWin.size()}, {"drifts", m_drifts}, {"drift_ratio", m_driftRatio}, {"pause", m_focusPause}}}};
+                  {"focus", QJsonObject{{"baseline_px", m_hfrBase}, {"median_px", m_hfrMedian}, {"window", m_hfrWin.size()}, {"drifts", m_drifts}, {"drift_ratio", m_driftRatio}, {"pause", m_focusPause},
+                                        {"tweak", QJsonObject{{"on", m_tweak}, {"state", m_tweakState == Tweak::Idle ? "idle" : "measuring"}, {"tweaks", m_tweaks}, {"moves", m_tweakMoves}, {"focuser", m_focPos}, {"last", m_tweakInfo}}}}}};
     if (m_auto) { QJsonObject a = m_autoInfo; a["min_s"] = m_minExp; a["max_s"] = m_maxExp; a["target_efficiency"] = m_targetEff; s["auto_exposure"] = a; }
     if (n > 0) { s["avg_capture_ms"] = m_sumCaptureMs / n; s["avg_analysis_ms"] = m_sumAnalysisMs / n; s["avg_download_ms"] = m_sumDownloadMs / n; }
     if (m_cycles > 0) { s["avg_cycle_ms"] = m_sumCycleMs / m_cycles; s["duty_cycle"] = m_sumCycleExpS * 1000.0 / m_sumCycleMs; }   // exposure time over wall time: the exposure changes under auto exposure

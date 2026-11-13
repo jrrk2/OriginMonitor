@@ -1,6 +1,7 @@
 // Host alignment and host focus; see HostAlign.hpp. The pointing model, cord wrap, golden spiral and calibration logic follow PI.N.S.'s OriginPointingModel,
 // OriginCordWrap, OriginModelBuilder and OriginCalibration (~/pins, MPL-2.0); the focus fit is NINA's hyperbola, solved in closed form.
 #include "HostAlign.hpp"
+#include <limits>
 
 #include <QDir>
 #include <QFile>
@@ -375,6 +376,71 @@ FocusFit fitHyperbola(const QList<double>& pos, const QList<double>& hfr)
     const double stepGuess = (hi - lo) / std::max(1, n - 1);
     if (r.best - lo < 0.5 * stepGuess) { r.edge = -1; r.why = "the best focus is at the low edge of the sweep"; return r; }
     if (hi - r.best < 0.5 * stepGuess) { r.edge = 1; r.why = "the best focus is at the high edge of the sweep"; return r; }
+    r.ok = true;
+    return r;
+}
+
+double hyperbolaHfr(double x, double a, double b, double p) { return a * std::cosh(std::asinh((p - x) / b)); }
+
+FocusFit fitFocusNina(const QList<double>& posIn, const QList<double>& hfrIn, const QList<double>& errIn)
+{
+    FocusFit r;
+    QList<double> X, Y, E;
+    for (int i = 0; i < std::min(posIn.size(), hfrIn.size()); ++i)
+        if (hfrIn[i] >= 0.1) { X.append(posIn[i]); Y.append(hfrIn[i]); E.append(std::max(0.001, i < errIn.size() ? errIn[i] : 0.0)); }
+    const int n = int(X.size());
+    if (n < 4) { r.why = "fewer than 4 measured positions"; return r; }
+    // --- QuadraticFitting: weighted least squares, weights 1/err^2 (x centred for conditioning) ---
+    {
+        double xm = 0; for (double x : X) xm += x; xm /= n;
+        double S[3][3] = {}, B[3] = {};
+        for (int i = 0; i < n; ++i) {
+            const double u = X[i] - xm, w = 1.0 / (E[i] * E[i]), b[3] = {1, u, u * u};
+            for (int a0 = 0; a0 < 3; ++a0) { B[a0] += w * b[a0] * Y[i]; for (int c0 = 0; c0 < 3; ++c0) S[a0][c0] += w * b[a0] * b[c0]; }
+        }
+        auto det3 = [](double m[3][3]) { return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]); };
+        const double D = det3(S);
+        if (std::fabs(D) > 1e-30) {
+            double q[3];
+            for (int k = 0; k < 3; ++k) { double M[3][3]; for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) M[i][j] = j == k ? B[i] : S[i][j]; q[k] = det3(M) / D; }
+            r.quadA = q[2]; r.quadB = q[1] - 2 * q[2] * xm; r.quadC = q[0] - q[1] * xm + q[2] * xm * xm;
+            if (r.quadA != 0) { r.quadBest = std::round(-r.quadB / (2 * r.quadA)); r.quadMin = r.quadA * r.quadBest * r.quadBest + r.quadB * r.quadBest + r.quadC; }
+            double sw = 0, ym = 0; for (int i = 0; i < n; ++i) { const double w = 1.0 / (E[i] * E[i]); sw += w; ym += w * Y[i]; } ym /= sw;
+            double ss = 0, st = 0; for (int i = 0; i < n; ++i) { const double w = 1.0 / (E[i] * E[i]), f = r.quadA * X[i] * X[i] + r.quadB * X[i] + r.quadC; ss += w * (Y[i] - f) * (Y[i] - f); st += w * (Y[i] - ym) * (Y[i] - ym); }
+            r.quadR2 = st > 0 ? 1 - ss / st : 0;
+        }
+    }
+    // --- HyperbolicFitting (NINA): start from the lowest and highest points, then a 21x21x21 grid over p, a, b, each range halved per cycle ---
+    int lo = 0, hi = 0; for (int i = 1; i < n; ++i) { if (Y[i] < Y[lo]) lo = i; if (Y[i] > Y[hi]) hi = i; }
+    double highestPosition = X[hi], lowestPosition = X[lo];
+    const double highestHfr = Y[hi], lowestHfr = Y[lo];
+    if (highestPosition < lowestPosition) highestPosition = 2 * lowestPosition - highestPosition;      // always go up
+    double a = lowestHfr, b = std::sqrt((highestPosition - lowestPosition) * (highestPosition - lowestPosition) * a * a / (highestHfr * highestHfr - a * a)), p = lowestPosition;
+    double aRange = a, bRange = b, pRange = highestPosition - lowestPosition;
+    if (std::isnan(aRange) || std::isnan(bRange) || aRange == 0 || bRange == 0 || pRange == 0) { r.why = "not enough valid points to fit a hyperbola"; return r; }
+    auto scaledError = [&](double pp, double aa, double bb) { double s2 = 0; for (int i = 0; i < n; ++i) { const double d = (hyperbolaHfr(X[i], aa, bb, pp) - Y[i]) / E[i]; s2 += d * d; } return std::sqrt(s2); };
+    double lowestError = std::numeric_limits<double>::max(), oldError = lowestError;
+    int cycles = 0;
+    do {
+        const double p0 = p, b0 = b, a0 = a;
+        aRange *= 0.5; bRange *= 0.5; pRange *= 0.5;
+        for (double p1 = p0 - pRange; p1 <= p0 + pRange; p1 += pRange * 0.1)
+            for (double a1 = a0 - aRange; a1 <= a0 + aRange; a1 += aRange * 0.1)
+                for (double b1 = b0 - bRange; b1 <= b0 + bRange; b1 += bRange * 0.1) {
+                    const double e1 = scaledError(p1, a1, b1);
+                    if (e1 < lowestError) { oldError = lowestError; lowestError = e1; a = a1; b = b1; p = p1; }
+                }
+        ++cycles;
+    } while (oldError - lowestError >= 0.0001 && lowestError > 0.0001 && cycles < 30);
+    r.hypA = a; r.hypB = b; r.hypP = p;
+    double ym = 0; for (double y : Y) ym += y; ym /= n;
+    double ss = 0, st = 0; for (int i = 0; i < n; ++i) { const double f = hyperbolaHfr(X[i], a, b, p); ss += (Y[i] - f) * (Y[i] - f); st += (Y[i] - ym) * (Y[i] - ym); }
+    r.hypR2 = st > 0 ? 1 - ss / st : 0; r.r2 = r.hypR2; r.rms = std::sqrt(ss / n);
+    r.best = std::round(p); r.minHfr = std::fabs(a); r.slope = std::fabs(a / b);
+    const double xlo = *std::min_element(X.begin(), X.end()), xhi = *std::max_element(X.begin(), X.end());
+    const double stepGuess = (xhi - xlo) / std::max(1, n - 1);
+    if (r.best < xlo + 0.5 * stepGuess) { r.edge = -1; r.why = "the best focus is at or below the low edge of the sweep"; return r; }
+    if (r.best > xhi - 0.5 * stepGuess) { r.edge = 1; r.why = "the best focus is at or above the high edge of the sweep"; return r; }
     r.ok = true;
     return r;
 }

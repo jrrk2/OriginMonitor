@@ -154,17 +154,17 @@ const QList<Cmd>& commands()
         v.append({"focus-sweep", "action", "Move the focuser through positions around the current one, take frames, score the star HFR in-process and report the best position (restores the start unless --apply).", "", true, false,
                   {O("span", 'i', "steps either side of the current position", "600"), O("step", 'i', "step between positions", "100"), O("exposure", 'd', "seconds per frame", "4"), O("frames", 'i', "snapshots per position (median)", "3"),
                    O("dir", 's', "snapshot directory (default: temp)"), O("apply", 'b', "leave the focuser at the best position")}});
-        v.append({"hostalign", "action", "Alignment, gotos, tracking and focus by the host, the PI.N.S. way: a fake initialisation, plate solves fitted with a pointing model (base tilt, encoder zeros, flexure, cone), moves by timed rate slews checked against the encoders within the cable limit, tracks handed to the firmware as TargetTrack paths, and a host V-curve focus fitted with a hyperbola. Actions: status, calibrate, goto, track, focus, neutral (cables hang straight here), reset. State in $ORIGIN_HOSTALIGN_DIR or ~/.config/origin (host_model.json, cordwrap.json). No clock cutoff: it is dark enough when frames plate-solve; the Sun must be below the horizon and no move aims within 30 deg of it.", "", true, false,
+        v.append({"hostalign", "action", "Alignment, gotos, tracking and focus by the host, the PI.N.S. way: a fake initialisation, plate solves (short untracked frames at high ISO) fitted with a pointing model (base tilt, encoder zeros, flexure, cone), moves by GotoAltAzm in the fake frame within the cable limit (timed rate slews in reserve), tracks handed to the firmware as TargetTrack paths, and a host V-curve focus fitted with a hyperbola. Actions: status, calibrate, goto, track, focus, neutral (cables hang straight here), reset. State in $ORIGIN_HOSTALIGN_DIR or ~/.config/origin (host_model.json, cordwrap.json). No clock cutoff: it is dark enough when frames plate-solve; the Sun must be below the horizon and no move aims within 30 deg of it.", "", true, false,
                   [] { QList<Arg> a = {P("action", 's', "status | calibrate | goto | track | focus | neutral | reset", false),
                             O("points", 'i', "calibrate: points on the golden spiral", "12"), O("wait", 'd', "calibrate: minutes to keep retrying the first solve while the sky is too bright", "0"), O("point-min-alt", 'd', "calibrate: lowest point, deg", "25"), O("point-max-alt", 'd', "calibrate: highest point, deg", "75"),
-                            O("exposure", 'd', "seconds per frame (solves and focus)", "2"), O("iso", 'i', "ISO", "800"),
+                            O("exposure", 'd', "seconds per frame (solves and focus): short, as the mount does not track (0.5 s trails at most ~5 px)", "0.5"), O("iso", 'i', "ISO (high, for the short frames)", "6400"),
                             O("name", 's', "goto/track: target key or name"), O("object", 's', "goto/track: an asteroid or comet loaded from DATA/spk (tools/fetch_spk.py), followed along its path"), O("ra-hours", 'd', "goto/track: RA, hours J2000"), O("dec-deg", 'd', "goto/track: Dec, deg J2000"),
                             O("max-alt", 'd', "goto/track: refuse to start on a target above this, deg (ORIGIN_HOSTALIGN_NO_ALT_LIMIT=1 lifts this and --track-max-alt)", "75"), O("track-max-alt", 'd', "track: once locked on, follow the target up to this altitude and no higher, deg", "80"), O("centre", 'b', "goto/track: re-aim up to 3 times until within --centre-within"), O("centre-within", 'd', "goto/track: centred when the frame is this close to the target, arcmin", "5"), O("minutes", 'd', "track: length of the TargetTrack path", "30"),
                             O("track-step", 'd', "track: seconds between path points", "30"),
                             O("capture", 'b', "track: take frames for the whole track, saved to <data dir>/hostalign/<target>_<time>/ with frames.jsonl; --check scores every so often"),
                             O("capture-minutes", 'd', "track --capture: stop capturing after this long (default: the track's --minutes)"),
                             O("frame-exposure", 'd', "track --capture: seconds per frame (short, as the object moves)", "10"), O("frame-iso", 'i', "track --capture: ISO (100-6400; high for a faint mover)", "3200"), O("check", 'i', "track: seconds between check solves (0: none)", "0"), O("checks", 'i', "track: how many check solves", "3"),
-                            O("focus-step", 'i', "focus: focuser steps between positions", "100"), O("focus-steps", 'i', "focus: positions either side of the start", "4"),
+                            O("no-focus-preset", 'b', "calibrate: do not set the focuser from the focus-vs-temperature table first"), O("focus-step", 'i', "focus: focuser steps between positions (PI.N.S./NINA on the Origin: 50)", "50"), O("focus-steps", 'i', "focus: positions either side of the start (7: 15 points, as PI.N.S.)", "7"),
                             O("frames", 'i', "focus: frames per position (median HFR)", "1")};
                        return a + plannerArgs(); }()});
         v.append({"now", "planning", "Time, darkness, current target, minutes each candidate stays observable, and the planner's suggestion. Read-only.", "", false, false, plannerArgs()});
@@ -2580,6 +2580,8 @@ QString firmwareGoto(Ctx& c, double target0, double enc1)
             if ((started || t.elapsed() > 8000) && cur["IsGotoOver"].toBool()) break;
             if (std::fabs(c.wrap.turned()) > c.wrap.limit() + 10) { halt(); return QString("the firmware's goto took the cables %1 deg from neutral: stopped").arg(c.wrap.turned(), 0, 'f', 0); }
         }
+        // tracking off again (the goto leaves it on): in the fake frame the firmware does not know which way to track (its azimuth was 120 deg out on 12 Nov
+        // 2026). Frames are kept short and at high ISO instead (--exposure 0.5 --iso 6400: at most ~5 px of trail); a 5 s untracked frame trails ~50 px.
         call("tracking", {{"enabled", false}}, 10000);
         sleepMs(800);
         if (std::fabs(d) <= 120) break;
@@ -2705,20 +2707,84 @@ QJsonObject modelJson(const Ctx& c)
 }
 
 // the HFR (px) at the focuser's current position: median of `frames` frames, -1 if no stars
-double hfrHere(double exposure, int iso, int frames, const QString& dir, int* stars)
+// Rewrite a raw snapshot's RA/DEC header cards (the firmware's, which in a fake-initialised frame can be tens of degrees out) with the host model's pointing.
+// The firmware's values are kept as FW_RA/FW_DEC, and the model's alt/az as PM_ALT/PM_AZ, in spare cards after END within the header's last 2880-byte block.
+bool rewritePointing(const QString& path, double raDeg, double decDeg, double alt, double az)
 {
-    QList<double> h; int st = 0;
+    QFile f(path); if (!f.open(QIODevice::ReadWrite)) return false;
+    QByteArray h = f.read(2880 * 8);
+    auto card = [](const QByteArray& key, const QString& val, const QString& comment) {
+        QByteArray c = key.leftJustified(8, ' ') + "= " + val.rightJustified(20).toLatin1() + " / " + comment.toLatin1();
+        return c.leftJustified(80, ' ', true);
+    };
+    int endAt = -1; QByteArray fwRa, fwDec;
+    for (int i = 0; i + 80 <= h.size(); i += 80) {
+        const QByteArray k = h.mid(i, 8);
+        if (k == "RA      ") { fwRa = h.mid(i + 10, 20).trimmed(); h.replace(i, 80, card("RA", QString::number(raDeg, 'f', 6), "host pointing model (hostalign), J2000 deg")); }
+        else if (k == "DEC     ") { fwDec = h.mid(i + 10, 20).trimmed(); h.replace(i, 80, card("DEC", QString::number(decDeg, 'f', 6), "host pointing model (hostalign), J2000 deg")); }
+        else if (k == "END     ") { endAt = i; break; }
+    }
+    if (endAt < 0) return false;
+    QList<QByteArray> extra;
+    if (!fwRa.isEmpty()) extra.append(card("FW_RA", QString::fromLatin1(fwRa), "the firmware's RA (fake-initialised frame)"));
+    if (!fwDec.isEmpty()) extra.append(card("FW_DEC", QString::fromLatin1(fwDec), "the firmware's Dec"));
+    extra.append(card("PM_ALT", QString::number(alt, 'f', 4), "host model apparent altitude, deg"));
+    extra.append(card("PM_AZ", QString::number(az, 'f', 4), "host model azimuth, deg"));
+    const int blockEnd = (endAt / 2880 + 1) * 2880;
+    if (endAt + 80 * (extra.size() + 1) <= blockEnd) {
+        int at = endAt; for (const QByteArray& c : extra) { h.replace(at, 80, c); at += 80; }
+        h.replace(at, 80, QByteArray("END").leftJustified(80, ' '));
+    }
+    f.seek(0); f.write(h.left(blockEnd));
+    return true;
+}
+
+// Focus vs temperature: best focus rises ~8.6 steps per deg C of ambient (98 firmware autofocus results over 13 nights, rms 25 steps; memory 2026-10-28).
+// focus_temperature.json in the state dir keeps each host focus result {position, ambient_c, utc}; the prediction is the newest result moved by the slope.
+// Before calibrating (frames in twilight are too few-starred for a sweep) the focuser is set from it, so the alignment frames are sharp.
+const double kFocusStepsPerC = 8.6;
+double ambientNow() { const QJsonValue v = call("status", {{"fresh", true}}, 10000)["ambient_c"]; return v.isDouble() ? v.toDouble() : std::nan(""); }
+QString focusTableFile() { return stateDir() + "/focus_temperature.json"; }
+void recordFocus(int position, double ambient, double hfr)
+{
+    QFile f(focusTableFile()); QJsonObject o; if (f.open(QIODevice::ReadOnly)) { o = QJsonDocument::fromJson(f.readAll()).object(); f.close(); }
+    QJsonArray pts = o["points"].toArray();
+    pts.append(QJsonObject{{"position", position}, {"ambient_c", std::isnan(ambient) ? QJsonValue() : QJsonValue(ambient)}, {"hfr_px", hfr}, {"utc", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}});
+    o["points"] = pts; o["steps_per_c"] = kFocusStepsPerC;
+    if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(o).toJson());
+}
+// predicted best focus now, or -1 (no table, or no temperature)
+int predictFocus(double ambient, QJsonObject* why)
+{
+    QFile f(focusTableFile()); if (!f.open(QIODevice::ReadOnly) || std::isnan(ambient)) return -1;
+    const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+    const QJsonArray pts = o["points"].toArray();
+    for (int i = pts.size() - 1; i >= 0; --i) {
+        const QJsonObject q = pts[i].toObject();
+        if (!q["ambient_c"].isDouble()) continue;
+        const double slope = o["steps_per_c"].toDouble(kFocusStepsPerC);
+        const int pred = int(std::lround(q["position"].toDouble() + slope * (ambient - q["ambient_c"].toDouble())));
+        if (why) *why = QJsonObject{{"from_position", q["position"]}, {"from_ambient_c", q["ambient_c"]}, {"from_utc", q["utc"]}, {"ambient_c", ambient}, {"steps_per_c", slope}, {"predicted", pred}};
+        return pred;
+    }
+    return -1;
+}
+
+double hfrHere(double exposure, int iso, int frames, const QString& dir, int* stars, double* spread = nullptr)
+{
+    QList<double> h, sp; int st = 0;
     for (int f = 0; f < frames; ++f) {
         const QJsonObject sn = call("snapshot", {{"dir", dir}, {"exposure", exposure}, {"iso", iso}, {"binning", 1}}, int(exposure * 1000) + 60000);
         if (!sn["ok"].toBool()) continue;
         QFile file(sn["path"].toString());
         if (!file.open(QIODevice::ReadOnly)) continue;
         const FocusResult fr = evaluateFocus(file.readAll());
-        if (fr.valid && fr.stars >= 5) { h.append(fr.hfrPx); st += fr.stars; }
+        if (fr.valid && fr.stars >= 5) { h.append(fr.hfrPx); sp.append(fr.hfrSpreadPx); st += fr.stars; }
     }
     if (h.isEmpty()) return -1;
-    std::sort(h.begin(), h.end());
+    std::sort(h.begin(), h.end()); std::sort(sp.begin(), sp.end());
     if (stars) *stars = st / int(h.size());
+    if (spread) *spread = sp[sp.size() / 2];                  // the scatter of the stars' radii: NINA's error bar for the point
     return h[h.size() / 2];
 }
 
@@ -2763,29 +2829,47 @@ QJsonObject cmdHostAlign(const Parsed& p, const Cmd& c)
     if (altBypass) note({{"hostalign", "ORIGIN_HOSTALIGN_NO_ALT_LIMIT=1: no altitude ceiling for gotos and tracks"}});
 
     if (action == "focus") {
-        // host V-curve: positions below and above the start, climbing (the firmware takes up backlash on downward moves), a hyperbola through HFR, the vertex
+        // host V-curve as PI.N.S. (NINA's autofocus with the Origin focuser): --focus-steps either side of the start at --focus-step, climbing (the firmware takes
+        // up backlash on downward moves), NINA's hyperbolic and quadratic fits with each point weighted by its stars' HFR scatter; the hyperbola's vertex is used
         const int stepSz = int(num(p, c, "focus-step")), n = int(num(p, c, "focus-steps")), frames = int(num(p, c, "frames"));
         const QString dir = QDir::tempPath() + "/hostalign_focus"; QDir().mkpath(dir);
+        // a fake-initialised mount tracks the wrong way: tracking off, short frames at high ISO (default 0.5 s, ISO 6400). A truly initialised one keeps tracking.
+        {
+            const QJsonObject tcs = call("status", {{"fresh", true}}, 10000)["last"].toObject()["TaskController/GetStatus"].toObject();
+            const bool fake = tcs["IsFakeInitialized"].toBool() || !tcs["IsReady"].toBool();
+            if (fake) { if (const QJsonObject tr = call("tracking", {{"enabled", false}}, 10000); !tr["ok"].toBool()) note({{"hostalign", "could not switch tracking off for the focus sweep"}, {"result", tr}}); }
+            else note({{"hostalign", "the firmware is initialised: tracking left on for the focus sweep"}});
+        }
         const QJsonObject fs = call("focuser_status", {}, 15000);
         if (!fs["ok"].toBool()) return fs;
         const int start = fs["focuser"].toObject()["Position"].toInt();
-        QList<double> pos, hfr; QJsonArray rows;
+        QList<double> pos, hfr, err; QJsonArray rows;
         auto measureAt = [&](int at) {
             const QJsonObject mv = call("focuser_move", {{"position", at}, {"max_step", 6 * stepSz * n + 1000}}, 120000);
             if (!mv["ok"].toBool()) { rows.append(QJsonObject{{"position", at}, {"error", mv["error"]}}); return false; }
-            int stars = 0; const double h = HA::hfrHere(exposure, iso, frames, dir, &stars);
-            QJsonObject e{{"position", at}, {"stars", stars}}; if (h > 0) { e["hfr_px"] = std::round(h * 1000) / 1000; pos.append(at); hfr.append(h); } else e["note"] = "too few stars";
+            int stars = 0; double sp = 0; const double h = HA::hfrHere(exposure, iso, frames, dir, &stars, &sp);
+            QJsonObject e{{"position", at}, {"stars", stars}};
+            if (h > 0) { e["hfr_px"] = std::round(h * 1000) / 1000; e["hfr_spread_px"] = std::round(sp * 1000) / 1000; pos.append(at); hfr.append(h); err.append(sp); } else e["note"] = "too few stars";
             rows.append(e); note(e); return true;
         };
         for (int i = -n; i <= n; ++i) if (!measureAt(start + i * stepSz)) break;
-        HostAlign::FocusFit fit = HostAlign::fitHyperbola(pos, hfr);
+        HostAlign::FocusFit fit = HostAlign::fitFocusNina(pos, hfr, err);
         for (int ext = 0; ext < 2 && !fit.ok && fit.edge != 0; ++ext) {        // the vertex is off one end: carry on that way
             const int from = int(fit.edge > 0 ? *std::max_element(pos.begin(), pos.end()) : *std::min_element(pos.begin(), pos.end()));
             note({{"hostfocus", fit.why}, {"extending", fit.edge > 0 ? "up" : "down"}});
             for (int i = 1; i <= n; ++i) if (!measureAt(from + fit.edge * i * stepSz)) break;
-            fit = HostAlign::fitHyperbola(pos, hfr);
+            fit = HostAlign::fitFocusNina(pos, hfr, err);
         }
         QJsonObject out{{"start", start}, {"results", rows}, {"unit", "HFR in full-resolution sensor pixels"}};
+        {   // the curve and both trendlines, for a graph like PI.N.S.'s (measured points, quadratic and hyperbolic trendlines and minima)
+            QJsonArray curve;
+            for (int i = 0; i < pos.size(); ++i) curve.append(QJsonObject{{"position", pos[i]}, {"hfr", hfr[i]}, {"err", err[i]},
+                {"quadratic", fit.quadA * pos[i] * pos[i] + fit.quadB * pos[i] + fit.quadC}, {"hyperbolic", fit.hypB != 0 ? HostAlign::hyperbolaHfr(pos[i], fit.hypA, fit.hypB, fit.hypP) : 0.0}});
+            out["curve"] = curve;
+            out["quadratic"] = QJsonObject{{"min_position", fit.quadBest}, {"min_hfr", fit.quadMin}, {"r2", fit.quadR2}};
+            out["hyperbolic"] = QJsonObject{{"min_position", fit.hypP}, {"min_hfr", fit.hypA}, {"b", fit.hypB}, {"r2", fit.hypR2}};
+            QFile cf(dir + "/last_focus_curve.json"); if (cf.open(QIODevice::WriteOnly)) cf.write(QJsonDocument(out).toJson());
+        }
         if (!fit.ok) { call("focuser_move", {{"position", start}, {"max_step", 10 * stepSz * n + 1000}}, 120000); out["ok"] = false; out["error"] = "no focus found: " + fit.why + "; focuser back at the start"; return out; }
         const int best = int(std::lround(fit.best));
         call("focuser_move", {{"position", best - 2 * stepSz}, {"max_step", 10 * stepSz * n + 1000}}, 120000);      // arrive climbing, as the curve was measured
@@ -2794,6 +2878,7 @@ QJsonObject cmdHostAlign(const Parsed& p, const Cmd& c)
         out["ok"] = mv["ok"].toBool();
         out["fit"] = QJsonObject{{"best", fit.best}, {"min_hfr_px", fit.minHfr}, {"slope_px_per_step", fit.slope}, {"rms_px", fit.rms}, {"r2", fit.r2}, {"points", int(pos.size())}};
         out["best"] = best; out["hfr_at_best_px"] = check; out["stars_at_best"] = stars;
+        if (mv["ok"].toBool()) { const double amb = HA::ambientNow(); HA::recordFocus(best, amb, check); out["ambient_c"] = std::isnan(amb) ? QJsonValue() : QJsonValue(amb); out["recorded_in"] = HA::focusTableFile(); }
         return out;
     }
 
@@ -2801,10 +2886,10 @@ QJsonObject cmdHostAlign(const Parsed& p, const Cmd& c)
     // first use (firmwareGoto); a track needs it too, because TargetTrack paths are in its frame
     if (action == "track") { if (const QString bad = HA::ensureFirmwareReady(x.site); !bad.isEmpty()) return failure(bad); }
     if (!HA::encoders(x, &e0, &e1, &mount)) return failure("no encoder reading");
-    // An initialisation (real or fake) leaves the firmware tracking (18.6"/s in azimuth, 12 Nov 2026), which moves the encoders under rate moves and solves.
-    // Mount/EnableTracking {"Value": false} stops it (StopTracking, a zero Slew and rate moves do not); a track turns it back on through TrackMovingTarget.
-    // measure() also interpolates the encoders to mid-exposure, in case it could not be stopped.
-    if (action != "track" && mount["IsTracking"].toBool()) {
+    // Firmware tracking: an initialisation (real or fake) or a goto leaves it on (18.6"/s in azimuth, 12 Nov 2026); Mount/EnableTracking {"Value": bool} sets it
+    // (StopTracking, a zero Slew and rate moves do not stop it). In the fake frame it tracks the wrong way, so it is kept off and frames are short at high ISO;
+    // measure() still interpolates the encoders to mid-exposure. Tracks hand the firmware the model's own path (TrackMovingTarget).
+    if ((action == "calibrate" || action == "goto" || action == "focus") && mount["IsTracking"].toBool() && !mount["IsTrackingMovingTarget"].toBool()) {
         const QJsonObject r = call("tracking", {{"enabled", false}}, 10000);
         note({{"hostalign", r["ok"].toBool() ? "firmware tracking stopped" : "could not stop the firmware's tracking; encoders interpolated to mid-exposure"}, {"result", r}});
         ::sleepMs(500);
@@ -2812,6 +2897,16 @@ QJsonObject cmdHostAlign(const Parsed& p, const Cmd& c)
     }
 
     if (action == "calibrate") {
+        // focus first: alignment frames must be sharp. From the focus-vs-temperature table (no stars needed, so it works in twilight); else the focuser stays
+        // where it is and the log says so (run hostalign focus once it is dark, which also adds to the table)
+        if (!p.v.contains("no-focus-preset")) {
+            QJsonObject why; const int pred = HA::predictFocus(HA::ambientNow(), &why);
+            const int cur = call("focuser_status", {}, 15000)["focuser"].toObject()["Position"].toInt();
+            if (pred > 0 && std::abs(pred - cur) > 10) {
+                const QJsonObject mv = call("focuser_move", {{"position", pred}, {"max_step", 1500}}, 120000);
+                why["from"] = cur; why["moved"] = mv["ok"].toBool(); note({{"hostalign", "focuser set from the focus-vs-temperature table before aligning"}, {"focus", why}});
+            } else note({{"hostalign", pred > 0 ? "focus already where the temperature table puts it" : "no focus-vs-temperature entry (or no ambient reading): focuser left as it is"}, {"focus", why}, {"position", cur}});
+        }
         QJsonArray log;
         // a first point here: the tube raised over the trees first if the tilt sensor says it is low
         if (!x.cal.hasModel) {
@@ -2839,7 +2934,18 @@ QJsonObject cmdHostAlign(const Parsed& p, const Cmd& c)
         // points on a golden spiral, visited in order of cable count: one sweep within the limit, each solve refitting the model so the next is aimed better
         struct Plan { Astro::AltAz s; double turned; };
         QList<Plan> plan;
-        for (const Astro::AltAz& s : HostAlign::goldenSpiral(int(num(p, c, "points")), num(p, c, "point-min-alt"), num(p, c, "point-max-alt"))) {
+        // only the unobstructed sky: points under the horizon profile (trees, fences, houses; tools/horizon.json, --horizon) plus 3 deg are left out, and the
+        // spiral is made denser until --points of them remain
+        const QString hfile = p.v.contains("horizon") ? str(p, "horizon") : Planner::defaultHorizonFile();
+        const int want = int(num(p, c, "points"));
+        QList<Astro::AltAz> clear;
+        for (int n = want; n <= 4 * want && clear.size() < want; ++n) {
+            clear.clear();
+            for (const Astro::AltAz& s : HostAlign::goldenSpiral(n, num(p, c, "point-min-alt"), num(p, c, "point-max-alt")))
+                if (s.alt >= horizonMinAlt(hfile, s.az, 0) + 3) clear.append(s);
+        }
+        note({{"hostalign", QString("%1 unobstructed points (horizon %2)").arg(clear.size()).arg(hfile)}});
+        for (const Astro::AltAz& s : clear) {
             double a, b, t; x.cal.aim(s.alt, s.az, &a, &b);
             if (x.wrap.turnedFor(a, &t)) plan.append({s, t});
         }
@@ -2954,15 +3060,26 @@ QJsonObject cmdHostAlign(const Parsed& p, const Cmd& c)
             const QDateTime end = HA::now().addSecs(qint64(capMin * 60));
             QDateTime lastCheck = HA::now(); int frames = 0, solved = 0; QJsonArray checks; double worst = 0;
             while (HA::now() < end) {
+                double ea0 = 0, ea1 = 0, eb0 = 0, eb1 = 0;
+                const bool encA = HA::encoders(x, &ea0, &ea1);
                 const QDateTime t0 = HA::now();
                 const QJsonObject sn = call("snapshot", {{"dir", dir}, {"exposure", fexp}, {"iso", fiso}, {"binning", 1}}, int(fexp * 1000) + 90000);
                 const QDateTime t1 = HA::now();
+                const bool encB = HA::encoders(x, &eb0, &eb1);
                 if (!sn["ok"].toBool()) { note({{"capture", "snapshot failed"}, {"error", sn["error"]}}); sleepMs(2000); continue; }
                 ++frames;
                 const QDateTime mid = t0.addMSecs(t0.msecsTo(t1) / 2);
                 double tra, tdec; at(mid, &tra, &tdec);
                 QJsonObject fr{{"file", sn["path"]}, {"requested_utc", t0.toString(Qt::ISODateWithMs)}, {"returned_utc", t1.toString(Qt::ISODateWithMs)},
                                {"exposure", fexp}, {"iso", fiso}, {"target_ra_deg", tra}, {"target_dec_deg", tdec}};
+                // the frame's pointing from the host model (encoders before and after, interpolated to mid-exposure) written into its RA/DEC header cards,
+                // so that any solver can be hinted by them (the firmware's are those of its fake frame)
+                if (encA && encB) {
+                    const double e0 = HostAlign::wrap180(ea0 + 0.5 * HostAlign::wrap180(eb0 - ea0)), e1 = HostAlign::wrap180(ea1 + 0.5 * HostAlign::wrap180(eb1 - ea1));
+                    const Astro::AltAz sky = x.cal.model.toSky(e0, e1);
+                    double pra, pdec; HostAlign::toJ2000(sky.alt, sky.az, mid, x.site, true, &pra, &pdec);
+                    if (HA::rewritePointing(sn["path"].toString(), pra, pdec, sky.alt, sky.az)) { fr["model_ra_deg"] = pra; fr["model_dec_deg"] = pdec; }
+                }
                 if (chk > 0 && lastCheck.secsTo(HA::now()) >= chk) {
                     lastCheck = HA::now();
                     const QJsonObject sv = call("solve", {{"file", sn["path"]}, {"exposure", fexp}}, 240000);

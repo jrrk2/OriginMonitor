@@ -75,6 +75,15 @@ int main()
     FocusFit g = fitHyperbola(p2, h2);
     CHECK(!g.ok && g.edge == 1, "one-sided sweep says extend upward (%s)", qPrintable(g.why));
 
+    // NINA fits on a 15-point, 50-step sweep like PI.N.S.'s: vertex 19030, min HFR 6.5 px, 3% noise
+    {
+        std::normal_distribution<double> nz(0, 0.03);
+        QList<double> P, H, E;
+        for (int x = 18770; x <= 19470; x += 50) { P.append(x); const double t = std::sqrt(6.5 * 6.5 + std::pow((x - 19030) * 0.04, 2)); H.append(t * (1 + nz(rng))); E.append(0.1 * t); }
+        FocusFit nf = fitFocusNina(P, H, E);
+        CHECK(nf.ok && std::fabs(nf.best - 19030) < 25 && std::fabs(nf.quadBest - 19030) < 60, "NINA fits: hyperbolic %.0f (min %.2f r2 %.3f), quadratic %.0f (r2 %.3f)", nf.best, nf.minHfr, nf.hypR2, nf.quadBest, nf.quadR2);
+    }
+
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }
