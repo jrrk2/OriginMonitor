@@ -107,6 +107,23 @@ def from_preview(src, sw1, cover, long_side):
     return out, (x0, y0, x1, y1)
 
 
+def render_calibrated(src, cover=0.85, long_side=4096, hi_pct=99.7):
+    """from the linear stack with the Gaia gains of tools/gaia_colour.py (src/gaia_colour.json): channels scaled so a solar-type star is white, the
+    wedge-free rectangle, and the crossfade animation's stretch (sky neutral, filter colours kept, gentle asinh). None when there is no calibration."""
+    import cv2, crossfade
+    gj = os.path.join(src, 'gaia_colour.json')
+    if not os.path.exists(gj): return None
+    g = json.load(open(gj))['gains']
+    if os.path.exists(os.path.join(src, 'state.bin')): rgb, cov, _ = read_state(os.path.join(src, 'state.bin'))
+    else: rgb, cov, _ = read_fullres(src)
+    x0, y0, x1, y1 = coverage_rect(cov, cover)
+    soft = 25.0 if os.path.exists(os.path.join(src, 'state.bin')) else 40.0      # half-resolution stacks: a gentler stretch (less grain in empty fields)
+    out = crossfade.stretch(rgb * np.array([g['R'], g['G'], g['B']], np.float32), (x0, y0, x1, y1), soft, True, hi_pct)     # flipped to sky orientation; hi_pct 99.97 for small bright targets (planetaries), 99.7 for field-filling nebulae
+    if max(out.shape[:2]) > long_side:
+        s = long_side / max(out.shape[:2]); out = cv2.resize(out, (int(out.shape[1] * s), int(out.shape[0] * s)), interpolation=cv2.INTER_AREA)
+    return out, (x0, y0, x1, y1)
+
+
 def finish(rgb, cov, cover, long_side):
     import cv2
     f = 4                                                             # search on a 4x coarser grid (a coarse cell counts only if all of it is covered)
@@ -132,7 +149,7 @@ def finish(rgb, cov, cover, long_side):
     d = lum[dark]; sd = 1.4826 * float(np.median(np.abs(d - np.median(d))))   # sky noise
     lo, hi = float(np.median(d)) - 1.5 * sd, float(np.percentile(lum, 99.95))
     soft = max((hi - lo) / 25.0, 1e-9)
-    out = np.clip(np.arcsinh(np.clip(c - lo, 0, None) / soft) / np.arcsinh((hi - lo) / soft), 0, 1)
+    out = np.clip(np.arcsinh(np.clip(c - lo, 0, None) / soft) / np.arcsinh((hi - lo) / soft), 0, 1)[::-1]   # stored rows -> sky orientation
     if max(out.shape[:2]) > long_side:
         s = long_side / max(out.shape[:2]); out = cv2.resize(out, (int(out.shape[1] * s), int(out.shape[0] * s)), interpolation=cv2.INTER_AREA)
     return out, (x0, y0, x1, y1)
@@ -140,7 +157,7 @@ def finish(rgb, cov, cover, long_side):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('out'); ap.add_argument('src', nargs='+'); ap.add_argument('--long', type=int, default=2048); ap.add_argument('--cover', type=float, default=0.85)
+    ap.add_argument('out'); ap.add_argument('src', nargs='+'); ap.add_argument('--long', type=int, default=2048); ap.add_argument('--cover', type=float, default=0.85); ap.add_argument('--hi-pct', type=float, default=99.7, help='white point percentile of the smoothed luminance (99.97 for small bright targets)')
     ap.add_argument('--titles', help='JSON {src_basename: "Title"}'); a = ap.parse_args()
     import cv2
     os.makedirs(a.out, exist_ok=True)
@@ -148,7 +165,11 @@ def main():
     cap = open(os.path.join(a.out, 'captions.txt'), 'a')
     for src in a.src:
         src = src.rstrip('/'); base = os.path.basename(src)
-        if os.path.exists(os.path.join(src, 'state.bin')):
+        cal = render_calibrated(src, a.cover, a.long, a.hi_pct)
+        if cal is not None:
+            out, box = cal
+            info = read_state(os.path.join(src, 'state.bin'))[2] if os.path.exists(os.path.join(src, 'state.bin')) else read_fullres(src)[2]
+        elif os.path.exists(os.path.join(src, 'state.bin')):
             rgb, cov, info = read_state(os.path.join(src, 'state.bin'))
             out, box = from_preview(src, cov, a.cover, a.long)
         else:

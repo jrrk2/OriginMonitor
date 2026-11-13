@@ -101,9 +101,13 @@ def main():
                  "filter": "quad-band colour; broadband + quad-band luminance, full resolution", "sub": None, "hfr": None}
             rgb, cov, _ = GE.read_fullres(fd); H, W = cov.shape
             import crossfade                       # the same rendering as the crossfade animation (filter colours kept, gentle asinh)
+            gj = os.path.join(fd, "gaia_colour.json")             # and the Gaia colour calibration (tools/gaia_colour.py) when there is one
+            if os.path.exists(gj): gg = json.load(open(gj))["gains"]; rgb = rgb * np.array([gg["R"], gg["G"], gg["B"]], np.float32)
             out = crossfade.stretch(rgb, (W // 2 - 675, H // 2 - 450, W // 2 + 675, H // 2 + 450))
             im = Image.fromarray((out * 255).astype(np.uint8))
-            crop = (im.width // 2, im.height // 2, 560)              # the card shows the Crab itself
+            import cv2                                               # the card shows the Crab itself (the brightest extended light)
+            L = cv2.GaussianBlur(cv2.medianBlur((out.mean(axis=2) * 255).astype(np.uint8), 15).astype(np.float32), (0, 0), 20)
+            cy, cx = np.unravel_index(np.argmax(L), L.shape); crop = (int(cx), int(cy), 560)
         else:
             f = facts(d)
             src = os.path.normpath(os.path.join(d, IMAGE_FROM[name])) if name in IMAGE_FROM else d
@@ -111,11 +115,12 @@ def main():
                 im = Image.open(os.path.join(src, "preview.png")).convert("RGB").crop(box)
             else:                                   # the largest rectangle the rotated frames all cover (no wedges at the corners)
                 rgb, cov, _ = GE.read_state(os.path.join(src, "state.bin"))
-                arr, rect = GE.from_preview(src, cov, 0.85, 4096)
+                cal = GE.render_calibrated(src, 0.85, 4096, 99.97 if crop else 99.7)   # Gaia-calibrated colour from the linear stack; a small target (close-crop card) gets a white point that does not burn it out
+                arr, rect = cal if cal is not None else GE.from_preview(src, cov, 0.85, 4096)
                 im = Image.fromarray((arr * 255).astype(np.uint8))
-                if crop:                            # card crops are in the stacker preview's pixels: shift them by the extra trim
-                    px0, py0, _, _ = GE.live_preview_rect(cov)
-                    crop = (crop[0] - (rect[0] - px0), crop[1] - (rect[1] - py0), crop[2])
+                if crop:                            # card crops are in the stacker preview's pixels (sky orientation, rows flipped from the stored ones)
+                    px0, py0, px1, py1 = GE.live_preview_rect(cov)
+                    crop = (crop[0] - (rect[0] - px0), crop[1] + (rect[3] - py1) if cal is not None else crop[1] - (rect[1] - py0), crop[2])
         im.save(os.path.join(gdir, slug + ".jpg"), quality=90, optimize=True, progressive=True)
         card(im, crop).save(os.path.join(gdir, slug + "_card.jpg"), quality=85, optimize=True, progressive=True)
         f.update(slug=slug, title=title, w=im.width, h=im.height, cropped=bool(crop) and crop[2] < 0.6 * im.width)   # a card that only trims a wide field is not a close crop
@@ -160,8 +165,9 @@ footer{color:var(--dim);font-size:14px;padding-bottom:40px}
 <h1>OriginMonitor gallery</h1>
 <p>Deep-sky images taken unattended with a Celestron Origin (152 mm f/2.2 RASA, 1.48&Prime; per pixel) from Cambridge, UK, between %(first)s and %(last)s:
 %(n)d targets, %(hours).1f hours of stacked exposure over %(nights)d nights. Each target is one stack of all its good frames from every night
-(<code>tools/restack.py</code>), shown as the live stacker's own preview at half resolution (background extraction, colour neutralisation and a stretch, no further processing),
-cropped to the area every rotated frame covers. The Crab is the exception: a full-resolution stack (<code>tools/fullres_stack.py</code>) of 4.1 hours over eight nights,
+(<code>tools/restack.py</code>), shown at the stacker's half resolution with only a background level, a colour calibration and a stretch (no further processing),
+cropped to the area every rotated frame covers. The colour is calibrated against Gaia DR3: each stack's stars are matched to Gaia, their R/G and B/G
+fitted against Gaia BP&minus;RP, and the channels scaled so that a solar-type star (BP&minus;RP 0.82) is white (<code>tools/gaia_colour.py</code>; the Rosette's blue channel fails that fit, so it keeps the stacker's own preview). The Crab is the exception: a full-resolution stack (<code>tools/fullres_stack.py</code>) of 4.1 hours over eight nights,
 with broadband and quad-band luminance and the quad-band filter's colour; its <a href="gallery/crab_crossfade.webp">broadband-to-narrowband crossfade</a> shows what each records.
 Click a picture for the full field (about 75&prime; &times; 50&prime;).</p>
 <p>The stacker, scheduler and unattended supervisor are in the <a href="https://github.com/jrrk2/OriginMonitor">OriginMonitor repository</a>; how they drive the telescope is

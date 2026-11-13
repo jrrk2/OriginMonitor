@@ -12,18 +12,20 @@ import argparse
 import numpy as np
 
 
-def stretch(rgb, box):
+def stretch(rgb, box, soft_div=40.0, flip=True, hi_pct=99.7):
+    """the box of a stack array (rows as stored), stretched; flipped vertically so north/east are as on the sky: stored rows run the other way (the
+    stacker's own preview.png flips them too; plate solves confirm, 13 Nov 2026)"""
     import cv2
     x0, y0, x1, y1 = box
     c = np.nan_to_num(rgb[y0:y1, x0:x1].astype(np.float32))
     for k in range(3): c[..., k] -= np.median(c[..., k])                         # neutral sky
     lum = c.mean(axis=2)
     sky_sd = 1.4826 * np.median(np.abs(lum - np.median(lum)))
-    hi = np.percentile(cv2.GaussianBlur(lum, (0, 0), 3), 99.7)                  # the target's bright part (smoothed, so not a star)
+    hi = np.percentile(cv2.GaussianBlur(lum, (0, 0), 3), hi_pct)                # the target's bright part (smoothed, so not a star)
     lo = -2.0 * sky_sd
-    soft = max((hi - lo) / 40.0, 1e-6)
-    out = np.arcsinh(np.clip(c - lo, 0, None) / soft) / np.arcsinh((hi - lo) / soft)
-    return np.clip(out, 0, 1)
+    soft = max((hi - lo) / soft_div, 1e-6)
+    out = np.clip(np.arcsinh(np.clip(c - lo, 0, None) / soft) / np.arcsinh((hi - lo) / soft), 0, 1)
+    return np.ascontiguousarray(out[::-1]) if flip else out
 
 
 def main():
