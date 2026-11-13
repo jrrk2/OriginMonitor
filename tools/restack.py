@@ -89,7 +89,9 @@ def frames(data):
                 i += 1
             if not best: continue
             used.add(best[1])
-            rows.append({'file': best[1], 'utc': t, 'target': r['target'], 'hfr': float(r['hfr_px'] or 0), 'stars': int(float(r['stars'] or 0))})
+            try: hfr, nst = float(r['hfr_px'] or 0), int(float(r['stars'] or 0))
+            except ValueError: continue          # a mosaic tile name with a comma ("IC 1805 Heart 0,0", 3-4 Nov) was logged unquoted and shifts the columns
+            rows.append({'file': best[1], 'utc': t, 'target': r['target'], 'hfr': hfr, 'stars': nst, 'verdict': r['verdict']})
     return rows
 
 
