@@ -100,6 +100,8 @@ const QList<Cmd>& commands()
         pass("mount", "state", "Mount status: RA/Dec, Alt/Az, tracking, goto state.", "mount_status");
         pass("focuser", "state", "Focuser position, travel limits, NeedAutoFocus.", "focuser_status");
         pass("focuser-settings", "state", "Focuser advanced settings.", "focuser_settings");
+        pass("focuser-autofocus", "action", "Switch the firmware's own autofocus triggers on or off: after every goto, and on a temperature shift (the Celestron app's commands AutoFocusAfterGoto and AutoFocusOnTemperatureChange). Mosaics need --after-goto off: every visit is a goto. Prints the settings read back.", "focuser_autofocus",
+             {O("after-goto", 'o', "on|off: autofocus after every goto", QString(), "after_goto"), O("temperature", 'o', "on|off: autofocus when the temperature shifts by the firmware's threshold", QString(), "temperature")});
         pass("focus", "state", "Last focus score (HFR, lower is better), optionally the newest N.", "focus_status", {O("history", 'i', "also return the newest N scores", "0")});
         pass("analysis", "state", "Latest per-frame sky analysis (verdict, transparency, stars), optionally history.", "analysis", {O("history", 'i', "also return the newest N records", "0")});
         pass("events", "state", "Event log since a timestamp.", "events", {O("since", 'd', "epoch ms; 0 = from the start", "0"), O("limit", 'i', "maximum events", "200")});
@@ -1554,6 +1556,10 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
     g_run.controlDone = qint64(readJsonFile(controlPath())["id"].toDouble());       // requests written before this run are not for it
     runLog("run_start", {{"night", S["night"]}, {"blocks", S["plan"].toArray().size()}, {"iso", g_run.iso}, {"max_exposure", g_run.maxExposure}});
     writeRunState("starting");
+    // the firmware's own autofocus off: after a goto it takes the camera for minutes and has left the focus worse (12 Nov 00:19, 13 Nov 17:45, the first mosaic visit
+    // lost); focus is the host's job here (temperature table, live tweak). Found switched back on on 13 Nov, so it is set at every run start.
+    { const QJsonObject af = call("focuser_autofocus", {{"after_goto", false}, {"temperature", false}}, 20000);
+      runLog("firmware_autofocus_off", {{"ok", af["ok"]}, {"error", af["error"]}, {"settings", af["settings"]}}); }
 
     // a request that arrives between blocks (waiting for a block to start, or for dusk)
     auto between = [&]() -> RunResult {

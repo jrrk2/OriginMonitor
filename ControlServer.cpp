@@ -591,7 +591,7 @@ QJsonObject ControlServer::handle(const QJsonObject& req)
     if (cmd == "commands" || cmd == "help")
         return QJsonObject{{"ok", true}, {"note", "server commands; the OriginHeadless CLI has a fuller catalogue: OriginHeadless commands"},
                            {"commands", QJsonArray{"ping", "connect", "status", "manual", "auto", "set", "snapshot", "mount_status", "goto", "goto_altaz", "tracking", "slew_rates", "focus_status", "analysis", "events", "target", "stack",
-                                                   "sky_map", "preview", "monitor", "focuser_status", "focuser_move", "focuser_settings", "filter", "initialize", "unpark", "solve", "frame_stats", "sky_note", "sequence", "cancel_capture", "reboot", "send", "cache", "quit"}}};
+                                                   "sky_map", "preview", "monitor", "focuser_status", "focuser_move", "focuser_settings", "focuser_autofocus", "filter", "initialize", "unpark", "solve", "frame_stats", "sky_note", "sequence", "cancel_capture", "reboot", "send", "cache", "quit"}}};
     int ttl = cacheTtlMs(cmd);
     if (cmd == "target" && req.contains("name")) ttl = 0;                       // that form changes the target
     if (!m_cacheOn || ttl == 0) {
@@ -749,6 +749,30 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
         m_backend->getFocuserAdvancedSettings();
         QJsonObject r = waitResponse(m_backend->lastSequenceId(), 5000);
         return r.isEmpty() ? fail("no response") : QJsonObject{{"ok", true}, {"settings", r}};
+    }
+    // The firmware's own autofocus triggers: after every goto, and on a temperature shift. Commands captured from the Celestron app (13 Nov 2026,
+    // ~/origin_anal/autofocus.pcapng): AutoFocusAfterGoto {"Value": bool} and AutoFocusOnTemperatureChange {"EnableTemperatureShiftAutoFocus": bool}, both to
+    // the Focuser. A mosaic does a goto every few minutes, so the after-goto focus would eat each visit (13 Nov 17:45-17:50). {"after_goto": bool, "temperature": bool};
+    // either may be left out. Settings only, no motion: allowed while a sequence runs. Returns the settings read back.
+    if (cmd == "focuser_autofocus") {
+        if (!m_backend->isConnected()) return fail("not connected");
+        if (!req.contains("after_goto") && !req.contains("temperature")) return fail("give after_goto and/or temperature (true|false)");
+        QJsonObject sent;
+        auto send = [&](const QString& command, const QString& key, bool on) -> QString {
+            m_backend->sendCommand(command, "Focuser", QJsonObject{{key, on}});
+            const QJsonObject ack = waitResponse(m_backend->lastSequenceId(), 5000);
+            if (ack.isEmpty()) return "no acknowledgement to " + command;
+            if (ack["ErrorCode"].toInt() != 0) return command + ": " + ack["ErrorMessage"].toString();
+            sent[command] = on; return QString();
+        };
+        QString err;
+        if (req.contains("after_goto")) err = send("AutoFocusAfterGoto", "Value", req["after_goto"].toBool());
+        if (err.isEmpty() && req.contains("temperature")) err = send("AutoFocusOnTemperatureChange", "EnableTemperatureShiftAutoFocus", req["temperature"].toBool());
+        m_backend->getFocuserAdvancedSettings();
+        const QJsonObject r = waitResponse(m_backend->lastSequenceId(), 5000);
+        QJsonObject out{{"ok", err.isEmpty()}, {"sent", sent}, {"settings", r}};
+        if (!err.isEmpty()) out["error"] = err;
+        return out;
     }
 
     if (cmd == "filter") {                            // {"name":"clear|nebula"} declares the hand-inserted filter to the firmware (no motor); without "name" it reads the setting back
