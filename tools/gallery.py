@@ -100,7 +100,8 @@ def main():
             f = {"frames": sum(p.get("frames_stacked", 0) for p in parts), "minutes": sum(p.get("exposure_s", 0) for p in parts) / 60, "nights": nights,
                  "filter": "quad-band colour; broadband + quad-band luminance, full resolution", "sub": None, "hfr": None}
             rgb, cov, _ = GE.read_fullres(fd); H, W = cov.shape
-            out, _ = GE.finish(rgb[H // 2 - 450:H // 2 + 450, W // 2 - 675:W // 2 + 675], np.ones((900, 1350), np.float32), 0.5, 2048)
+            import crossfade                       # the same rendering as the crossfade animation (filter colours kept, gentle asinh)
+            out = crossfade.stretch(rgb, (W // 2 - 675, H // 2 - 450, W // 2 + 675, H // 2 + 450))
             im = Image.fromarray((out * 255).astype(np.uint8))
             crop = (im.width // 2, im.height // 2, 560)              # the card shows the Crab itself
         else:
