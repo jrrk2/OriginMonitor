@@ -812,6 +812,8 @@ void OriginBackend::onWebSocketConnected()
 
     // Request initial status
     sendCommand("GetStatus", "Mount");
+    m_serial.clear();
+    sendCommand("GetSerialNumber", "FactoryCalibrationController");      // which telescope this is (status "serial")
     setCameraBitDepth(16);     // raw 16-bit Bayer snapshots (re-sent after each capture, the camera reverts it)
     setLiveStreamDisabled(true);
     
@@ -839,6 +841,7 @@ void OriginBackend::onWebSocketDisconnected()
     stopContinuousSnapshots();
     recordEvent("disconnected", "websocket connection to the telescope was lost");
     m_auxLost.clear();
+    m_serial.clear();
     emit disconnected();
 }
 
@@ -890,6 +893,11 @@ void OriginBackend::onTextMessageReceived(const QString &message)
     QString type = obj["Type"].toString();
     QString source = obj["Source"].toString();
     
+    if (command == "GetSerialNumber" && obj["ErrorCode"].toInt() == 0 && !obj["SerialNumber"].toString().isEmpty()) {
+        if (m_serial != obj["SerialNumber"].toString()) recordEvent("serial", "telescope serial number " + obj["SerialNumber"].toString(), QJsonObject{{"serial", obj["SerialNumber"]}});
+        m_serial = obj["SerialNumber"].toString();
+    }
+
     // Handle camera-specific responses
     if (type == "Response") {
         int errorCode = obj["ErrorCode"].toInt();
@@ -970,6 +978,7 @@ void OriginBackend::updateStatus()
     if (!isConnected()) {
         return;
     }
+    if (m_serial.isEmpty() && m_statusRotation % 30 == 29) sendCommand("GetSerialNumber", "FactoryCalibrationController");   // no answer yet: ask again
     switch (m_statusRotation % 3) {
         case 0:
             sendCommand("GetStatus", "Mount");

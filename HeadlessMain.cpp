@@ -405,6 +405,29 @@ bool starFailure(const QJsonObject& r)
 }
 QJsonObject failure(const QString& m) { return {{"ok", false}, {"error", m}}; }
 
+// Telescope identity: the daemon reports the connected telescope's serial number (FactoryCalibrationController GetSerialNumber) in status "serial";
+// unattended commands that move the telescope (autorun, run, extras, survey, skysurvey) only do so when it matches ~/.config/origin/telescope_serial
+// exactly (the real Origin answers "140020", the simulator "OTU140020"). "" = this is the expected telescope, else why the command refuses.
+QString telescopeIdentityProblem()
+{
+    const QString path = QDir::homePath() + "/.config/origin/telescope_serial";
+    QString serial;
+    for (int i = 0; i < 10 && serial.isEmpty(); ++i) {       // asked on connect; allow a few seconds for the answer after a fresh connect
+        const QJsonObject st = call("status", {}, 10000);
+        if (!st["connected"].toBool()) return "the daemon is not connected to the telescope";
+        serial = st["serial"].toString();
+        if (serial.isEmpty()) QThread::msleep(1000);
+    }
+    if (serial.isEmpty()) return "the telescope has not reported its serial number (FactoryCalibrationController GetSerialNumber); refusing to move a telescope that cannot be identified";
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return QString("no expected telescope serial in %1; the connected telescope reports \"%2\": if this is your telescope, write that serial to the file").arg(path, serial);
+    const QString want = QString::fromUtf8(f.readAll()).trimmed();
+    if (want.isEmpty()) return QString("%1 is empty; the connected telescope reports \"%2\"").arg(path, serial);
+    if (serial != want) return QString("the connected telescope reports serial \"%1\", not the expected \"%2\" (%3); refusing to move it").arg(serial, want, path);
+    return "";
+}
+
 QJsonObject g_wx;                                   // forecast source/age/errors of the last plannerOptions() call
 Planner::Options plannerOptions(const Parsed& p, const Cmd& c)
 {
@@ -1220,13 +1243,16 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
         if (g_run.replan) { g_run.current = outer; return RunResult::Done; }
         if (!bad.isEmpty()) { g_run.current = outer; g_run.lastSkip = "not initialised: " + bad; runLog("block_skipped", {{"target", t["key"]}, {"why", g_run.lastSkip}}); return RunResult::Skipped; }
     }
+    if (const QString who = telescopeIdentityProblem(); !who.isEmpty() && call("status", {}, 10000)["connected"].toBool()) {
+        runLog("identity_refused", {{"target", t["key"]}, {"why", who}}); g_run.stop = true; g_run.current = outer; return RunResult::Stopped;
+    }
     QJsonObject r = slewTo(t, exposure, iso);
     if (!r["ok"].toBool()) {
         // diagnose before giving up on the target: the link, the initialisation, then one more goto
         runLog("slew_failed", {{"target", t["key"]}, {"error", r["error"]}});
         if (!call("status", {{"fresh", true}}, 20000)["connected"].toBool()) runLog("reconnect", {{"host", g_run.host}, {"ok", waitLink(300, 90)}});
         const QString bad = ensureInitialised(t["key"].toString());
-        if (bad.isEmpty()) { r = slewTo(t, exposure, iso); runLog("slew_retry", {{"target", t["key"]}, {"ok", r["ok"]}, {"error", r["error"]}}); }
+        if (bad.isEmpty() && telescopeIdentityProblem().isEmpty()) { r = slewTo(t, exposure, iso); runLog("slew_retry", {{"target", t["key"]}, {"ok", r["ok"]}, {"error", r["error"]}}); }
         if (!r["ok"].toBool()) { g_run.current = outer; return backupOrSkip(t, endUtc, depth, "goto failed: " + (bad.isEmpty() ? r["error"].toString() : bad)); }
     }
     // a capture that will not start: cancel a stuck one and try again; a camera that stays stuck gets the reboot recovery. "" = capturing again, else why not
@@ -1501,6 +1527,7 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
     if (S["plan"].toArray().isEmpty()) return failure("nothing observable tonight (see schedule); stay parked");
     const QJsonObject pg = call("ping", {}, 5000);
     if (!pg["ok"].toBool()) return pg;
+    if (const QString who = telescopeIdentityProblem(); !who.isEmpty()) return failure(who);
 
     g_run = RunState();
     g_run.o = o; g_run.zone = QTimeZone(o.timeZone.toUtf8()); g_run.darkEnd = parseZ(S["dark_end"].toString());
@@ -2131,6 +2158,7 @@ bool runExtra(const QJsonObject& e)
 {
     const QString id = e["id"].toString();
     const QDateTime end = [&] { const QTime t = QTime::fromString(e["end"].toString(), "HH:mm"); QDate d = QDate::fromString(g_run.night, Qt::ISODate); if (t.hour() < 12) d = d.addDays(1); return QDateTime(d, t, g_run.zone); }();
+    if (const QString who = telescopeIdentityProblem(); !who.isEmpty()) { runLog("extra_refused", {{"extra", e}, {"why", who}}); return false; }
     runLog("extra_start", {{"extra", e}});
     QJsonObject r;
     if (e["kind"].toString("track") == "track") {
@@ -2323,6 +2351,7 @@ QJsonObject cmdSurvey(const Parsed& p, const Cmd& c)
     if (sunNow > num(p, c, "sun-limit")) return failure(QString("too early: the Sun is at %1 deg (the survey needs it below %2)").arg(sunNow, 0, 'f', 1).arg(num(p, c, "sun-limit"), 0, 'f', 0));
     { QProcess pg; pg.start("pgrep", {"-x", "CelestronOrigin"}); pg.waitForFinished(3000); if (pg.exitCode() == 0) return failure("the GUI app is running; it holds the telescope"); }
     if (!call("status", {}, 10000)["connected"].toBool()) return failure("the daemon is not connected to the telescope");
+    if (const QString who = telescopeIdentityProblem(); !who.isEmpty()) return failure(who);
     if (!initialised()) return failure("the telescope is not initialised (mount not aligned, or TaskController not ready); initialize first");
     if (call("sequence", {{"action", "status"}}, 10000)["status"].toObject()["active"].toBool()) return failure("a sequence is running");
     if (runActive()) return failure("an unattended run is in progress; it holds the telescope");
@@ -2412,6 +2441,7 @@ QJsonObject cmdSkySurvey(const Parsed& p, const Cmd& c)
     if (sunNow > num(p, c, "sun-limit")) return failure(QString("too early: the Sun is at %1 deg (the sky survey needs it below %2)").arg(sunNow, 0, 'f', 1).arg(num(p, c, "sun-limit"), 0, 'f', 0));
     { QProcess pg; pg.start("pgrep", {"-x", "CelestronOrigin"}); pg.waitForFinished(3000); if (pg.exitCode() == 0) return failure("the GUI app is running; it holds the telescope"); }
     if (!call("status", {}, 10000)["connected"].toBool()) return failure("the daemon is not connected to the telescope");
+    if (const QString who = telescopeIdentityProblem(); !who.isEmpty()) return failure(who);
     if (!initialised()) return failure("the telescope is not initialised (mount not aligned, or TaskController not ready); initialize first");
     if (call("sequence", {{"action", "status"}}, 10000)["status"].toObject()["active"].toBool()) return failure("a sequence is running");
     if (runActive()) return failure("an unattended run is in progress; it holds the telescope");
@@ -2533,6 +2563,7 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
         sleepMs(3000);
         if (!call("status", {}, 10000)["connected"].toBool()) return idle("telescope does not answer (not put out, or off)");
     }
+    if (const QString who = telescopeIdentityProblem(); !who.isEmpty()) return idle(who);       // never move a telescope that is not ours (e.g. the simulator)
     if (!initialised() || st["need_real_init"].toBool()) {
         // satellite cloud overhead (5 km): the night's attempt limits below are lifted while it is clear, so cloudy-evening failures cannot cost a clear spell after midnight
         const QJsonObject sat = Weather::satelliteCloud(o.site.latDeg, o.site.lonDeg, originDataDir());
@@ -2576,9 +2607,11 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
                 if (sunNow > -12.0 || st["solve_fails"].toInt() < 2) return idle(QString("no plate solution yet (%1; Sun %2 deg, %3 s); will retry next tick").arg(sv["error"].toString()).arg(sunNow, 0, 'f', 1).arg(expo, 0, 'g', 3));
                 // ...unless the sky is overcast: an initialize needs stars as much as a solve does, and would only use up its 3 attempts on cloud
                 const QJsonObject nc = Weather::metarNowcast(o.site.latDeg, o.site.lonDeg, originDataDir(), 15, nullptr);
-                if (nc["ok"].toBool() && nc["cover_pct"].toDouble() >= 80) {
+                // the satellite counts too: the airports can report a broken deck as under 80% while it is solid overhead (a solve that succeeds skips this, so its lag costs nothing)
+                if ((nc["ok"].toBool() && nc["cover_pct"].toDouble() >= 80) || satCloudy) {
                     st["solve_fails"] = 1; save();
-                    return idle(QString("overcast (%1% cloud now) and no plate solution; not spending an initialize on cloud, will retry next tick").arg(nc["cover_pct"].toDouble(), 0, 'f', 0));
+                    return idle(QString("overcast (%1% cloud now, satellite %2% within 5 km) and no plate solution; not spending an initialize on cloud, will retry next tick")
+                                    .arg(nc["cover_pct"].toDouble(), 0, 'f', 0).arg(sat["ok"].toBool() ? QString::number(sat["cover_5km"].toDouble() * 100, 'f', 0) : QString("?")));
                 }
                 note({{"autorun", "no plate solution twice in the dark; initializing anyway"}});
             }

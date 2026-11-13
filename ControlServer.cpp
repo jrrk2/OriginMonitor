@@ -638,6 +638,7 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
         }
         r["last"] = last;
         if (const QJsonObject aux = m_backend->auxLostDevices(); !aux.isEmpty()) r["aux_lost"] = aux;      // {device: seconds down}
+        if (!m_backend->serialNumber().isEmpty()) r["serial"] = m_backend->serialNumber();                // the connected telescope's serial number
         return r;
     }
 

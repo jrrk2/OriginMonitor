@@ -153,6 +153,9 @@ public:
     // devices whose aux link is down (-802/-809 until a clean reply), with seconds since they stopped answering
     QJsonObject auxLostDevices() const { QJsonObject o; for (auto it = m_auxLost.constBegin(); it != m_auxLost.constEnd(); ++it) o[it.key()] = double(it.value().secsTo(QDateTime::currentDateTimeUtc())); return o; }
     int connectedPort() const { return m_connectedPort; }
+    // FactoryCalibrationController GetSerialNumber, asked on every connect ("" until it answers, cleared on disconnect); clients check it against
+    // ~/.config/origin/telescope_serial before moving the telescope unattended
+    QString serialNumber() const { return m_serial; }
     int lastSequenceId() const { return m_nextSequenceId - 1; }   // ID of the most recently sent command
     double radiansToHours(double radians);
     double radiansToDegrees(double radians);
@@ -211,6 +214,7 @@ private:
     
     // Pending operations
     QMap<int, QString> m_pendingCommands;
+    QString m_serial;
     QHash<QString, QDateTime> m_auxLost;      // device (Source) -> when it first answered -802 or -809, until it answers cleanly again
     QString m_currentImagingSession;
     QFile* m_logFile;
