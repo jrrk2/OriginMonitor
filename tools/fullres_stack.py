@@ -40,9 +40,12 @@ def flux_scale(path):
     return FLUX_REF / max(1e-6, float(h.get('EXPTIME', 8) or 8) * float(h.get('ISOSPEED', 800) or 800))
 
 
-def frame_format(h):
-    """our daemon's snapshots: GRBG. The Origin app's own FITS (Light000xx.fits.fz, BAYERPAT = RGGB): RGGB as written, NOT flipped (12 Nov 2026, built
-    straight from the raw data: a 23 Jan frame matches a November snapshot on 46 stars at 0.14 px unflipped, and on none flipped)"""
+def frame_format(h, path=''):
+    """Which raw layout a frame has. The BAYERPAT header cannot be trusted: our daemon's snapshots (snapshot_*.fits) say RGGB but are GRBG (checked from
+    colour, 12 Nov 2026: debayered as GRBG their stars give R/G 0.87, B/G 0.68). The Origin app's own FITS (Light000xx.fits.fz) really are RGGB (as RGGB the
+    same field gives R/G 0.82, B/G 0.65; as BGGR 0.65/0.82) and are mirrored relative to the snapshots (opposite plate-solve parity), so they reach a snapshot
+    reference only through plate solves (run(): session anchors). Decided by the file name: snapshot_* = ours."""
+    if os.path.basename(path).startswith('snapshot_'): return 'snapshot'
     if str(h.get('BAYERPAT', '')).strip().upper() == 'RGGB': return 'app'
     return 'snapshot'
 
@@ -57,7 +60,7 @@ def read_raw(path):
 def load(path, pattern=None):
     import cv2
     raw, h = read_raw(path)
-    fmt = frame_format(h)
+    fmt = frame_format(h, path)
     scale = FLUX_REF / max(1e-6, float(h.get('EXPTIME', 8) or 8) * float(h.get('ISOSPEED', 800) or 800))
     pat = pattern if pattern is not None else PATTERN
     if pat is not None and fmt == 'snapshot': raw -= pat                       # the fixed pattern is of our snapshots' camera mode only
@@ -233,9 +236,9 @@ def run(g, out, jobs, kappa, pattern_file=None, ref_file=None):
     for r, info in zip(rs, infos): info['utc'] = r['utc'].isoformat(); info['verdict'] = r.get('verdict')
     # frames that do not match the reference directly (another night, pointed and rotated differently: little of the field in common among the 150
     # brightest stars) are matched to an anchor frame of their own session (folder), and the anchor once to the reference with 300 stars: M = M_anchor . M_frame
-    reffmt = frame_format(read_raw(ref['file'])[1])
+    reffmt = frame_format(read_raw(ref['file'])[1], ref['file'])
     for k, i in enumerate(infos):            # a frame stored with the other parity cannot be matched to the reference by a similarity: any "match" would be false
-        if frame_format(read_raw(rs[k]['file'])[1]) != reffmt: i.pop('M', None); i['error'] = 'other parity: through its session anchor'
+        if frame_format(read_raw(rs[k]['file'])[1], rs[k]['file']) != reffmt: i.pop('M', None); i['error'] = 'other parity: through its session anchor'
     okf = lambda i: 'M' in i and i.get('matched', 0) >= 25 and i.get('rms_px', 9) <= 0.6
     import collections
     sessions = collections.defaultdict(list)
@@ -245,7 +248,7 @@ def run(g, out, jobs, kappa, pattern_file=None, ref_file=None):
         allk = [k for k, r in enumerate(rs) if os.path.dirname(r['file']) == sess]
         if len(ks) < 5: continue
         Ma = None; rsN = {n: stars(ry, n=n, satlevel=0.9 * 65535 * flux_scale(ref['file'])) for n in (300, 500)}
-        samefmt = frame_format(read_raw(rs[allk[0]]['file'])[1]) == reffmt
+        samefmt = frame_format(read_raw(rs[allk[0]]['file'])[1], rs[allk[0]]['file']) == reffmt
         for frac in ((0.5, 0.25, 0.75, 0.1, 0.9, 0.4, 0.6) if samefmt else ()):       # star bridging only for the same parity; the others go through the sky
             anchor = rs[allk[min(len(allk) - 1, int(frac * len(allk)))]]['file']
             ay, _, _ = load(anchor); sat = 0.9 * 65535 * flux_scale(anchor)
@@ -381,6 +384,7 @@ def main():
     ap.add_argument('--data', default=os.environ.get('ORIGIN_DATA_DIR', '/mnt/fits-backup/claude'))
     ap.add_argument('--night', help='evening date, YYYY-MM-DD (frames from noon that day to noon the next, UTC)')
     ap.add_argument('--files', help='@LIST (one path per line) or comma-separated FITS/.fz files to stack as one target, instead of --night (any source: our snapshots or the Origin app\'s Light frames)')
+    ap.add_argument('--pattern', help='--files: a fixed-pattern frame (pattern.fits from a --night run in the same camera mode) to subtract from our snapshots')
     ap.add_argument('--name', default='stack'); ap.add_argument('--ref', help='reference frame (e.g. another stack\'s, so the results share a grid)')
     ap.add_argument('--combine', help='DIR_A,DIR_B[,...]: noise-weighted luminance of these stacks (same grid), each scaled to the first by a fit over the frame; colour (U, V) from --colour')
     ap.add_argument('--colour', help='--combine: the stack whose U and V give the colour (default the first)')
@@ -401,7 +405,7 @@ def main():
             rows.append({'file': pth, 'exp': float(h.get('EXPTIME', 0) or 0), 'iso': int(h.get('ISOSPEED', 0) or 0), 'utc': t, 'hfr': 0, 'stars': 0, 'verdict': 'listed'})
         if not a.ref: sys.exit('--files needs --ref')
         g = {'name': a.name, 'filter': 'listed', 'aliases': [a.name], 'rows': rows}
-        return run(g, a.out or os.path.join(a.data, 'finals'), a.jobs, a.kappa, None, a.ref)      # writes OUT/<name>/
+        return run(g, a.out or os.path.join(a.data, 'finals'), a.jobs, a.kappa, a.pattern, a.ref)      # writes OUT/<name>/
     if not a.night: sys.exit('need --night, --files or --combine')
     out = a.out or os.path.join(a.data, 'finals', 'fullres_' + a.night.replace('-', ''))
     from datetime import datetime, timedelta, timezone

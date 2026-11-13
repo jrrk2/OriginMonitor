@@ -7,7 +7,7 @@ One picture per target: the restack (tools/restack.py) with the filter that has 
 colour neutralisation, hyperbolic stretch, half resolution), unprocessed otherwise. Small targets get a close crop for the card; the card opens the full field.
 The numbers in the captions come from each final's manifest.json and records.jsonl.
 """
-import argparse, collections, html, json, os, statistics
+import sys, argparse, collections, html, json, os, statistics
 from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
@@ -22,7 +22,7 @@ TARGETS = [
     ("IC_5070_Pelican_Nebula_Nebula",       "ic5070",   "Pelican Nebula, IC 5070",          None, None),
     ("NGC_7380_Wizard_Nebula_Nebula",       "ngc7380",  "Wizard Nebula, NGC 7380",          None, None),
     ("M45_Clear",                           "m45",      "Pleiades, M45",                    None, None),
-    ("Rosette_filter_Nebula",               "ngc2237",  "Rosette Nebula, NGC 2237",         None, (30, 38, 1459, 895)),
+    ("NGC_2244_Rosette_Nebula_Nebula",      "ngc2237",  "Rosette Nebula, NGC 2237/2244",    None, None),
     ("NGC_869_884_Double_Cluster_Clear",    "ngc869",   "Double Cluster, NGC 869 and 884",  None, None),
     ("M27_Nebula",                          "m27",      "Dumbbell Nebula, M27",             (761, 459, 600), None),
     ("M1_Clear",                            "m1",       "Crab Nebula, M1",                  (720, 363, 520), None),
@@ -31,7 +31,18 @@ TARGETS = [
     ("M33_Nebula",                          "m33",      "Triangulum Galaxy, M33",           None, None),
     ("M13_Clear",                           "m13",      "Hercules Cluster, M13",            (761, 509, 640), None),
     ("NGC_7000_North_America_Nebula_Nebula", "ngc7000",  "North America Nebula, NGC 7000",   None, None),
+    ("NGC_1499_California_Nebula_Nebula",   "ngc1499",  "California Nebula, NGC 1499",      None, None),
+    ("IC_1805_Heart_Nebula_Nebula",         "ic1805",   "Heart Nebula, IC 1805",            None, None),
+    ("IC_1848_Soul_Nebula_Nebula",          "ic1848",   "Soul Nebula, IC 1848",             None, None),
+    ("NGC_2264_Cone_Christmas_Tree_Nebula", "ngc2264",  "Cone Nebula and Christmas Tree Cluster, NGC 2264", None, None),
+    ("M82_Nebula",                          "m82",      "Cigar Galaxy, M82",                (720, 400, 640), None),
+    ("M97_Nebula",                          "m97",      "Owl Nebula, M97",                  (745, 430, 300), None),
 ]
+# entries whose picture comes from elsewhere than the final's own preview (the facts still come from the final):
+#   the Rosette's restack mixes a pre-filter reference night and comes out blue: the live stack (the same 375 frames) renders it properly
+IMAGE_FROM = {"NGC_2244_Rosette_Nebula_Nebula": "../../stacks/NGC_2244_Rosette_Nebula"}
+# the Crab at full resolution (tools/fullres_stack.py: quad-band colour, broadband + quad-band luminance), cropped to the Crab and its surroundings
+FULLRES = {"M1_Clear": "fullres_M1/M1_combined"}
 FILTER = {"Clear": "no filter", "Nebula": "Antlia quad-band nebula filter"}
 CARD_W, CARD_H = 720, 480
 
@@ -60,6 +71,7 @@ def night_label(nights):
 def card(im, crop):
     if crop:
         cx, cy, w = crop
+        w = min(w, im.width, im.height * CARD_W / CARD_H)
         h = w * CARD_H / CARD_W
         x0 = min(max(cx - w / 2, 0), im.width - w); y0 = min(max(cy - h / 2, 0), im.height - h)
         return im.resize((CARD_W, CARD_H), Image.LANCZOS, box=(x0, y0, x0 + w, y0 + h))
@@ -76,11 +88,33 @@ def main():
     a = ap.parse_args()
     gdir = os.path.join(a.out, "gallery"); os.makedirs(gdir, exist_ok=True)
     items = []
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import gallery_export as GE, numpy as np
     for name, slug, title, crop, box in TARGETS:
         d = os.path.join(a.finals, name)
-        f = facts(d)
-        im = Image.open(os.path.join(d, "preview.png")).convert("RGB")
-        if box: im = im.crop(box)
+        if name in FULLRES:
+            fd = os.path.join(a.finals, FULLRES[name]); m = json.load(open(os.path.join(fd, "manifest.json")))
+            parts = [json.load(open(os.path.join(st, "manifest.json"))) for st in (c["stack"] for c in m["combined"])]
+            nb = json.load(open(os.path.join(a.finals, "M1_Nebula", "manifest.json")))
+            nights = sorted(set(nb.get("nights", {})) | {"2025-12-31", "2026-01-23", "2026-04-05", "2026-10-11", "2026-10-13"})   # the broadband sessions that joined (2 Jan and 6 Apr did not plate-solve)
+            f = {"frames": sum(p.get("frames_stacked", 0) for p in parts), "minutes": sum(p.get("exposure_s", 0) for p in parts) / 60, "nights": nights,
+                 "filter": "quad-band colour; broadband + quad-band luminance, full resolution", "sub": None, "hfr": None}
+            rgb, cov, _ = GE.read_fullres(fd); H, W = cov.shape
+            out, _ = GE.finish(rgb[H // 2 - 450:H // 2 + 450, W // 2 - 675:W // 2 + 675], np.ones((900, 1350), np.float32), 0.5, 2048)
+            im = Image.fromarray((out * 255).astype(np.uint8))
+            crop = (im.width // 2, im.height // 2, 560)              # the card shows the Crab itself
+        else:
+            f = facts(d)
+            src = os.path.normpath(os.path.join(d, IMAGE_FROM[name])) if name in IMAGE_FROM else d
+            if box:
+                im = Image.open(os.path.join(src, "preview.png")).convert("RGB").crop(box)
+            else:                                   # the largest rectangle the rotated frames all cover (no wedges at the corners)
+                rgb, cov, _ = GE.read_state(os.path.join(src, "state.bin"))
+                arr, rect = GE.from_preview(src, cov, 0.85, 4096)
+                im = Image.fromarray((arr * 255).astype(np.uint8))
+                if crop:                            # card crops are in the stacker preview's pixels: shift them by the extra trim
+                    px0, py0, _, _ = GE.live_preview_rect(cov)
+                    crop = (crop[0] - (rect[0] - px0), crop[1] - (rect[1] - py0), crop[2])
         im.save(os.path.join(gdir, slug + ".jpg"), quality=90, optimize=True, progressive=True)
         card(im, crop).save(os.path.join(gdir, slug + "_card.jpg"), quality=85, optimize=True, progressive=True)
         f.update(slug=slug, title=title, w=im.width, h=im.height, cropped=bool(crop) and crop[2] < 0.6 * im.width)   # a card that only trims a wide field is not a close crop
@@ -125,7 +159,9 @@ footer{color:var(--dim);font-size:14px;padding-bottom:40px}
 <h1>OriginMonitor gallery</h1>
 <p>Deep-sky images taken unattended with a Celestron Origin (152 mm f/2.2 RASA, 1.48&Prime; per pixel) from Cambridge, UK, between %(first)s and %(last)s:
 %(n)d targets, %(hours).1f hours of stacked exposure over %(nights)d nights. Each target is one stack of all its good frames from every night
-(<code>tools/restack.py</code>), shown as the live stacker's own preview at half resolution: background extraction, colour neutralisation and a stretch, with no further processing.
+(<code>tools/restack.py</code>), shown as the live stacker's own preview at half resolution (background extraction, colour neutralisation and a stretch, no further processing),
+cropped to the area every rotated frame covers. The Crab is the exception: a full-resolution stack (<code>tools/fullres_stack.py</code>) of 4.1 hours over eight nights,
+with broadband and quad-band luminance and the quad-band filter's colour; its <a href="gallery/crab_crossfade.webp">broadband-to-narrowband crossfade</a> shows what each records.
 Click a picture for the full field (about 75&prime; &times; 50&prime;).</p>
 <p>The stacker, scheduler and unattended supervisor are in the <a href="https://github.com/jrrk2/OriginMonitor">OriginMonitor repository</a>; how they drive the telescope is
 drawn in <a href="state_machines.html">the state-machine charts</a>.</p>
