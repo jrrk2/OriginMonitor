@@ -1,5 +1,6 @@
 #include "OriginBackend.hpp"
 #include "DataDir.hpp"
+#include <QEventLoop>
 #include <QDebug>
 #include <QDateTime>
 #include <QUrl>
