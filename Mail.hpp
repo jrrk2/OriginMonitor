@@ -12,6 +12,12 @@
  *   OriginHeadless mail-login   -> prints a code and a URL; sign in once as the mailbox that should send; the refresh token is kept in
  *   ~/.config/origin/mail_token.json (mode 600) and renewed on every send (a token unused for 90 days expires: log in again).
  * The message is sent from the signed-in mailbox (Graph /me/sendMail) to "to".
+ *
+ * SMTP instead (used whenever mail.conf has an "smtp" object; Graph is then not touched):
+ *   {"smtp": {"url": "smtp://smtp.kimmitt.uk:25/kimmitt.uk", "from": "observatory@kimmitt.uk"}, "to": "jonathan@kimmitt.co.uk"}
+ * sent with curl (STARTTLS required; the URL's path is the EHLO name, which Stalwart wants to be a real domain).  On port 25 to the
+ * recipient's own MX no login is needed; for a submission port add "user" and "password_file" (relative to ~/.config/origin, mode 600).
+ * Optional "from_name" (default "Origin observatory").
  */
 namespace Mail {
 
