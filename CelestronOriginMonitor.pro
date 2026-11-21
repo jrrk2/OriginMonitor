@@ -57,6 +57,7 @@ HEADERS += \
     Registration.hpp \
     LiveStacker.hpp \
     GaiaCatalog.hpp \
+    StarSpectra.hpp \
     Image16.hpp \
     SkyMonitor.hpp \
     Astro.hpp \
