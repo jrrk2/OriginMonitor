@@ -462,6 +462,7 @@ QJsonObject ControlServer::doSolve(const QJsonObject& req)
         r["error"] = "not worth solving: " + fs["verdict"].toString() + (fs["why"].toString().isEmpty() ? QString() : " (" + fs["why"].toString() + ")"); return r;
     }
     QString idx = req["index_dir"].toString(); if (idx.isEmpty()) idx = qEnvironmentVariable("ORIGIN_INDEX_DIR", QDir::homePath() + "/astrometry_indices");
+    if (!QDir(idx).exists() && req["index_dir"].toString().isEmpty() && QDir("/usr/share/astrometry").exists()) idx = "/usr/share/astrometry";   // the distribution's index package
     if (!QDir(idx).exists()) return fail("index directory not found: " + idx + " (astrometry.net index files for 20-120 arcmin fields)");
     QTemporaryDir tmp; if (!tmp.isValid()) return fail("no temporary directory");
     const int cpu = req["cpulimit"].toInt(60);
