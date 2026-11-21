@@ -472,8 +472,8 @@ QJsonObject LiveStacker::calibrateColour(double raDeg, double decDeg, const QStr
     std::vector<double> px(cat.size()), py(cat.size());
     for (size_t i = 0; i < cat.size(); ++i) T.apply(0.5 * m_w + parity * xi[i] / s, 0.5 * m_h + eta[i] / s, px[i], py[i]);
     const StarColourModel model(m_refFilter);
-    const std::array<double, 3> white = model.predict(5800.0);
-    std::vector<double> rr, rb;
+    const std::array<double, 3> white = model.white();
+    std::vector<double> rr, rb, col;
     int candidates = 0;
     for (size_t i = 0; i < cat.size(); ++i) {
         const GaiaStar& g = cat[i];
@@ -500,9 +500,10 @@ QJsonObject LiveStacker::calibrateColour(double raDeg, double decDeg, const QStr
         double m[3];
         for (int c = 0; c < 3; ++c) m[c] = sum[c] - percentileOf(ann[c], 50) * na;
         if (m[0] <= 0 || m[1] <= 0 || m[2] <= 0) continue;
-        const std::array<double, 3> p = model.predict(StarColourModel::teffFromBpRp(g.bpRp));
+        const std::array<double, 3> p = model.predict(g.bpRp);
         rr.push_back((m[1] / p[1]) / (m[0] / p[0]));
         rb.push_back((m[1] / p[1]) / (m[2] / p[2]));
+        col.push_back(g.bpRp);
     }
     o["candidates"] = candidates; o["stars"] = int(rr.size());
     if (rr.size() < 15) return fail(QString("only %1 isolated Gaia stars measured").arg(rr.size()));
@@ -511,7 +512,20 @@ QJsonObject LiveStacker::calibrateColour(double raDeg, double decDeg, const QStr
     const double sR = mad(rr, medianOf(rr)) * white[1] / white[0] / std::sqrt(double(rr.size())), sB = mad(rb, medianOf(rb)) * white[1] / white[2] / std::sqrt(double(rb.size()));
     o["gain_r"] = gR; o["gain_b"] = gB; o["gain_r_err"] = sR; o["gain_b_err"] = sB;
     o["camera_gain_r"] = gR * m_wbR; o["camera_gain_b"] = gB * m_wbB;   // relative to the raw camera channels, comparable between stacks
-    o["filter_model"] = model.isTriband() ? "tri-band" : "clear";
+    o["filter_model"] = model.name();
+    // How the stars' gains drift with colour: the slope of log10(gain) against BP-RP, fitted to the stars within 3 MADs of the median. A model with the
+    // right filter and sensor curves leaves no slope; a missing or extra band tilts it (red stars too bright in one channel, blue ones in another)
+    auto trend = [&](const std::vector<double>& v) {
+        const double med = medianOf(v), sd = mad(v, med);
+        double n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+        for (size_t i = 0; i < v.size(); ++i) {
+            if (std::fabs(v[i] - med) > 3 * sd) continue;
+            const double x = col[i], y = std::log10(v[i]); n += 1; sx += x; sy += y; sxx += x * x; sxy += x * y;
+        }
+        const double den = n * sxx - sx * sx;
+        return n >= 10 && den > 0 ? (n * sxy - sx * sy) / den : 0.0;
+    };
+    o["trend_r_per_bprp"] = trend(rr); o["trend_b_per_bprp"] = trend(rb);
     if (!(gR > 0.25 && gR < 4 && gB > 0.25 && gB < 4)) return fail(QString("implausible gains R %1 B %2").arg(gR, 0, 'f', 2).arg(gB, 0, 'f', 2));
     // stars that disagree this much point at a damaged channel rather than at colour (the Rosette stack's blue plane, 2026-11-20: 10x the green noise)
     if (sR > 0.05 * gR || sB > 0.05 * gB) return fail(QString("the stars disagree: gains R %1 +- %2, B %3 +- %4").arg(gR, 0, 'f', 2).arg(sR, 0, 'f', 2).arg(gB, 0, 'f', 2).arg(sB, 0, 'f', 2));

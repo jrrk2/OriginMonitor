@@ -8,4 +8,4 @@ QT = core
 DEFINES += ORIGIN_NO_GUI
 INCLUDEPATH += $$PWD/..
 SOURCES += StackColour.cpp ../LiveStacker.cpp ../Registration.cpp ../Image16.cpp ../SkyFrame.cpp
-HEADERS += ../LiveStacker.hpp ../GaiaCatalog.hpp
+HEADERS += ../LiveStacker.hpp ../GaiaCatalog.hpp ../StarSpectra.hpp

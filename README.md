@@ -35,6 +35,12 @@ distributed by ESA under [CC BY-NC 3.0 IGO](https://creativecommons.org/licenses
   papers to cite and the file format.
 - Build it yourself straight from ESA with `tools/gaia_fetch.py` and `tools/gaia_pack.py`.
 
+**Star spectra and instrument curves.** The colour calibration predicts each star's signal from published data built into `GaiaCatalog.hpp` and `StarSpectra.hpp`:
+- the Pickles (1998, PASP 110, 863) stellar spectral library, as distributed by STScI, resampled by `tools/pickles_pack.py`;
+- each template's Gaia BP-RP, computed through the Gaia (E)DR3 passbands (Riello et al. 2021, A&A 649, A3; ESA/Gaia/DPAC); the passbands themselves are not included;
+- the Antlia Triband RGB Ultra II transmission, read from the 2025 curve Antlia publishes on its product page;
+- the Sony IMX178 colour response, read from the chart in The Imaging Source's Spectral Sensitivity whitepaper (courtesy of Sony).
+
 **PixInsight and PCL (record of 2026-11-21).** The PixInsight Class Library licence (v2.0) does not allow PCL source code to be used for automated code generation without
 written permission. All of the author's commits since December 2024 were made with AI assistance, so the author's PCL-based repositories (PCL arm64 port, PCLDev, starmask,
 simpleXISF) and mkmosaic, which carries a stretch ported from PCLDev, were made private on 2026-11-21.
