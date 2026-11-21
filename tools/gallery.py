@@ -51,7 +51,7 @@ KEEP_PICTURE = {"NGC_2244_Rosette_Nebula_Nebula"}
 def stack_of(finals, name):
     s = STACK_OF.get(name) or (name[:-len("_Nebula")] if name.endswith("_Nebula") else name)
     return os.path.normpath(os.path.join(finals, "..", "stacks", s))
-FILTER = {"Clear": "no filter", "Nebula": "Antlia quad-band nebula filter"}
+FILTER = {"Clear": "no filter", "Nebula": "Antlia Triband RGB Ultra II filter"}
 CARD_W, CARD_H = 720, 480
 
 
@@ -175,8 +175,8 @@ footer{color:var(--dim);font-size:14px;padding-bottom:40px}
 %(n)d targets, %(hours).1f hours of stacked exposure over %(nights)d nights. Each target is one stack of all its good frames from every night
 (<code>tools/restack.py</code>), shown at the stacker's half resolution with only a background level, a colour calibration and a stretch (no further processing),
 cropped to the area every rotated frame covers. The colour is calibrated against the ESA Gaia DR3 catalogue (ESA/Gaia/DPAC): the stack's stars are matched
-to Gaia, each star's camera signal is predicted from its BP&minus;RP colour through a model of the filter and sensor, and the red and blue channels are
-scaled so that a solar-type star is white (the Rosette's blue channel is too noisy for that, so it keeps the stacker's earlier star-based colour). The sky is then set neutral and the image stretched by the stacker's display stretch, after VeraLux HyperMetric Stretch by Riccardo Paterniti.
+to Gaia, each star's camera signal is predicted from a Pickles library spectrum of its BP&minus;RP colour through the filter's published curve and the
+Sony IMX178 sensor's colour response, and the red and blue channels are scaled so that a solar-type star is white (the Rosette's blue channel is too noisy for that, so it keeps the stacker's earlier star-based colour). The sky is then set neutral and the image stretched by the stacker's display stretch, after VeraLux HyperMetric Stretch by Riccardo Paterniti.
 Click a picture for the full field (about 75&prime; &times; 50&prime;).</p>
 <p>The stacker, scheduler and unattended supervisor are in the <a href="https://github.com/jrrk2/OriginMonitor">OriginMonitor repository</a>; how they drive the telescope is
 drawn in <a href="state_machines.html">the state-machine charts</a>.</p>
@@ -184,7 +184,7 @@ drawn in <a href="state_machines.html">the state-machine charts</a>.</p>
 <main>
 %(cards)s
 </main>
-<footer>Photographs &copy; Jonathan Kimmitt. Star HFR is the median half-flux radius of the stacked frames. &ldquo;Antlia quad-band&rdquo; is a narrowband filter fitted on 15 October 2026; earlier frames are unfiltered.</footer>
+<footer>Photographs &copy; Jonathan Kimmitt. Star HFR is the median half-flux radius of the stacked frames. The Antlia Triband RGB Ultra II is a tri-band filter (422&ndash;447, 481&ndash;508 and 649&ndash;680 nm: blue, H-beta and O III, H-alpha with N II and S II) fitted on 15 October 2026; earlier frames are unfiltered.</footer>
 </html>
 """ % {"first": human(all_nights[0]), "last": human(all_nights[-1]), "n": len(items), "hours": total_min / 60, "nights": len(all_nights), "cards": "\n".join(cards)}
     with open(os.path.join(a.out, "index.html"), "w") as fh:
