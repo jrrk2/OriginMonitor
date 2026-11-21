@@ -41,6 +41,7 @@
 #include <QProcess>
 #include <QSaveFile>
 #include <QPlainTextEdit>
+#include <QTextCursor>
 #include <QPushButton>
 #include <QQueue>
 #include <QFontDatabase>
@@ -305,7 +306,7 @@ public:
             r.type = path == "/planner" ? "text/html; charset=utf-8" : "application/json"; r.body = f.readAll(); return r;
         }
         if (path == "/" || path == "/now") return html(nowHtml(), 10);
-        if (path == "/log") { const QStringList lines = m_log->toPlainText().split('\n'); return html("<pre>" + esc(lines.mid(std::max(0, int(lines.size()) - 300)).join('\n')) + "</pre>", 15); }
+        if (path == "/log") { const QStringList lines = m_log->toPlainText().split('\n'); return html("<pre>" + esc(lines.mid(0, 300).join('\n')) + "</pre>", 15); }   // newest first, as the Log tab
         if (path == "/live") {
             if (!m_webLive.isValid() || m_webLive.elapsed() > 20000) { renderLive(); m_webLive.restart(); }
             return html(QString("<p class=dim>%1</p><p><img src='/img/live.jpg?v=%2' alt='live stack'></p>").arg(esc(m_liveInfo->text())).arg(QDateTime::currentSecsSinceEpoch()), 30);
@@ -540,7 +541,7 @@ private:
         auto* bar = new QHBoxLayout; m_showEv = new QCheckBox("telescope / daemon events"); m_showEv->setChecked(true);
         m_showRun = new QCheckBox("supervisor decisions"); m_showRun->setChecked(true); m_follow = new QCheckBox("follow"); m_follow->setChecked(true);
         bar->addWidget(m_showEv); bar->addWidget(m_showRun); bar->addStretch(); bar->addWidget(m_follow); v->addLayout(bar);
-        m_log = new QPlainTextEdit; m_log->setReadOnly(true); m_log->setMaximumBlockCount(5000); m_log->setLineWrapMode(QPlainTextEdit::NoWrap);
+        m_log = new QPlainTextEdit; m_log->setReadOnly(true); m_log->setLineWrapMode(QPlainTextEdit::NoWrap);
         m_log->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont)); v->addWidget(m_log);
         return w;
     }
@@ -630,10 +631,18 @@ private:
     {
         const QString keep = m_list->currentItem() ? m_list->currentItem()->data(Qt::UserRole).toString() : QString();
         m_list->clear();
-        const QFileInfoList dirs = QDir(m_dir + "/stacks").entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);   // newest first
-        for (const QFileInfo& d : dirs) {
+        // newest first by the last frame captured (colour.json), else by when state.bin was saved: a directory's own time only changes when files come or go
+        struct Entry { QFileInfo d; StackInfo s; QDateTime when; };
+        std::vector<Entry> entries;
+        for (const QFileInfo& d : QDir(m_dir + "/stacks").entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
             if (d.fileName().startsWith('_')) continue;                                  // stacks/_fragments_<date>: superseded fragments (tools/consolidate.py)
-            StackInfo s = readHeader(d.absoluteFilePath() + "/state.bin"); readColour(d.absoluteFilePath(), s);
+            Entry e{d, readHeader(d.absoluteFilePath() + "/state.bin"), {}}; readColour(d.absoluteFilePath(), e.s);
+            e.when = e.s.last.isValid() ? e.s.last : QFileInfo(d.absoluteFilePath() + "/state.bin").exists() ? QFileInfo(d.absoluteFilePath() + "/state.bin").lastModified() : d.lastModified();
+            entries.push_back(e);
+        }
+        std::stable_sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) { return a.when > b.when; });
+        for (const Entry& e : entries) {
+            const QFileInfo& d = e.d; const StackInfo& s = e.s;
             const QString text = s.ok ? QString("%1\n  %2 frames, %3 min%4   %5\n  %6").arg(d.fileName()).arg(s.frames).arg(s.exposure / 60, 0, 'f', 0)
                                             .arg(s.filter.isEmpty() ? QString() : ", " + s.filter).arg(captureRange(s, d.absoluteFilePath())).arg(corrections(s))
                                       : QString("%1\n  (no state)   %2").arg(d.fileName(), d.lastModified().toString("yyyy-MM-dd HH:mm"));
@@ -762,8 +771,14 @@ private:
     void append(const QString& kind, const QString& text)
     {
         if ((kind == "event" && !m_showEv->isChecked()) || (kind == "run" && !m_showRun->isChecked())) return;
-        m_log->appendPlainText((kind == "run" ? "[run]   " : "[event] ") + text);
-        if (m_follow->isChecked()) m_log->verticalScrollBar()->setValue(m_log->verticalScrollBar()->maximum());
+        // newest at the top; the block limit is kept here, since QPlainTextEdit's own would drop the newest lines from the top
+        QTextCursor c(m_log->document()); c.movePosition(QTextCursor::Start);
+        c.insertText((kind == "run" ? "[run]   " : "[event] ") + text + (m_log->document()->isEmpty() ? QString() : QString("\n")));
+        while (m_log->document()->blockCount() > 5000) {
+            QTextCursor e(m_log->document()); e.movePosition(QTextCursor::End); e.movePosition(QTextCursor::StartOfBlock, QTextCursor::KeepAnchor);
+            e.movePosition(QTextCursor::PreviousCharacter, QTextCursor::KeepAnchor); e.removeSelectedText();
+        }
+        if (m_follow->isChecked()) m_log->verticalScrollBar()->setValue(0);
     }
     void applyNight(bool on)
     {
