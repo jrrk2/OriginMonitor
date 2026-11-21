@@ -108,7 +108,10 @@ void applyFilter(QList<Target>& targets)
     if (!narrowbandFilter()) return;
     for (Target& t : targets) {
         t.narrowband = true;
-        if (t.boosted || emissionTarget(catalogId(t.key.isEmpty() ? t.name : t.key))) continue;
+        // a pair ("M81 + M82") counts as emission when any of its parts does
+        bool emission = false;
+        for (const QString& part : (t.key.isEmpty() ? t.name : t.key).split(" + ")) emission = emission || emissionTarget(catalogId(part));
+        if (t.boosted || emission) continue;
         t.prio = std::max(1, t.prio - kFilterPenalty); t.seen += t.seen.isEmpty() ? "no emission (filter)" : "; no emission (filter)";
     }
 }
@@ -156,7 +159,7 @@ QList<Target> loadTargets()
         t.faint = faintness(integratedMagnitudes().value(m.name, 99.0), m.size_arcmin.width(), m.size_arcmin.height());
         out.append(t);
     }
-    // curated non-Messier extras: RA hours, Dec degrees, size arcmin, priority
+    // curated extras (non-Messier objects, and pairs framed together: "M81 + M82" is centred midway, 37' apart, both inside the 75' x 50' field at any rotation): RA hours, Dec degrees, size arcmin, priority
     struct E { const char* n; double ra, dec, size; int p; double f; };   // f: faintness estimate, 0 bright .. 1 faint
     static const E extras[] = {
         {"NGC 7000 North America Nebula", 20.9783, 44.33, 120, 9, 1.0}, {"IC 5070 Pelican Nebula", 20.8, 44.35, 60, 7, 1.0},
@@ -167,7 +170,7 @@ QList<Target> loadTargets()
         {"NGC 1499 California Nebula", 4.0, 36.42, 145, 7, 1.0}, {"NGC 2244 Rosette Nebula", 6.5333, 4.95, 80, 8, 0.8}, {"NGC 7662 Blue Snowball", 23.43, 42.54, 0.5, 3, 0.0},
         {"NGC 457 Owl Cluster", 1.32, 58.3, 13, 4, 0.0}, {"NGC 7822 Cepheus Nebula", 0.0, 68.0, 60, 4, 0.9}, {"NGC 6888 Crescent Nebula", 20.2, 38.35, 20, 6, 0.8},
         {"NGC 7331 + Stephan Quintet", 22.62, 34.4, 10, 5, 0.7}, {"NGC 6946 Fireworks Galaxy", 20.58, 60.15, 11, 5, 0.7}, {"NGC 4565 Needle Galaxy", 12.6, 25.99, 16, 4, 0.6},
-        {"NGC 2264 Cone/Christmas Tree", 6.68, 9.9, 60, 6, 0.8}, {"Mel 20 Alpha Persei Cluster", 3.4, 49.0, 300, 4, 0.0},
+        {"NGC 2264 Cone/Christmas Tree", 6.68, 9.9, 60, 6, 0.8}, {"M81 + M82", 9.9286, 69.3725, 60, 7, 0.6}, {"Mel 20 Alpha Persei Cluster", 3.4, 49.0, 300, 4, 0.0},
         {"IC 434 Horsehead / NGC 2024 Flame", 5.6833, -2.4, 90, 8, 0.9}, {"NGC 1333", 3.4, 31.4, 10, 4, 0.6}, {"NGC 7789 Caroline's Rose", 23.95, 56.7, 15, 4, 0.0}};
     for (const E& e : extras) { Target t; t.name = t.key = e.n; t.ra = e.ra; t.dec = e.dec; t.size = e.size; t.prio = e.p; t.faint = e.f; t.type = "EXTRA"; out.append(t); }
     applyNovelty(out);
