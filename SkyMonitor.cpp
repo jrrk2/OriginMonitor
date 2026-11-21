@@ -88,7 +88,7 @@ QJsonObject SkyMonitor::setTarget(const QString& name, double raHours, double de
     m_target = name.isEmpty() ? "auto" : name;
     m_targetKnown = raHours >= 0 && raHours < 24 && decDeg >= -90 && decDeg <= 90;
     if (m_targetKnown) m_targetPos = {raHours, decDeg};
-    m_stack.reset(); m_sinceSave = 0; m_refHfr = 0; m_refStars = 0; m_regFailRun = 0;
+    m_stack.reset(); m_sinceSave = 0; m_colourTried = 0; m_refHfr = 0; m_refStars = 0; m_regFailRun = 0;
     bool resumed = false;
     if (!reset) resumed = m_stack.load(stackDirectory());
     QJsonObject o{{"ok", true}, {"target", m_target}, {"resumed", resumed}, {"stack", m_stack.summary()}};
@@ -103,7 +103,27 @@ void SkyMonitor::archiveStack(const QString& tag)
     QDir().rename(dir, dir + (tag.isEmpty() ? QString() : "_" + safeName(tag)) + "_" + QDateTime::currentDateTimeUtc().toString("yyyyMMdd_HHmmss"));
 }
 
-bool SkyMonitor::saveStack() { return m_stack.frames() > 0 && m_stack.save(stackDirectory()); }
+bool SkyMonitor::saveStack()
+{
+    if (m_stack.frames() <= 0) return false;
+    calibrateColour(false);
+    return m_stack.save(stackDirectory());
+}
+
+// Gaia colour calibration of the stack once it has 10 frames, again each time it has doubled since (the stars' colours are measured in the stack, so they
+// sharpen as it grows); a failed attempt is not repeated until the stack has doubled since it, so a missing catalogue costs one try per doubling.
+QJsonObject SkyMonitor::calibrateColour(bool force)
+{
+    const int n = m_stack.frames();
+    const int last = std::max(m_stack.colourFrames(), m_colourTried);
+    if (!force && (n < 10 || (last > 0 && n < 2 * last))) return QJsonObject{{"ok", false}, {"reason", "not due"}};
+    double ra = 0, dec = 0;
+    if (m_stack.hasPointing()) { ra = m_stack.pointingRa(); dec = m_stack.pointingDec(); }
+    else if (m_targetKnown) { ra = m_targetPos.raHours * 15.0; dec = m_targetPos.decDeg; }
+    else return QJsonObject{{"ok", false}, {"reason", "pointing unknown"}};
+    m_colourTried = n;
+    return m_stack.calibrateColour(ra, dec);
+}
 
 QJsonObject SkyMonitor::stackSummary() const
 {
@@ -394,7 +414,10 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
             verdict = "cloudy"; reasons << QString("sky %1% above the dark baseline: not used as the stack reference").arg(int(excess * 100));
         } else {
             rep = m_autoStack ? m_stack.add(F, exposureS, m_minTransparency, iso, filter) : LiveStacker::Report();
-            if (rep.accepted && rep.frames == 1) { m_refHfr = focus.hfrPx; m_refStars = focus.stars; }
+            if (rep.accepted && rep.frames == 1) {
+                m_refHfr = focus.hfrPx; m_refStars = focus.stars;
+                if (source != "unknown") m_stack.setPointing(pointing.raHours * 15.0, pointing.decDeg);   // where calibrateColour starts its Gaia match
+            }
             o["registration"] = QJsonObject{{"reference_frame", rep.accepted}, {"stacked", rep.accepted}, {"frames_in_stack", rep.frames}};
             if (!rep.accepted && m_autoStack) { verdict = F.stars.size() < 12 ? "cloudy" : "unknown"; reasons << rep.reason; }
             if (F.stars.size() < 25) { verdict = "cloudy"; reasons << QString("only %1 stars detected").arg(F.stars.size()); }

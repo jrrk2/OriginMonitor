@@ -590,7 +590,7 @@ QJsonObject ControlServer::handle(const QJsonObject& req)
     }
     if (cmd == "commands" || cmd == "help")
         return QJsonObject{{"ok", true}, {"note", "server commands; the OriginHeadless CLI has a fuller catalogue: OriginHeadless commands"},
-                           {"commands", QJsonArray{"ping", "connect", "status", "manual", "auto", "set", "snapshot", "mount_status", "goto", "goto_altaz", "tracking", "slew_rates", "focus_status", "analysis", "events", "target", "stack",
+                           {"commands", QJsonArray{"ping", "connect", "status", "manual", "auto", "set", "snapshot", "mount_status", "goto", "goto_altaz", "tracking", "slew_rates", "focus_status", "analysis", "events", "target", "stack", "stack_colour",
                                                    "sky_map", "preview", "monitor", "focuser_status", "focuser_move", "focuser_settings", "focuser_autofocus", "filter", "initialize", "unpark", "solve", "frame_stats", "sky_note", "sequence", "cancel_capture", "reboot", "send", "cache", "quit"}}};
     int ttl = cacheTtlMs(cmd);
     if (cmd == "target" && req.contains("name")) ttl = 0;                       // that form changes the target
@@ -681,6 +681,13 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
         SkyMonitor& sky = m_backend->sky();
         QJsonObject r{{"ok", true}, {"stack", sky.stackSummary()}};
         if (sky.stacker().frames() > 0 && sky.saveStack()) r["preview"] = sky.stackDirectory() + "/preview.png";
+        return r;
+    }
+    if (cmd == "stack_colour") {                      // Gaia colour calibration of the live stack now (otherwise it runs at 10 frames and each doubling), then save it
+        SkyMonitor& sky = m_backend->sky();
+        if (sky.stacker().frames() == 0) return fail("the live stack is empty");
+        QJsonObject r = sky.calibrateColour(true);
+        if (sky.saveStack()) r["preview"] = sky.stackDirectory() + "/preview.png";
         return r;
     }
     if (cmd == "preview") {                           // render the live stack to a PNG without saving the stack state (read-only; for monitors)
