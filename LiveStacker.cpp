@@ -184,12 +184,12 @@ static Image16 vlStretchToImage(std::vector<float> col[3], int w, int h)
     std::vector<float> rgb(n * 3), lum(n);
     for (size_t i = 0; i < n; ++i) for (int c = 0; c < 3; ++c) rgb[i * 3 + c] = col[c][i];
     { std::vector<float> s; for (size_t i = 0; i < n; i += 5) s.push_back(lumaOf(&rgb[i * 3])); const float top = std::max(percentileOf(s, 99.995), 1e-6f); for (auto& v : rgb) v = std::clamp(v / top, 0.f, 1.f); }
-    // neutralise: R and B medians of the darkest 5% matched to G
+    // neutralise: R and B sky levels matched to G. Each channel's own median over the whole frame, which is mostly sky once the model is removed;
+    // picking the darkest pixels by mean brightness instead selects the noise dips of the noisiest channel (R) and turned the background red
     {
-        std::vector<float> l; for (size_t i = 0; i < n; i += 4) l.push_back((rgb[i * 3] + rgb[i * 3 + 1] + rgb[i * 3 + 2]) / 3);
-        const float thr = percentileOf(l, 5); std::vector<float> bg[3];
-        for (size_t i = 0; i < n; i += 4) if ((rgb[i * 3] + rgb[i * 3 + 1] + rgb[i * 3 + 2]) / 3 <= thr) for (int c = 0; c < 3; ++c) bg[c].push_back(rgb[i * 3 + c]);
-        if (bg[1].size() > 100) { const float mr = percentileOf(bg[0], 50), mg = percentileOf(bg[1], 50), mb = percentileOf(bg[2], 50); for (size_t i = 0; i < n; ++i) { rgb[i * 3] = std::clamp(rgb[i * 3] + mg - mr, 0.f, 1.f); rgb[i * 3 + 2] = std::clamp(rgb[i * 3 + 2] + mg - mb, 0.f, 1.f); } }
+        std::vector<float> bg[3]; for (size_t i = 0; i < n; i += 4) for (int c = 0; c < 3; ++c) bg[c].push_back(rgb[i * 3 + c]);
+        const float mr = percentileOf(bg[0], 50), mg = percentileOf(bg[1], 50), mb = percentileOf(bg[2], 50);
+        for (size_t i = 0; i < n; ++i) { rgb[i * 3] = std::clamp(rgb[i * 3] + mg - mr, 0.f, 1.f); rgb[i * 3 + 2] = std::clamp(rgb[i * 3 + 2] + mg - mb, 0.f, 1.f); }
     }
     // hyperbolic stretch, strength solved so the median luminance lands on the target background
     const float targetBg = 0.10f, protectB = 5.f, conv = 3.5f;
@@ -221,6 +221,10 @@ static Image16 vlStretchToImage(std::vector<float> col[3], int w, int h)
         std::vector<float> l2; for (size_t i = 0; i < n; i += 5) l2.push_back(lumaOf(&rgb[i * 3]));
         const float cur = percentileOf(l2, 50);
         if (cur > 0 && cur < 1 && std::fabs(cur - targetBg) > 1e-3f) { const float m = cur * (targetBg - 1) / (cur * (2 * targetBg - 1) - targetBg); for (auto& v : rgb) v = mtfF(v, m); }
+        // the stretch treats the noisier R and B planes differently from G, so match the sky medians once more where they are seen
+        std::vector<float> bg[3]; for (size_t i = 0; i < n; i += 4) for (int c = 0; c < 3; ++c) bg[c].push_back(rgb[i * 3 + c]);
+        const float mr = percentileOf(bg[0], 50), mg = percentileOf(bg[1], 50), mb = percentileOf(bg[2], 50);
+        for (size_t i = 0; i < n; ++i) { rgb[i * 3] = std::clamp(rgb[i * 3] + mg - mr, 0.f, 1.f); rgb[i * 3 + 2] = std::clamp(rgb[i * 3 + 2] + mg - mb, 0.f, 1.f); }
         for (auto& v : rgb) v = softClipF(v);
     }
     Image16 img = Image16::make(w, h);
