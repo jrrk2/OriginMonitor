@@ -214,7 +214,8 @@ FilterGuess detectFilter(const SkyFrame& f)
     if (g.stars < kFilterMinStars) return g;
     std::nth_element(bg.begin(), bg.begin() + bg.size() / 2, bg.end());
     g.starBG = bg[bg.size() / 2];
-    if (g.starBG > 0.3 && g.starBG < 2.0) g.name = g.starBG > kTribandMinBG ? "Nebula" : "Clear";
+    if (g.starBG > 0.3 && g.starBG < kClearMaxBG) g.name = "Clear";
+    else if (g.starBG > kTribandMinBG && g.starBG < 2.0) g.name = "Nebula";
     return g;
 }
 

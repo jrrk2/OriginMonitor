@@ -38,10 +38,11 @@ SkyFrame analyseFrame(const QByteArray& fitsData, double detectSigma = 6.0, int 
 
 /// The filter a frame was taken through, from its stars, not from the FILTER keyword (which only says what the telescope was told is fitted). The raw blue/green
 /// ratio of the isolated stars separates the two filters by a wide margin (survey of 924 archive frames, 2026-11-21, per-night medians): "Clear" 0.56-0.68,
-/// the "Nebula" tri-band 1.01-1.20, whose blue window lets through more than its green one. Empty name when fewer than kFilterMinStars stars can be measured
-/// (cloud, twilight: a dawn frame with 12 stars read 0.10).
+/// the "Nebula" tri-band 1.01-1.20, whose blue window lets through more than its green one; single frames 0.48-0.79 and 0.97-1.36. Empty name when fewer than
+/// kFilterMinStars stars can be measured (cloud, twilight: a dawn frame with 12 stars read 0.10) or the ratio falls between kClearMaxBG and kTribandMinBG.
+/// Poor frames can still read the other filter (defocused, dawn: 4 of 21,000 in the 2026-11-21 restack), so SkyMonitor does not act on one frame.
 constexpr int kFilterMinStars = 15;
-constexpr double kTribandMinBG = 0.85;
+constexpr double kClearMaxBG = 0.80, kTribandMinBG = 0.95;
 struct FilterGuess { QString name; double starBG = 0; int stars = 0; };
 FilterGuess detectFilter(const SkyFrame& f);
 

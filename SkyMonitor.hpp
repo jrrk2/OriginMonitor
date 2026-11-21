@@ -89,6 +89,8 @@ private:
     LiveStacker m_stack;
     int m_sinceSave = 0, m_mapDirty = 0;
     int m_colourTried = 0;                     // stack size at the last colour calibration attempt
+    int m_filterSwitchRun = 0;                 // good frames in a row whose stars say another filter than the stack's
+    static constexpr int kFilterSwitchFrames = 3;
     QMap<QString, double> m_darkRate;          // "iso800" -> lowest (sky ADU per second) seen in dark conditions
     QJsonObject m_skyMap;                      // "az_alt" -> {good, bad (obstruction only), cloud, unk, good_dates[], bad_dates[], cloud_dates[]}
     QList<QPair<double, double>> m_horizon;    // [az, min alt] from the horizon file

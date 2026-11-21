@@ -90,7 +90,7 @@ QJsonObject SkyMonitor::setTarget(const QString& name, double raHours, double de
     m_target = name.isEmpty() ? "auto" : name;
     m_targetKnown = raHours >= 0 && raHours < 24 && decDeg >= -90 && decDeg <= 90;
     if (m_targetKnown) m_targetPos = {raHours, decDeg};
-    m_stack.reset(); m_sinceSave = 0; m_colourTried = 0; m_refHfr = 0; m_refStars = 0; m_regFailRun = 0;
+    m_stack.reset(); m_sinceSave = 0; m_colourTried = 0; m_filterSwitchRun = 0; m_refHfr = 0; m_refStars = 0; m_regFailRun = 0;
     bool resumed = false;
     if (!reset) resumed = m_stack.load(stackDirectory());
     QJsonObject o{{"ok", true}, {"target", m_target}, {"resumed", resumed}, {"stack", m_stack.summary()}};
@@ -355,9 +355,14 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     // a stack whose reference was taken with another filter is archived (stacks/<target>_<filter>_<UTC>) and this frame may seed a new one
     if (!detectedFilter.isEmpty() && !headerFilter.isEmpty() && detectedFilter.compare(headerFilter, Qt::CaseInsensitive) != 0)
         filterNote = QString("FILTER says %1 but the stars' colour says %2: is ~/.config/origin/filter up to date?").arg(headerFilter, detectedFilter);
+    // A change of filter ends the stack only after kFilterSwitchFrames good frames in a row (sharp enough to seed a stack) whose stars say the other filter: one
+    // defocused or dawn frame read as the other filter archived Cepheus's 579-frame stack in the 2026-11-21 restack. Frames that disagree before that are not stacked.
     const bool filterDiffers = m_stack.hasReference() && !filter.isEmpty() && !m_stack.referenceFilter().isEmpty() && m_stack.referenceFilter().compare(filter, Qt::CaseInsensitive) != 0;
-    const bool filterUncertain = filterDiffers && detectedFilter.isEmpty();
+    const bool filterEvidence = filterDiffers && !detectedFilter.isEmpty() && focus.valid && focus.stars >= 25 && focus.hfrPx > 0 && focus.hfrPx < 4.0;
+    if (!filterDiffers) m_filterSwitchRun = 0; else if (filterEvidence) ++m_filterSwitchRun;
+    const bool filterUncertain = filterDiffers && m_filterSwitchRun < kFilterSwitchFrames;
     if (filterDiffers && !filterUncertain) {
+        m_filterSwitchRun = 0;
         const QString old = m_stack.referenceFilter();
         archiveStack(old); m_stack.reset(); m_refHfr = 0; m_refStars = 0; m_regFailRun = 0;
         filterNote += (filterNote.isEmpty() ? "" : "; ") + QString("the stack was taken with filter %1, this frame with %2: archived, a new stack starts").arg(old, filter);
@@ -452,7 +457,8 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     } else if (haveStack) {
         QJsonObject reg = o["registration"].toObject(); reg["stacked"] = false; reg["frames_in_stack"] = m_stack.frames();
         if (verdict != "clear" && verdict != "hazy") reg["refused_because"] = "frame judged " + verdict;
-        else if (filterUncertain) reg["refused_because"] = QString("FILTER says %1, the stack is %2, and too few stars to see which is fitted").arg(filter, m_stack.referenceFilter());
+        else if (filterUncertain) reg["refused_because"] = QString("filter %1 (%2), the stack is %3: %4 of %5 good frames in a row needed to start a new stack")
+                                                             .arg(filter, detectedFilter.isEmpty() ? QString("from FILTER") : QString("from the stars")).arg(m_stack.referenceFilter()).arg(m_filterSwitchRun).arg(kFilterSwitchFrames);
         o["registration"] = reg;
     }
 

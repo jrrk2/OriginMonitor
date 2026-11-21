@@ -596,6 +596,7 @@ private:
         if (!s.first.isValid()) return "saved " + QFileInfo(dir + "/state.bin").lastModified().toString("yyyy-MM-dd HH:mm");
         const QDateTime a = s.first.toLocalTime(), b = s.last.toLocalTime();
         if (a.secsTo(b) < 16 * 3600) return a.toString("yyyy-MM-dd HH:mm") + "-" + b.toString("HH:mm");
+        if (a.date() == b.date()) return a.toString("yyyy-MM-dd HH:mm") + " to " + b.toString("HH:mm");
         return a.toString("yyyy-MM-dd") + " to " + b.toString("yyyy-MM-dd");
     }
     static QString corrections(const StackInfo& s)
