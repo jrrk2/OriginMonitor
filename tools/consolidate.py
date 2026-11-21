@@ -8,7 +8,8 @@ Without --apply it prints the plan and changes nothing. Run tools/restack.py fir
   * names: each final goes to stacks/<the planner's key> (M33, NGC_7000_North_America_Nebula), the directory the run resumes. The final taken with the filter now fitted
     (~/.config/origin/filter) gets the plain name; the other filter's goes to <key>_<Filter> (M33_Clear), which the planner still counts for coverage but the live
     stacker never resumes, so a night through one filter does not archive the other filter's stack. Names the planner does not know (IC405_Flaming_Star) are kept.
-  * a live stack with more exposure than its final (the final re-judges every frame against its own reference) is left in place
+  * a live stack with more exposure than its final (the final re-judges every frame against its own reference) is left in place, unless it was begun before the
+    Bayer layout was fixed (no "bayer_layout": "fixed" in its colour.json): those always give way to the final
   * every other live stack of those targets (aliases, archived copies, pre-filter and "auto" fragments) is moved to stacks/_fragments_<YYYYMMDD>/; nothing is deleted
   * each new stack is dated by its last frame (frames.tsv), so the planner's "imaged N days ago" stays true
   * finals under --min-frames frames are skipped: a new stack starts fresh instead of from a token reference
@@ -55,6 +56,12 @@ def header(path):
     except (OSError, struct.error, UnicodeDecodeError): return 0, 0.0, ''
 
 
+def fixed_layout(d):
+    """True when the stack in directory d was begun with the fixed Bayer layout (colour.json "bayer_layout": "fixed", LiveStacker::saveColour)"""
+    try: return json.load(open(os.path.join(d, 'colour.json'))).get('bayer_layout') == 'fixed'
+    except (OSError, ValueError): return False
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--data', default='/mnt/fits-backup/claude'); ap.add_argument('--min-frames', type=int, default=10); ap.add_argument('--apply', action='store_true')
@@ -74,15 +81,16 @@ def main():
     for d in sorted(os.listdir(stacks)):
         p = os.path.join(stacks, d)
         if not os.path.isdir(p) or d.startswith('_'): continue
-        n, sec, flt = header(os.path.join(p, 'state.bin')); live[d] = {'id': cid(d), 'frames': n, 'sec': sec, 'filter': flt, 'copy': bool(COPY.search(d))}
+        n, sec, flt = header(os.path.join(p, 'state.bin')); live[d] = {'id': cid(d), 'frames': n, 'sec': sec, 'filter': flt, 'copy': bool(COPY.search(d)), 'fixed': fixed_layout(p)}
 
-    # left in place: a live stack through the same filter with more exposure than its final, and one that already is its final (a re-run)
+    # left in place: a live stack through the same filter with more exposure than its final, and one that already is its final (a re-run). A live stack begun before
+    # the Bayer layout was fixed (2026-11-21) never wins on exposure: a third or more of its tri-band frames have green swapped with red and blue
     keep = set()
     for d, v in list(plan.items()):
         l = live.get(d)
         if not l or l['copy'] or l['filter'].lower() != v['filter'].lower(): continue
-        if l['frames'] == v['frames'] and abs(l['sec'] - v['sec']) < 1: keep.add(d); del plan[d]
-        elif l['sec'] > v['sec']:
+        if l['frames'] == v['frames'] and abs(l['sec'] - v['sec']) < 1 and l['fixed']: keep.add(d); del plan[d]
+        elif l['sec'] > v['sec'] and l['fixed']:
             print('keeping the live %s: %d frames, %.0f min, more than the final (%.0f min)' % (d, l['frames'], l['sec'] / 60, v['sec'] / 60)); keep.add(d); del plan[d]
     ids = {v['id'] for v in plan.values()}
     print('%-40s %-6s %6s %5s   %s' % ('live stack after', 'filter', 'frames', 'min', 'moved aside (frames/min; * = a copy the planner does not count)'))
@@ -102,7 +110,8 @@ def main():
             shutil.move(os.path.join(stacks, d), to)
     for dest, v in plan.items():
         p = os.path.join(stacks, dest); os.makedirs(p)
-        for n in ('state.bin', 'preview.png'): shutil.copy2(os.path.join(v['src'], n), os.path.join(p, n))
+        for n in ('state.bin', 'preview.png', 'colour.json'):
+            if os.path.exists(os.path.join(v['src'], n)): shutil.copy2(os.path.join(v['src'], n), os.path.join(p, n))
         last = max(l.split('\t')[3] for l in open(os.path.join(v['src'], 'frames.tsv')) if l.strip())
         t = calendar.timegm(time.strptime(last, '%Y-%m-%dT%H:%M:%S'))
         for x in (os.path.join(p, 'state.bin'), os.path.join(p, 'preview.png'), p): os.utime(x, (t, t))

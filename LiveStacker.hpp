@@ -4,6 +4,7 @@
 #include "SkyFrame.hpp"
 
 #include "Image16.hpp"
+#include <QDateTime>
 #include <QJsonObject>
 #include <QString>
 #include <vector>
@@ -35,7 +36,8 @@ public:
     /// Register only (no stacking): used to judge a frame against the stack's star field. iso <= 0: unknown, taken as the reference's.
     Report assess(const SkyFrame& frame, double exposureS, int iso = 0) const;
     /// Register and stack. Frames that cannot be registered, or that are far below the reference's clarity, are refused.
-    Report add(const SkyFrame& frame, double exposureS, double minTransparency = 0.5, int iso = 0, const QString& filter = QString());
+    /// captured: when the frame was taken (FITS DATE-OBS), kept as the stack's first and last capture times
+    Report add(const SkyFrame& frame, double exposureS, double minTransparency = 0.5, int iso = 0, const QString& filter = QString(), const QDateTime& captured = QDateTime());
 
     bool hasReference() const { return m_frames > 0; }
     int frames() const { return m_frames; }
@@ -48,11 +50,30 @@ public:
     Image16 preview() const;                               // stretched (16 bits per channel), cropped to the well-covered area
     QJsonObject summary() const;
 
-    bool save(const QString& dir) const;                   // state.bin + preview.png
+    /// Colour calibration against Gaia DR3 (GaiaCatalog.hpp): the stack's reference stars are matched to the catalogue around (raDeg, decDeg), every isolated
+    /// Gaia star in the field is measured in the stack, and red and blue gains are fitted that bring the measured colours onto the black-body colours predicted
+    /// from Gaia BP-RP through the filter and sensor (a 5800 K star comes out white). On success preview() uses the gains instead of the first frame's star
+    /// median; the report says why when it fails (no catalogue, no match, too few stars) and the stack keeps its old colour. The stacked sums are not changed.
+    QJsonObject calibrateColour(double raDeg, double decDeg, const QString& catalog = QString(), double arcsecPerPx = kArcsecPerPx, double marginDeg = 0.2);
+    /// Where the mount pointed for the reference frame (degrees): the starting point of calibrateColour's catalogue match
+    void setPointing(double raDeg, double decDeg) { m_pointRa = raDeg; m_pointDec = decDeg; }
+    bool hasPointing() const { return m_pointDec >= -90 && m_pointDec <= 90; }
+    double pointingRa() const { return m_pointRa; }
+    double pointingDec() const { return m_pointDec; }
+    int colourFrames() const { return m_ccFrames; }
+    bool fixedLayout() const { return m_fixedLayout; }
+    QDateTime firstCapture() const { return m_firstCapture; }   // earliest and latest capture time of the stacked frames (invalid: not recorded, stacks saved before 2026-11-21)
+    QDateTime lastCapture() const { return m_lastCapture; }    // every frame split with the fixed Bayer layout (stacks begun since 2026-11-21); false: an older stack, some frames possibly swapped   // stack size at the last successful colour calibration (0: never)
+    static constexpr double kArcsecPerPx = 2.955;     // half-resolution pixel of the Origin (2 x 2.4 um at 335 mm)
+
+    bool save(const QString& dir) const;                   // state.bin + colour.json (pointing, colour calibration) + preview.png
     bool load(const QString& dir);
+    bool saveColourAndPreview(const QString& dir) const { return saveColour(dir) && preview().savePng(dir + "/preview.png"); }   // leaves state.bin alone
     void reset();
 
 private:
+    bool saveColour(const QString& dir) const;
+    void loadColour(const QString& dir);
     Report registerFrame(const SkyFrame& f, double exposureS, int iso, Similarity* T) const;
     double isoScale(int iso) const { return iso > 0 && m_refIso > 0 ? double(iso) / m_refIso : 1.0; }   // signal in ADU is proportional to ISO (2026-10-27 ladder: ISO 1600 = 2 x ISO 800; ISO 200 read 0.25 x)
 
@@ -65,6 +86,12 @@ private:
     bool m_haveLast = false;
     std::vector<SkyStar> m_refStars;                       // brightest reference stars, reference-frame coordinates
     double m_wbR = 1, m_wbB = 1;                           // gains that make the median star neutral
+    double m_pointRa = 0, m_pointDec = -999;               // reference frame's pointing, degrees (dec outside +-90: unknown)
+    double m_ccR = 1, m_ccB = 1;                           // Gaia colour calibration, on top of m_wbR/m_wbB (display only)
+    int m_ccStars = 0, m_ccFrames = 0;                     // stars it used, stack size when it ran (0: not calibrated)
+    QJsonObject m_ccReport;                                // the last successful calibration's report
+    bool m_fixedLayout = false;                            // begun with the fixed Bayer layout (SkyFrame.cpp), recorded in colour.json
+    QDateTime m_firstCapture, m_lastCapture;               // capture times of the stacked frames, UTC, recorded in colour.json
     std::vector<double> m_sx[3], m_sx2[3], m_sw[3];        // per colour: sum w*v, sum w*v^2, sum w
 };
 

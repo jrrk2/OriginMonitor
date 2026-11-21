@@ -311,9 +311,22 @@ public:
             return html(QString("<p class=dim>%1</p><p><img src='/img/live.jpg?v=%2' alt='live stack'></p>").arg(esc(m_liveInfo->text())).arg(QDateTime::currentSecsSinceEpoch()), 30);
         }
         if (path == "/stacks") {
-            reloadStacks(); QString h = "<h2>Stacks</h2><table>";
-            for (int i = 0; i < m_list->count(); ++i) h += QString("<tr><td><a href='/stack/%1'>%2</a></td></tr>").arg(i).arg(esc(m_list->item(i)->text()));
-            return html(h + "</table>", 0);
+            reloadStacks();
+            QString h = "<h2>Stacks</h2><p class=dim>Colour: <b>Gaia</b> = calibrated against Gaia DR3 star colours, <b>star WB</b> = white balance from the first frame's stars only. "
+                        "Bayer: <b>fixed</b> = every frame split into colour the right way, <b>old</b> = stacked before 2026-11-21, when a third or more of tri-band frames "
+                        "had red/blue and green swapped (washed-out nebula colour); restacking fixes it.</p>"
+                        "<table><tr><th>Stack</th><th>Frames</th><th>Min</th><th>Filter</th><th>Colour</th><th>Bayer</th><th>Captured</th></tr>";
+            int good = 0;
+            for (int i = 0; i < m_list->count(); ++i) {
+                const QString dir = m_list->item(i)->data(Qt::UserRole).toString();
+                StackInfo s = readHeader(dir + "/state.bin"); readColour(dir, s);
+                if (s.gaia && s.fixedLayout) ++good;
+                h += QString("<tr><td><a href='/stack/%1'>%2</a></td><td>%3</td><td>%4</td><td>%5</td><td>%6</td><td>%7</td><td class=dim>%8</td></tr>")
+                         .arg(i).arg(esc(QFileInfo(dir).fileName())).arg(s.frames).arg(s.exposure / 60, 0, 'f', 0).arg(esc(s.filter))
+                         .arg(s.gaia ? "<b>Gaia</b>" : "star WB").arg(s.fixedLayout ? "<b>fixed</b>" : "old")
+                         .arg(esc(captureRange(s, dir)));
+            }
+            return html(h + QString("</table><p class=dim>%1 of %2 stacks fully corrected (Gaia colour and fixed Bayer layout).</p>").arg(good).arg(m_list->count()), 0);
         }
         if (path.startsWith("/stack/")) {
             bool ok = false; const int i = path.mid(7).toInt(&ok); if (!ok || i < 0 || i >= m_list->count()) { r.status = 404; r.type = "text/plain"; r.body = "no such stack\n"; return r; }
@@ -565,7 +578,32 @@ private:
         connect(m_list, &QListWidget::currentItemChanged, this, [this](QListWidgetItem* it) { if (it) showStack(it->data(Qt::UserRole).toString()); });
         return sp;
     }
-    struct StackInfo { int frames = 0, w = 0, h = 0; double exposure = 0; QString filter; bool ok = false; };
+    struct StackInfo { int frames = 0, w = 0, h = 0; double exposure = 0; QString filter; bool ok = false; bool gaia = false, fixedLayout = false; int gaiaStars = 0; QDateTime first, last; };
+    // colour.json beside state.bin (LiveStacker::saveColour): the Gaia colour calibration, and "bayer_layout": "fixed" for stacks begun since the per-frame Bayer vote
+    // was dropped (2026-11-21; older stacks have a third or more of their tri-band frames with red/blue and green swapped)
+    static void readColour(const QString& dir, StackInfo& s)
+    {
+        QFile f(dir + "/colour.json");
+        if (!f.open(QIODevice::ReadOnly)) return;
+        const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object(), c = o["calibration"].toObject();
+        s.gaia = c["ok"].toBool(); s.gaiaStars = c["stars"].toInt(); s.fixedLayout = o["bayer_layout"].toString() == "fixed";
+        const QJsonObject cap = o["capture"].toObject();
+        s.first = QDateTime::fromString(cap["first"].toString(), Qt::ISODate); s.last = QDateTime::fromString(cap["last"].toString(), Qt::ISODate);
+    }
+    // the stack's capture range from its frames' DATE-OBS ("2026-10-16 to 2026-11-20", or one night's times); stacks that never recorded it: the state file's date
+    static QString captureRange(const StackInfo& s, const QString& dir)
+    {
+        if (!s.first.isValid()) return "saved " + QFileInfo(dir + "/state.bin").lastModified().toString("yyyy-MM-dd HH:mm");
+        const QDateTime a = s.first.toLocalTime(), b = s.last.toLocalTime();
+        if (a.secsTo(b) < 16 * 3600) return a.toString("yyyy-MM-dd HH:mm") + "-" + b.toString("HH:mm");
+        if (a.date() == b.date()) return a.toString("yyyy-MM-dd HH:mm") + " to " + b.toString("HH:mm");
+        return a.toString("yyyy-MM-dd") + " to " + b.toString("yyyy-MM-dd");
+    }
+    static QString corrections(const StackInfo& s)
+    {
+        return QString("%1, %2").arg(s.gaia ? QString("Gaia colour (%1 stars)").arg(s.gaiaStars) : QString("colour NOT calibrated"),
+                                     s.fixedLayout ? QString("Bayer fixed") : QString("old Bayer (restack)"));
+    }
     // state.bin: magic, w, h, frames (int32), [LST2+: reference ISO (int32)] [LST3: filter length (int32), filter], total exposure (double).
     // Reading only LST1 showed every stack saved since 2026-10-28 (LST2/3) as "(no state)".
     static StackInfo readHeader(const QString& file)
@@ -595,9 +633,9 @@ private:
         const QFileInfoList dirs = QDir(m_dir + "/stacks").entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);   // newest first
         for (const QFileInfo& d : dirs) {
             if (d.fileName().startsWith('_')) continue;                                  // stacks/_fragments_<date>: superseded fragments (tools/consolidate.py)
-            const StackInfo s = readHeader(d.absoluteFilePath() + "/state.bin");
-            const QString text = s.ok ? QString("%1\n  %2 frames, %3 min%4   %5").arg(d.fileName()).arg(s.frames).arg(s.exposure / 60, 0, 'f', 0)
-                                            .arg(s.filter.isEmpty() ? QString() : ", " + s.filter).arg(d.lastModified().toString("yyyy-MM-dd HH:mm"))
+            StackInfo s = readHeader(d.absoluteFilePath() + "/state.bin"); readColour(d.absoluteFilePath(), s);
+            const QString text = s.ok ? QString("%1\n  %2 frames, %3 min%4   %5\n  %6").arg(d.fileName()).arg(s.frames).arg(s.exposure / 60, 0, 'f', 0)
+                                            .arg(s.filter.isEmpty() ? QString() : ", " + s.filter).arg(captureRange(s, d.absoluteFilePath())).arg(corrections(s))
                                       : QString("%1\n  (no state)   %2").arg(d.fileName(), d.lastModified().toString("yyyy-MM-dd HH:mm"));
             auto* it = new QListWidgetItem(text); it->setData(Qt::UserRole, d.absoluteFilePath()); m_list->addItem(it);
             if (d.absoluteFilePath() == keep) m_list->setCurrentItem(it);
@@ -606,11 +644,11 @@ private:
     }
     void showStack(const QString& dir)
     {
-        const StackInfo s = readHeader(dir + "/state.bin");
+        StackInfo s = readHeader(dir + "/state.bin"); readColour(dir, s);
         const QFileInfo prev(dir + "/preview.png");
-        m_stackInfo->setText(QString("%1 - %2 frames, %3 min%4 (%5 x %6 px); preview written %7").arg(QFileInfo(dir).fileName()).arg(s.frames).arg(s.exposure / 60, 0, 'f', 0)
+        m_stackInfo->setText(QString("%1 - %2 frames, %3 min%4 (%5 x %6 px); preview written %7; %8").arg(QFileInfo(dir).fileName()).arg(s.frames).arg(s.exposure / 60, 0, 'f', 0)
                                  .arg(s.filter.isEmpty() ? QString() : ", filter " + s.filter).arg(s.w).arg(s.h)
-                                 .arg(prev.exists() ? prev.lastModified().toString("yyyy-MM-dd HH:mm") : "never"));
+                                 .arg(prev.exists() ? prev.lastModified().toString("yyyy-MM-dd HH:mm") : "never").arg(corrections(s) + "; captured " + captureRange(s, dir)));
         m_stackView->setImage(prev.exists() ? QImage(prev.absoluteFilePath()) : QImage(), prev.exists() ? QFileInfo(dir).fileName() : QString("no preview.png in this stack"));
     }
     // ---------------------------------------------------------------- polling

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QList>
 #include <QString>
 #include <vector>
 
@@ -34,6 +35,22 @@ struct SkyFrame {
 };
 
 SkyFrame analyseFrame(const QByteArray& fitsData, double detectSigma = 6.0, int maxStars = 300);
+
+/// The filter a frame was taken through, from its stars, not from the FILTER keyword (which only says what the telescope was told is fitted). The raw blue/green
+/// ratio of the isolated stars separates the two filters by a wide margin (survey of 924 archive frames, 2026-11-21, per-night medians): "Clear" 0.56-0.68,
+/// the "Nebula" tri-band 1.01-1.20, whose blue window lets through more than its green one; single frames 0.48-0.79 and 0.97-1.36. Empty name when fewer than
+/// kFilterMinStars stars can be measured (cloud, twilight: a dawn frame with 12 stars read 0.10) or the ratio falls between kClearMaxBG and kTribandMinBG.
+/// Poor frames can still read the other filter (defocused, dawn: 4 of 21,000 in the 2026-11-21 restack), so SkyMonitor does not act on one frame.
+constexpr int kFilterMinStars = 15;
+constexpr double kClearMaxBG = 0.80, kTribandMinBG = 0.95;
+struct FilterGuess { QString name; double starBG = 0; int stars = 0; };
+FilterGuess detectFilter(const SkyFrame& f);
+
+/// FITS header cards: one 80-character card, and a copy of a FITS file with cards added before END (the header grows by a block when it must)
+QByteArray fitsCard(const char* key, const QString& value, const QString& comment, bool quoted);
+QByteArray fitsWithCards(const QByteArray& fits, const QList<QByteArray>& cards);
+/// FILTDTCT (the detected filter, or UNKNOWN), FILTDBG (median raw star blue/green), FILTDN (stars measured)
+QList<QByteArray> filterCards(const FilterGuess& g);
 
 /// Are the sources streaks? Among the 100 brightest sources, those with an axis ratio of at least 2: when there are at least 25 and their long axes agree (circular
 /// coherence of the doubled angle 0.8 or better) the frame is trailed (the mount moved during the exposure), not cloud and not defocus. Noise in bright cloud gives many

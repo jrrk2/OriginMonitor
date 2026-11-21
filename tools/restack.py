@@ -16,7 +16,7 @@ pre-filter stacks set aside, frames taken while the analyser had no target ("aut
     group's centre (the bulk of its frames; frames over 1 deg from it are left out). Frames that will not register to the reference are skipped; the stack is never replaced.
     The first frame is the reference: the sharpest frame (lowest HFR, 100+ stars) of the night with the most frames; the rest follow by time from it, nearest first.
 
-Writes OUT/<name>_<filter>/: state.bin and preview.png (the stacker's), <name>_<filter>.fits (linear RGB, half resolution; tools/pi_flow/export_livestack.py),
+Writes OUT/<name>_<filter>/: state.bin, colour.json and preview.png (the stacker's), <name>_<filter>.fits (linear RGB, half resolution; tools/pi_flow/export_livestack.py),
 records.jsonl (the verdict of every frame), frames.tsv (the input) and manifest.json (nights, frames offered and stacked, exposure). OUT is outside stacks/, so the planner's
 coverage count does not see the finals twice.
 """
@@ -158,7 +158,7 @@ def stack(g, out, exe, dry, redo=False):
         if (rec.get('registration') or {}).get('stacked'): stacked += 1; exp += rec.get('exposure', 0)
     info.update(verdicts=dict(verdicts), frames_stacked_logged=stacked)
     if sdir:
-        for fn in ('state.bin', 'preview.png'):
+        for fn in ('state.bin', 'preview.png', 'colour.json'):
             if os.path.exists(os.path.join(sdir[0], fn)): os.replace(os.path.join(sdir[0], fn), os.path.join(d, fn))
         sys.path.insert(0, os.path.join(HERE, 'pi_flow')); from export_livestack import export
         info['stack'] = export(os.path.join(d, 'state.bin'), os.path.join(d, safe(g['name']) + '_' + safe(g['filter']) + '.fits'))

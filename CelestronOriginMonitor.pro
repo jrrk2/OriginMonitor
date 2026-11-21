@@ -56,6 +56,7 @@ HEADERS += \
     SkyFrame.hpp \
     Registration.hpp \
     LiveStacker.hpp \
+    GaiaCatalog.hpp \
     Image16.hpp \
     SkyMonitor.hpp \
     Astro.hpp \

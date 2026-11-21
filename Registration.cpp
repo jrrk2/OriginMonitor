@@ -89,7 +89,7 @@ int refine(const std::vector<SkyStar>& ref, const std::vector<SkyStar>& tgt, Sim
 double Similarity::scale() const { return std::hypot(a, b); }
 double Similarity::rotationDeg() const { return std::atan2(b, a) * 180.0 / kPi; }
 
-RegResult registerStars(const std::vector<SkyStar>& ref, const std::vector<SkyStar>& tgt, const Similarity* guess, int minInliers)
+RegResult registerStars(const std::vector<SkyStar>& ref, const std::vector<SkyStar>& tgt, const Similarity* guess, int minInliers, int maxK)
 {
     RegResult R;
     R.tried = int(tgt.size());
@@ -107,6 +107,7 @@ RegResult registerStars(const std::vector<SkyStar>& ref, const std::vector<SkySt
     // 160 and 300 for frames of very different exposure: detection skips saturated stars, so a 17 s frame's list starts where a 4 s frame's ends (M1, 2026-10-14: of the 4 s frame's
     // 40 brightest only 1 was in the 17 s frame's list at all, of its 300 stars 113 were). Those passes vote with pairs closer than 350 px only, which keeps them to about a second.
     for (const int K : {40, 80, 160, 300}) {
+        if (K > maxK) break;
         // Equal separations in both lists constrain rotation and shift (scale is ~1)
         const float maxD = K > 80 ? 350.f : 1e9f;
         const std::vector<Pair> rp = pairsOf(ref, K, maxD);

@@ -1,4 +1,5 @@
 #pragma once
+#include <cmath>
 
 #include <QElapsedTimer>
 #include <QJsonObject>
@@ -81,6 +82,20 @@ private:
     double m_hfrBase = 0, m_hfrMedian = 0, m_driftRatio = 1.15;
     int m_focusWin = 8, m_driftRun = 0, m_drifts = 0;
     bool m_focusPause = false;
+    // live focus tweak (focus_tweak): when the median HFR stays above baseline x tweak_ratio, the focuser is nudged between frames by tweak_step and kept where
+    // the median of the next tweak_frames good frames is lowest (a hill-climb; the first direction from the temperature, colder = a lower count). The
+    // sequence keeps shooting; frames exposed while the focuser moved are not judged. See tweakFocus().
+    void tweakFocus();
+    void moveFocuserTo(int position, const QString& why);
+    bool m_tweak = false;
+    int m_tweakStep = 25, m_tweakFrames = 4, m_tweakMax = 150, m_tweakRun = 0, m_tweakSkip = 0, m_focPos = -1;
+    double m_tweakRatio = 1.08;
+    enum class Tweak { Idle, Measuring } m_tweakState = Tweak::Idle;
+    int m_tweakOrigin = -1, m_tweakBestPos = -1, m_tweakDir = 0, m_tweakTried = 0, m_tweaks = 0, m_tweakMoves = 0;
+    double m_tweakBestHfr = 0, m_baseAmbient = std::nan("");
+    QList<double> m_tweakSamples;
+    qint64 m_tweakCooldownUntil = 0;
+    QJsonObject m_tweakInfo;
     // auto exposure (see the class comment)
     void adjustExposure(const QJsonObject& analysis);
     bool m_auto = false;

@@ -1,5 +1,6 @@
 #include "OriginBackend.hpp"
 #include "DataDir.hpp"
+#include <QEventLoop>
 #include <QDebug>
 #include <QDateTime>
 #include <QUrl>
@@ -1125,6 +1126,13 @@ void OriginBackend::requestImage(const QString &filePath, bool isSnapshot) {
                 // Snapshot - emit special signal
                 m_snapshotInProgress = false;
                 qDebug() << "Snapshot complete - resuming live stream";
+                // FITS: analysed once here, so the filter seen in its stars goes into the header before anyone saves it (FILTDTCT; FILTER only says what the
+                // telescope was told is fitted), and the same analysis is scored below
+                SkyFrame analysed; bool haveAnalysis = false;
+                if (imageData.startsWith("SIMPLE  =")) {
+                    analysed = analyseFrame(imageData); haveAnalysis = analysed.valid;
+                    if (haveAnalysis) imageData = fitsWithCards(imageData, filterCards(detectFilter(analysed)));
+                }
                 emit tiffImageDownloaded(filePath, imageData, ra, dec, exposure);
                 // a frame taken with the previous exposure or ISO (seen at the start of a run after a change of either, 2026-10-14) says nothing about the sky: report "settling", do not score or stack it
                 const double hx = fitsHeaderNumber(imageData, "EXPTIME"), hi = fitsHeaderNumber(imageData, "ISOSPEED");
@@ -1135,7 +1143,7 @@ void OriginBackend::requestImage(const QString &filePath, bool isSnapshot) {
                                   {"reasons", QJsonArray{QString("frame header says exposure %1 s ISO %2 but %3 s ISO %4 was requested: taken with the previous settings, not scored").arg(hx).arg(hi).arg(m_lastReqExposure).arg(m_lastReqIso)}}};
                     emit focusEvaluated(o);
                 } else
-                evaluateSnapshotFocus(filePath, imageData, ra, dec, exposure);
+                evaluateSnapshotFocus(filePath, imageData, ra, dec, exposure, haveAnalysis ? &analysed : nullptr);
                 // The telescope resets the live-stream exposure/ISO after a sample capture
                 if (m_resendCaptureParams) {
                     if (m_requestedExposure > 0.0) setCameraExposure(m_requestedExposure);
@@ -1275,12 +1283,12 @@ void OriginBackend::setCameraConnected(bool connected)
 
 // Sky analysis for every snapshot (focus, transparency, tile coverage, sky level, moon/sun geometry, live stack), kept in memory, logged to
 // focus_log.csv next to the snapshots and announced by focusEvaluated(). The decision what to do about it is left to the caller.
-void OriginBackend::evaluateSnapshotFocus(const QString& filePath, const QByteArray& imageData, double ra, double dec, double exposure)
+void OriginBackend::evaluateSnapshotFocus(const QString& filePath, const QByteArray& imageData, double ra, double dec, double exposure, const SkyFrame* analysed)
 {
     // the frame's own ISO (header ISOSPEED), not the last one the camera confirmed: the stack's transparency is normalised by it
     const double hIso = fitsHeaderNumber(imageData, "ISOSPEED");
     const int iso = std::isfinite(hIso) && hIso > 0 ? int(hIso + 0.5) : m_currentISO;
-    QJsonObject o = m_sky.process(imageData, exposure, iso, ra, dec, QDateTime::currentDateTimeUtc());
+    QJsonObject o = m_sky.process(imageData, exposure, iso, ra, dec, QDateTime::currentDateTimeUtc(), analysed);
     o["file"] = filePath; o["ra_rad"] = ra; o["dec_rad"] = dec;
     m_focusHistory.append(o);
     while (m_focusHistory.size() > 500) m_focusHistory.removeFirst();

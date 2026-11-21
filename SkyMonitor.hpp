@@ -46,9 +46,12 @@ public:
     QString stackDirectory() const;
     void archiveStack(const QString& tag = QString());      // save the stack and move it aside (stacks/<target>[_<tag>]_<UTC>) so a replacement stack does not overwrite it
     bool saveStack();
+    /// Gaia colour calibration of the current stack (LiveStacker::calibrateColour) from its reference pointing, else the target position. Unless forced, only when due.
+    QJsonObject calibrateColour(bool force);
 
     /// Analyse one snapshot (raw 16-bit FITS bytes) taken at the mount position (ra, dec in radians).
-    QJsonObject process(const QByteArray& fits, double exposureS, int iso, double raRad, double decRad, const QDateTime& utc);
+    /// analysed: the frame already through analyseFrame (the backend does that to stamp FILTDTCT), saving a second pass
+    QJsonObject process(const QByteArray& fits, double exposureS, int iso, double raRad, double decRad, const QDateTime& utc, const SkyFrame* analysed = nullptr);
 
     /// Evidence from a deliberate twilight survey (frames pointed at the places the night will use): a clear view counts as good, a blocked one as an obstruction.
     void noteSurvey(double az, double alt, bool obstructed, const QDateTime& utc) { noteSkyMap(az, alt, obstructed ? Kind::Obstruction : Kind::Good, utc); }
@@ -85,6 +88,9 @@ private:
     Astro::Equatorial m_targetPos;
     LiveStacker m_stack;
     int m_sinceSave = 0, m_mapDirty = 0;
+    int m_colourTried = 0;                     // stack size at the last colour calibration attempt
+    int m_filterSwitchRun = 0;                 // good frames in a row whose stars say another filter than the stack's
+    static constexpr int kFilterSwitchFrames = 3;
     QMap<QString, double> m_darkRate;          // "iso800" -> lowest (sky ADU per second) seen in dark conditions
     QJsonObject m_skyMap;                      // "az_alt" -> {good, bad (obstruction only), cloud, unk, good_dates[], bad_dates[], cloud_dates[]}
     QList<QPair<double, double>> m_horizon;    // [az, min alt] from the horizon file

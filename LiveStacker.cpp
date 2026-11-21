@@ -1,7 +1,10 @@
 #include "LiveStacker.hpp"
+#include "GaiaCatalog.hpp"
 
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <algorithm>
 #include <cmath>
@@ -114,7 +117,8 @@ inline float sampleBilinear(const std::vector<float>& img, int w, int h, double 
 
 }   // namespace
 
-// ---- display stretch, ported from jrrk2/mkmosaic (VeraLux): background extraction, neutralisation, colour-preserving hyperbolic stretch ----
+// ---- display stretch: background extraction, neutralisation, colour-preserving hyperbolic stretch. A port of VeraLux HyperMetric Stretch by Riccardo Paterniti
+// (GPL-3.0-or-later), by way of jrrk2/mkmosaic; VeraLux's published algorithm only, no PixInsight/PCL code ----
 namespace {
 
 float percentileOf(std::vector<float> v, double p)
@@ -180,12 +184,12 @@ static Image16 vlStretchToImage(std::vector<float> col[3], int w, int h)
     std::vector<float> rgb(n * 3), lum(n);
     for (size_t i = 0; i < n; ++i) for (int c = 0; c < 3; ++c) rgb[i * 3 + c] = col[c][i];
     { std::vector<float> s; for (size_t i = 0; i < n; i += 5) s.push_back(lumaOf(&rgb[i * 3])); const float top = std::max(percentileOf(s, 99.995), 1e-6f); for (auto& v : rgb) v = std::clamp(v / top, 0.f, 1.f); }
-    // neutralise: R and B medians of the darkest 5% matched to G
+    // neutralise: R and B sky levels matched to G. Each channel's own median over the whole frame, which is mostly sky once the model is removed;
+    // picking the darkest pixels by mean brightness instead selects the noise dips of the noisiest channel (R) and turned the background red
     {
-        std::vector<float> l; for (size_t i = 0; i < n; i += 4) l.push_back((rgb[i * 3] + rgb[i * 3 + 1] + rgb[i * 3 + 2]) / 3);
-        const float thr = percentileOf(l, 5); std::vector<float> bg[3];
-        for (size_t i = 0; i < n; i += 4) if ((rgb[i * 3] + rgb[i * 3 + 1] + rgb[i * 3 + 2]) / 3 <= thr) for (int c = 0; c < 3; ++c) bg[c].push_back(rgb[i * 3 + c]);
-        if (bg[1].size() > 100) { const float mr = percentileOf(bg[0], 50), mg = percentileOf(bg[1], 50), mb = percentileOf(bg[2], 50); for (size_t i = 0; i < n; ++i) { rgb[i * 3] = std::clamp(rgb[i * 3] + mg - mr, 0.f, 1.f); rgb[i * 3 + 2] = std::clamp(rgb[i * 3 + 2] + mg - mb, 0.f, 1.f); } }
+        std::vector<float> bg[3]; for (size_t i = 0; i < n; i += 4) for (int c = 0; c < 3; ++c) bg[c].push_back(rgb[i * 3 + c]);
+        const float mr = percentileOf(bg[0], 50), mg = percentileOf(bg[1], 50), mb = percentileOf(bg[2], 50);
+        for (size_t i = 0; i < n; ++i) { rgb[i * 3] = std::clamp(rgb[i * 3] + mg - mr, 0.f, 1.f); rgb[i * 3 + 2] = std::clamp(rgb[i * 3 + 2] + mg - mb, 0.f, 1.f); }
     }
     // hyperbolic stretch, strength solved so the median luminance lands on the target background
     const float targetBg = 0.10f, protectB = 5.f, conv = 3.5f;
@@ -217,6 +221,10 @@ static Image16 vlStretchToImage(std::vector<float> col[3], int w, int h)
         std::vector<float> l2; for (size_t i = 0; i < n; i += 5) l2.push_back(lumaOf(&rgb[i * 3]));
         const float cur = percentileOf(l2, 50);
         if (cur > 0 && cur < 1 && std::fabs(cur - targetBg) > 1e-3f) { const float m = cur * (targetBg - 1) / (cur * (2 * targetBg - 1) - targetBg); for (auto& v : rgb) v = mtfF(v, m); }
+        // the stretch treats the noisier R and B planes differently from G, so match the sky medians once more where they are seen
+        std::vector<float> bg[3]; for (size_t i = 0; i < n; i += 4) for (int c = 0; c < 3; ++c) bg[c].push_back(rgb[i * 3 + c]);
+        const float mr = percentileOf(bg[0], 50), mg = percentileOf(bg[1], 50), mb = percentileOf(bg[2], 50);
+        for (size_t i = 0; i < n; ++i) { rgb[i * 3] = std::clamp(rgb[i * 3] + mg - mr, 0.f, 1.f); rgb[i * 3 + 2] = std::clamp(rgb[i * 3 + 2] + mg - mb, 0.f, 1.f); }
         for (auto& v : rgb) v = softClipF(v);
     }
     Image16 img = Image16::make(w, h);
@@ -230,6 +238,7 @@ static Image16 vlStretchToImage(std::vector<float> col[3], int w, int h)
 void LiveStacker::reset()
 {
     m_w = m_h = m_frames = m_refIso = 0; m_refFilter.clear(); m_totalExposure = m_refExposure = m_bestRaw = 0; m_recentRaw.clear(); m_haveLast = false; m_refStars.clear();
+    m_pointRa = 0; m_pointDec = -999; m_ccR = m_ccB = 1; m_ccStars = m_ccFrames = 0; m_ccReport = QJsonObject(); m_fixedLayout = false; m_firstCapture = m_lastCapture = QDateTime();
     for (int c = 0; c < 3; ++c) { m_sx[c].clear(); m_sx2[c].clear(); m_sw[c].clear(); }
 }
 
@@ -282,7 +291,7 @@ LiveStacker::Report LiveStacker::assess(const SkyFrame& f, double exposureS, int
     return r;
 }
 
-LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double minTransparency, int iso, const QString& filter)
+LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double minTransparency, int iso, const QString& filter, const QDateTime& captured)
 {
     Report rep;
     if (!f.valid) { rep.reason = "unreadable frame"; return rep; }
@@ -294,6 +303,7 @@ LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double
     if (m_frames == 0) {                                           // first frame defines the grid and the reference stars
         if (f.stars.size() < 12) { rep.reason = "too few stars for a reference"; return rep; }
         m_w = w; m_h = h; m_refExposure = exposureS; m_refIso = std::max(0, iso); m_refFilter = filter;
+        m_fixedLayout = qEnvironmentVariable("ORIGIN_BAYER_GREEN", "main").toLower() != "vote";
         // 300 (was 150): detection skips saturated stars, so frames of very different exposure share only the fainter part of their lists (M1, 4 s against 17 s, 2026-10-14)
         m_refStars.assign(f.stars.begin(), f.stars.begin() + std::min<size_t>(f.stars.size(), 300));
         for (int c = 0; c < 3; ++c) { m_sx[c].assign(size_t(w) * h, 0.0); m_sx2[c].assign(size_t(w) * h, 0.0); m_sw[c].assign(size_t(w) * h, 0.0); }
@@ -355,6 +365,11 @@ LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double
             }
     }
     ++m_frames; m_totalExposure += exposureS;
+    if (captured.isValid()) {
+        const QDateTime t = captured.toUTC();
+        if (!m_firstCapture.isValid() || t < m_firstCapture) m_firstCapture = t;
+        if (!m_lastCapture.isValid() || t > m_lastCapture) m_lastCapture = t;
+    }
     m_recentRaw.push_back(rep.rawTransparency);
     rep.accepted = true; rep.frames = m_frames;
     return rep;
@@ -379,16 +394,139 @@ Image16 LiveStacker::preview() const
     for (int c = 0; c < 3; ++c) col[c].resize(size_t(w) * h);
     for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
         const size_t i = size_t(y + y0) * m_w + x + x0, o = size_t(y) * w + x;
-        for (int c = 0; c < 3; ++c) col[c][o] = m_sw[c][i] > 0 ? float(m_sx[c][i] / m_sw[c][i]) : 0.f;
+        for (int c = 0; c < 3; ++c) col[c][o] = m_sw[c][i] > 0 ? float(m_sx[c][i] / m_sw[c][i] * (c == 0 ? m_ccR : c == 2 ? m_ccB : 1.0)) : 0.f;
         lum[o] = (col[0][o] + col[1][o] + col[2][o]) / 3.f;
     }
     return vlStretchToImage(col, w, h);
 }
 
+QJsonObject LiveStacker::calibrateColour(double raDeg, double decDeg, const QString& catalog, double arcsecPerPx, double marginDeg)
+{
+    QJsonObject o{{"ok", false}, {"frames", m_frames}};
+    auto fail = [&](const QString& why) { o["reason"] = why; return o; };
+    if (m_frames == 0) return fail("empty stack");
+    const QString path = catalog.isEmpty() ? gaiaCatalogPath() : catalog;
+    if (path.isEmpty()) return fail("no Gaia catalogue (tools/gaia_fetch.py, tools/gaia_pack.py)");
+    const double s = arcsecPerPx / 3600.0, halfDiag = 0.5 * std::hypot(m_w, m_h) * s;
+    const QDate today = QDateTime::currentDateTimeUtc().date();
+    const double epoch = today.year() + (today.dayOfYear() - 0.5) / today.daysInYear();
+    // The widest cone tried; narrower ones are subsets of it
+    const double margins[] = {std::min(0.05, marginDeg), marginDeg, std::max(0.5, marginDeg)};
+    std::vector<GaiaStar> cat;
+    if (!gaiaConeSearch(path, raDeg, decDeg, halfDiag + margins[2], 14.0, epoch, cat)) return fail("cannot read " + path);
+    if (cat.size() < 30) return fail(QString("only %1 Gaia stars around the pointing").arg(cat.size()));
+    std::vector<double> xi(cat.size()), eta(cat.size()), sep(cat.size());
+    for (size_t i = 0; i < cat.size(); ++i) { gnomonic(cat[i].raDeg, cat[i].decDeg, raDeg, decDeg, xi[i], eta[i]); sep[i] = std::hypot(xi[i], eta[i]); }
+
+    // Match: Gaia's brightest stars on a tangent plane at the stack's scale, registered onto the reference stars like another frame. The sky is mirrored
+    // or not depending on the optics, so both parities are tried. Which Gaia stars to offer matters: the reference list has no saturated stars (G brighter
+    // than about 9 to 10.5, depending on the exposure), and a cone much wider than the pointing error buries the frame's stars among ones outside it. So a few
+    // brightness floors and cone widths are tried, narrowest first, until a match has 25 inliers; the best match found is kept. The pair voting stops at the
+    // 160 brightest of each list (the deeper passes cost seconds each in a rich field such as the Double Cluster): the floors stand in for depth.
+    Similarity T; int parity = 0; RegResult best;
+    std::vector<SkyStar> ref = m_refStars;                 // brightest first, as the Gaia list is (the saved list is not always in flux order)
+    std::sort(ref.begin(), ref.end(), [](const SkyStar& a, const SkyStar& b) { return a.flux > b.flux; });
+    auto attempt = [&](double margin, double gFloor, int par, const Similarity* guess) {
+        std::vector<SkyStar> g;
+        for (size_t i = 0; i < cat.size() && g.size() < 300; ++i) {
+            if (cat[i].g < gFloor || sep[i] > halfDiag + margin) continue;
+            SkyStar t; t.x = float(0.5 * m_w + par * xi[i] / s); t.y = float(0.5 * m_h + eta[i] / s); t.flux = float(std::pow(10.0, -0.4 * cat[i].g)); g.push_back(t);
+        }
+        const RegResult rr = registerStars(ref, g, guess, 10, 160);
+        if (rr.ok && rr.inliers > best.inliers) { best = rr; parity = par; o["match"] = QJsonObject{{"ra_deg", raDeg}, {"dec_deg", decDeg}, {"g_floor", gFloor}, {"margin_deg", margin}, {"parity", par},
+                                                                                                {"a", rr.T.a}, {"b", rr.T.b}, {"tx", rr.T.tx}, {"ty", rr.T.ty}}; }
+    };
+    // the previous calibration's match from the same pointing, as the starting guess: nearly instant
+    const QJsonObject prev = m_ccReport["match"].toObject();
+    if (!prev.isEmpty() && std::fabs(prev["ra_deg"].toDouble() - raDeg) < 1e-6 && std::fabs(prev["dec_deg"].toDouble() - decDeg) < 1e-6) {
+        Similarity G; G.a = prev["a"].toDouble(); G.b = prev["b"].toDouble(); G.tx = prev["tx"].toDouble(); G.ty = prev["ty"].toDouble();
+        attempt(prev["margin_deg"].toDouble(), prev["g_floor"].toDouble(), prev["parity"].toInt(), &G);
+    }
+    for (const double margin : margins) {
+        if (best.inliers >= 25) break;
+        for (double gFloor = 8.0; gFloor <= 12.6 && best.inliers < 25; gFloor += 0.5)
+            for (const int par : {1, -1}) attempt(margin, gFloor, par, nullptr);
+    }
+    if (!best.ok) return fail(QString("the reference stars do not match Gaia around RA %1 Dec %2").arg(raDeg, 0, 'f', 3).arg(decDeg, 0, 'f', 3));
+    T = best.T;
+    o["match_inliers"] = best.inliers; o["match_rms_px"] = best.rms;
+    o["scale_arcsec_px"] = arcsecPerPx / T.scale(); o["rotation_deg"] = T.rotationDeg();
+    {   // where the stack's centre is on the sky
+        double cx = 0.5 * m_w, cy = 0.5 * m_h;
+        const double c2 = T.a * T.a + T.b * T.b, qx = cx - T.tx, qy = cy - T.ty;
+        const double gx = (T.a * qx + T.b * qy) / c2, gy = (-T.b * qx + T.a * qy) / c2;
+        const double x = parity * (gx - 0.5 * m_w) * s * M_PI / 180, y = (gy - 0.5 * m_h) * s * M_PI / 180, d0 = decDeg * M_PI / 180, rho = std::hypot(x, y), c = std::atan(rho);
+        const double dec = rho < 1e-12 ? d0 : std::asin(std::cos(c) * std::sin(d0) + y * std::sin(c) * std::cos(d0) / rho);
+        const double ra = raDeg * M_PI / 180 + std::atan2(x * std::sin(c), rho * std::cos(d0) * std::cos(c) - y * std::sin(d0) * std::sin(c));
+        o["centre_ra_deg"] = std::fmod(ra * 180 / M_PI + 360, 360); o["centre_dec_deg"] = dec * 180 / M_PI;
+    }
+
+    // Photometry in the stacked mean: aperture 3 px, sky the median of the 6..9 px annulus, on the well-covered area. Stars kept: G 9..13.5, BP-RP -0.2..3,
+    // no Gaia star brighter than G + 2.5 within 8 px, not near saturation, every aperture pixel stacked in every channel.
+    const int n = m_w * m_h;
+    std::vector<float> mean[3];
+    double mx = 0; for (double v : m_sw[1]) mx = std::max(mx, v);
+    for (int c = 0; c < 3; ++c) { mean[c].resize(n); for (int i = 0; i < n; ++i) mean[c][i] = m_sw[c][i] > 0 ? float(m_sx[c][i] / m_sw[c][i]) : 0.f; }
+    float top = 0;
+    { std::vector<float> l; for (int i = 0; i < n; i += 3) { const float v = (mean[0][i] + mean[1][i] + mean[2][i]) / 3; if (v > 0) l.push_back(v); } top = percentileOf(l, 99.99); }
+    std::vector<double> px(cat.size()), py(cat.size());
+    for (size_t i = 0; i < cat.size(); ++i) T.apply(0.5 * m_w + parity * xi[i] / s, 0.5 * m_h + eta[i] / s, px[i], py[i]);
+    const StarColourModel model(m_refFilter);
+    const std::array<double, 3> white = model.predict(5800.0);
+    std::vector<double> rr, rb;
+    int candidates = 0;
+    for (size_t i = 0; i < cat.size(); ++i) {
+        const GaiaStar& g = cat[i];
+        if (g.g < 9 || g.g > 13.5 || !(g.bpRp > -0.2 && g.bpRp < 3.0)) continue;
+        const int xi0 = int(std::lround(px[i])), yi0 = int(std::lround(py[i]));
+        if (xi0 < 12 || yi0 < 12 || xi0 >= m_w - 12 || yi0 >= m_h - 12 || m_sw[1][size_t(yi0) * m_w + xi0] < 0.6 * mx) continue;
+        ++candidates;
+        bool crowded = false;
+        for (size_t j = 0; j < cat.size() && !crowded; ++j) {
+            if (j == i || cat[j].g >= g.g + 2.5) continue;
+            crowded = std::fabs(px[j] - px[i]) < 8 && std::fabs(py[j] - py[i]) < 8 && std::hypot(px[j] - px[i], py[j] - py[i]) < 8;
+        }
+        if (crowded) continue;
+        double sum[3] = {0, 0, 0}; std::vector<float> ann[3]; int na = 0; bool bad = false;
+        for (int dy = -9; dy <= 9 && !bad; ++dy) for (int dx = -9; dx <= 9; ++dx) {
+            const double r = std::hypot(dx, dy); const size_t k = size_t(yi0 + dy) * m_w + xi0 + dx;
+            if (r <= 3.0) {
+                ++na;
+                if ((mean[0][k] + mean[1][k] + mean[2][k]) / 3 > 0.85f * top) { bad = true; break; }
+                for (int c = 0; c < 3; ++c) { if (m_sw[c][k] <= 0) bad = true; sum[c] += mean[c][k]; }
+            } else if (r >= 6 && r <= 9) for (int c = 0; c < 3; ++c) ann[c].push_back(mean[c][k]);
+        }
+        if (bad) continue;
+        double m[3];
+        for (int c = 0; c < 3; ++c) m[c] = sum[c] - percentileOf(ann[c], 50) * na;
+        if (m[0] <= 0 || m[1] <= 0 || m[2] <= 0) continue;
+        const std::array<double, 3> p = model.predict(StarColourModel::teffFromBpRp(g.bpRp));
+        rr.push_back((m[1] / p[1]) / (m[0] / p[0]));
+        rb.push_back((m[1] / p[1]) / (m[2] / p[2]));
+    }
+    o["candidates"] = candidates; o["stars"] = int(rr.size());
+    if (rr.size() < 15) return fail(QString("only %1 isolated Gaia stars measured").arg(rr.size()));
+    auto mad = [](std::vector<double> v, double med) { for (double& x : v) x = std::fabs(x - med); return 1.4826 * medianOf(v); };
+    const double gR = medianOf(rr) * white[1] / white[0], gB = medianOf(rb) * white[1] / white[2];
+    const double sR = mad(rr, medianOf(rr)) * white[1] / white[0] / std::sqrt(double(rr.size())), sB = mad(rb, medianOf(rb)) * white[1] / white[2] / std::sqrt(double(rb.size()));
+    o["gain_r"] = gR; o["gain_b"] = gB; o["gain_r_err"] = sR; o["gain_b_err"] = sB;
+    o["camera_gain_r"] = gR * m_wbR; o["camera_gain_b"] = gB * m_wbB;   // relative to the raw camera channels, comparable between stacks
+    o["filter_model"] = model.isTriband() ? "tri-band" : "clear";
+    if (!(gR > 0.25 && gR < 4 && gB > 0.25 && gB < 4)) return fail(QString("implausible gains R %1 B %2").arg(gR, 0, 'f', 2).arg(gB, 0, 'f', 2));
+    // stars that disagree this much point at a damaged channel rather than at colour (the Rosette stack's blue plane, 2026-11-20: 10x the green noise)
+    if (sR > 0.05 * gR || sB > 0.05 * gB) return fail(QString("the stars disagree: gains R %1 +- %2, B %3 +- %4").arg(gR, 0, 'f', 2).arg(sR, 0, 'f', 2).arg(gB, 0, 'f', 2).arg(sB, 0, 'f', 2));
+    o["ok"] = true; o["epoch"] = epoch; o["catalogue"] = "Gaia DR3 (ESA/Gaia/DPAC)";
+    m_ccR = gR; m_ccB = gB; m_ccStars = int(rr.size()); m_ccFrames = m_frames; m_ccReport = o;
+    return o;
+}
 
 QJsonObject LiveStacker::summary() const
 {
-    return QJsonObject{{"frames", m_frames}, {"total_exposure_s", m_totalExposure}, {"width", m_w}, {"height", m_h}, {"best_raw_transparency", m_bestRaw}, {"reference_iso", m_refIso}, {"reference_filter", m_refFilter}};
+    QJsonObject o{{"frames", m_frames}, {"total_exposure_s", m_totalExposure}, {"width", m_w}, {"height", m_h}, {"best_raw_transparency", m_bestRaw}, {"reference_iso", m_refIso}, {"reference_filter", m_refFilter}};
+    if (m_ccFrames > 0) o["colour_calibration"] = m_ccReport;
+    o["bayer_layout_fixed"] = m_fixedLayout;
+    if (m_firstCapture.isValid()) { o["first_capture"] = m_firstCapture.toString(Qt::ISODate); o["last_capture"] = m_lastCapture.toString(Qt::ISODate); }
+    return o;
 }
 
 namespace {
@@ -411,6 +549,7 @@ bool LiveStacker::save(const QString& dir) const
     if (!f.open(QIODevice::WriteOnly) || f.write(b) != b.size()) return false;
     f.close(); QFile::remove(dir + "/state.bin");
     if (!QFile::rename(dir + "/state.bin.tmp", dir + "/state.bin")) return false;
+    saveColour(dir);
     preview().savePng(dir + "/preview.png");
     return true;
 }
@@ -440,7 +579,37 @@ bool LiveStacker::load(const QString& dir)
         for (size_t i = 0; i < t.m_sw[c].size(); ++i) { float a, bb, cc; if (!get(b, pos, a) || !get(b, pos, bb) || !get(b, pos, cc)) return false; t.m_sx[c][i] = a; t.m_sx2[c][i] = bb; t.m_sw[c][i] = cc; }
     }
     *this = std::move(t);
+    loadColour(dir);
     return true;
+}
+
+// colour.json beside state.bin (which several tools parse, so its layout stays as it is): the reference pointing and the Gaia colour calibration
+bool LiveStacker::saveColour(const QString& dir) const
+{
+    QJsonObject o;
+    if (hasPointing()) o["pointing"] = QJsonObject{{"ra_deg", m_pointRa}, {"dec_deg", m_pointDec}};
+    if (m_ccFrames > 0) o["calibration"] = m_ccReport;
+    if (m_fixedLayout) o["bayer_layout"] = "fixed";
+    if (m_firstCapture.isValid()) o["capture"] = QJsonObject{{"first", m_firstCapture.toString(Qt::ISODate)}, {"last", m_lastCapture.toString(Qt::ISODate)}};
+    if (o.isEmpty()) { QFile::remove(dir + "/colour.json"); return true; }
+    QFile f(dir + "/colour.json");
+    return f.open(QIODevice::WriteOnly | QIODevice::Truncate) && f.write(QJsonDocument(o).toJson()) > 0;
+}
+
+void LiveStacker::loadColour(const QString& dir)
+{
+    QFile f(dir + "/colour.json");
+    if (!f.open(QIODevice::ReadOnly)) return;
+    const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+    m_fixedLayout = o["bayer_layout"].toString() == "fixed";
+    const QJsonObject cap = o["capture"].toObject();
+    m_firstCapture = QDateTime::fromString(cap["first"].toString(), Qt::ISODate); m_lastCapture = QDateTime::fromString(cap["last"].toString(), Qt::ISODate);
+    const QJsonObject p = o["pointing"].toObject();
+    if (p.contains("dec_deg")) { m_pointRa = p["ra_deg"].toDouble(); m_pointDec = p["dec_deg"].toDouble(); }
+    const QJsonObject c = o["calibration"].toObject();
+    if (c["ok"].toBool() && c["gain_r"].toDouble() > 0 && c["gain_b"].toDouble() > 0) {
+        m_ccR = c["gain_r"].toDouble(); m_ccB = c["gain_b"].toDouble(); m_ccStars = c["stars"].toInt(); m_ccFrames = std::max(1, c["frames"].toInt()); m_ccReport = c;
+    }
 }
 
 double skyGradient(const SkyFrame& f)

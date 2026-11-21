@@ -1,4 +1,6 @@
 #include "SkyMonitor.hpp"
+
+#include <QTimeZone>
 #include "FocusAnalyzer.hpp"
 #include "DataDir.hpp"
 #include "Image16.hpp"
@@ -88,7 +90,7 @@ QJsonObject SkyMonitor::setTarget(const QString& name, double raHours, double de
     m_target = name.isEmpty() ? "auto" : name;
     m_targetKnown = raHours >= 0 && raHours < 24 && decDeg >= -90 && decDeg <= 90;
     if (m_targetKnown) m_targetPos = {raHours, decDeg};
-    m_stack.reset(); m_sinceSave = 0; m_refHfr = 0; m_refStars = 0; m_regFailRun = 0;
+    m_stack.reset(); m_sinceSave = 0; m_colourTried = 0; m_filterSwitchRun = 0; m_refHfr = 0; m_refStars = 0; m_regFailRun = 0;
     bool resumed = false;
     if (!reset) resumed = m_stack.load(stackDirectory());
     QJsonObject o{{"ok", true}, {"target", m_target}, {"resumed", resumed}, {"stack", m_stack.summary()}};
@@ -103,7 +105,27 @@ void SkyMonitor::archiveStack(const QString& tag)
     QDir().rename(dir, dir + (tag.isEmpty() ? QString() : "_" + safeName(tag)) + "_" + QDateTime::currentDateTimeUtc().toString("yyyyMMdd_HHmmss"));
 }
 
-bool SkyMonitor::saveStack() { return m_stack.frames() > 0 && m_stack.save(stackDirectory()); }
+bool SkyMonitor::saveStack()
+{
+    if (m_stack.frames() <= 0) return false;
+    calibrateColour(false);
+    return m_stack.save(stackDirectory());
+}
+
+// Gaia colour calibration of the stack once it has 10 frames, again each time it has doubled since (the stars' colours are measured in the stack, so they
+// sharpen as it grows); a failed attempt is not repeated until the stack has doubled since it, so a missing catalogue costs one try per doubling.
+QJsonObject SkyMonitor::calibrateColour(bool force)
+{
+    const int n = m_stack.frames();
+    const int last = std::max(m_stack.colourFrames(), m_colourTried);
+    if (!force && (n < 10 || (last > 0 && n < 2 * last))) return QJsonObject{{"ok", false}, {"reason", "not due"}};
+    double ra = 0, dec = 0;
+    if (m_stack.hasPointing()) { ra = m_stack.pointingRa(); dec = m_stack.pointingDec(); }
+    else if (m_targetKnown) { ra = m_targetPos.raHours * 15.0; dec = m_targetPos.decDeg; }
+    else return QJsonObject{{"ok", false}, {"reason", "pointing unknown"}};
+    m_colourTried = n;
+    return m_stack.calibrateColour(ra, dec);
+}
 
 QJsonObject SkyMonitor::stackSummary() const
 {
@@ -222,16 +244,27 @@ static QString writePicture(const SkyFrame& F, double black, const QDateTime& ut
     return path;
 }
 
-QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int iso, double raRad, double decRad, const QDateTime& utc)
+QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int iso, double raRad, double decRad, const QDateTime& utc, const SkyFrame* analysed)
 {
-    SkyFrame F = analyseFrame(fits);
+    const SkyFrame F = analysed ? *analysed : analyseFrame(fits);
     FocusResult focus = focusFromFrame(F);
     QJsonObject o = focus.toJson();
     o["time"] = utc.toString(Qt::ISODateWithMs);
     o["exposure"] = exposureS; o["iso"] = iso;
-    const QString filter = fitsHeaderString(fits, "FILTER");
+    // The filter is the one seen in the stars (FILTDTCT, or detected here for frames saved without it); FILTER, what the telescope was told, only when the stars
+    // cannot tell (too few). A frame whose stars cannot tell and whose FILTER disagrees with the stack is not stacked, and does not end the stack either.
+    const QString headerFilter = fitsHeaderString(fits, "FILTER");
+    QString detectedFilter = fitsHeaderString(fits, "FILTDTCT");
+    if (detectedFilter.isEmpty()) detectedFilter = detectFilter(F).name;
+    if (detectedFilter.compare("UNKNOWN", Qt::CaseInsensitive) == 0) detectedFilter.clear();
+    const QString filter = detectedFilter.isEmpty() ? headerFilter : detectedFilter;
     if (!filter.isEmpty()) o["filter"] = filter;
+    if (!headerFilter.isEmpty()) o["filter_header"] = headerFilter;
+    o["filter_detected"] = detectedFilter.isEmpty() ? QJsonValue() : QJsonValue(detectedFilter);
     if (!F.valid) { o["verdict"] = "unreadable"; o["reasons"] = QJsonArray{F.note}; return o; }
+    // when the frame was taken: DATE-OBS (start of the exposure, UTC) if the header has it, else the analysis time
+    QDateTime captured = QDateTime::fromString(fitsHeaderString(fits, "DATE-OBS"), Qt::ISODate);
+    if (captured.isValid()) captured.setTimeZone(QTimeZone::UTC); else captured = utc;
 
     { const QString pic = writePicture(F, m_blackLevel, utc, &m_pictureMs); if (!pic.isEmpty()) { o["picture"] = pic; o["picture_time"] = utc.toString(Qt::ISODate); } }
 
@@ -320,10 +353,19 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     QString filterNote;
     // star fluxes through different filters are not comparable (a pre-filter stack read every frame through the quad-band filter as transparency 0.2, "cloudy", 2026-10-27):
     // a stack whose reference was taken with another filter is archived (stacks/<target>_<filter>_<UTC>) and this frame may seed a new one
-    if (m_stack.hasReference() && !filter.isEmpty() && !m_stack.referenceFilter().isEmpty() && m_stack.referenceFilter().compare(filter, Qt::CaseInsensitive) != 0) {
+    if (!detectedFilter.isEmpty() && !headerFilter.isEmpty() && detectedFilter.compare(headerFilter, Qt::CaseInsensitive) != 0)
+        filterNote = QString("FILTER says %1 but the stars' colour says %2: is ~/.config/origin/filter up to date?").arg(headerFilter, detectedFilter);
+    // A change of filter ends the stack only after kFilterSwitchFrames good frames in a row (sharp enough to seed a stack) whose stars say the other filter: one
+    // defocused or dawn frame read as the other filter archived Cepheus's 579-frame stack in the 2026-11-21 restack. Frames that disagree before that are not stacked.
+    const bool filterDiffers = m_stack.hasReference() && !filter.isEmpty() && !m_stack.referenceFilter().isEmpty() && m_stack.referenceFilter().compare(filter, Qt::CaseInsensitive) != 0;
+    const bool filterEvidence = filterDiffers && !detectedFilter.isEmpty() && focus.valid && focus.stars >= 25 && focus.hfrPx > 0 && focus.hfrPx < 4.0;
+    if (!filterDiffers) m_filterSwitchRun = 0; else if (filterEvidence) ++m_filterSwitchRun;
+    const bool filterUncertain = filterDiffers && m_filterSwitchRun < kFilterSwitchFrames;
+    if (filterDiffers && !filterUncertain) {
+        m_filterSwitchRun = 0;
         const QString old = m_stack.referenceFilter();
         archiveStack(old); m_stack.reset(); m_refHfr = 0; m_refStars = 0; m_regFailRun = 0;
-        filterNote = QString("the stack was taken with filter %1, this frame with %2: archived, a new stack starts").arg(old, filter);
+        filterNote += (filterNote.isEmpty() ? "" : "; ") + QString("the stack was taken with filter %1, this frame with %2: archived, a new stack starts").arg(old, filter);
     }
     bool haveStack = m_stack.hasReference();
     const bool pointingOk = !m_targetKnown || offTarget < 0.5;
@@ -393,8 +435,11 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
             o["registration"] = QJsonObject{{"reference_frame", false}, {"stacked", false}, {"frames_in_stack", 0}};
             verdict = "cloudy"; reasons << QString("sky %1% above the dark baseline: not used as the stack reference").arg(int(excess * 100));
         } else {
-            rep = m_autoStack ? m_stack.add(F, exposureS, m_minTransparency, iso, filter) : LiveStacker::Report();
-            if (rep.accepted && rep.frames == 1) { m_refHfr = focus.hfrPx; m_refStars = focus.stars; }
+            rep = m_autoStack ? m_stack.add(F, exposureS, m_minTransparency, iso, filter, captured) : LiveStacker::Report();
+            if (rep.accepted && rep.frames == 1) {
+                m_refHfr = focus.hfrPx; m_refStars = focus.stars;
+                if (source != "unknown") m_stack.setPointing(pointing.raHours * 15.0, pointing.decDeg);   // where calibrateColour starts its Gaia match
+            }
             o["registration"] = QJsonObject{{"reference_frame", rep.accepted}, {"stacked", rep.accepted}, {"frames_in_stack", rep.frames}};
             if (!rep.accepted && m_autoStack) { verdict = F.stars.size() < 12 ? "cloudy" : "unknown"; reasons << rep.reason; }
             if (F.stars.size() < 25) { verdict = "cloudy"; reasons << QString("only %1 stars detected").arg(F.stars.size()); }
@@ -402,9 +447,9 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     }
 
     // Stack the frame only if it is a usable one: clouds, patchy obstruction and wrong pointing would dilute the stack
-    const bool stackable = haveStack && pointingOk && (verdict == "clear" || verdict == "hazy");
+    const bool stackable = haveStack && pointingOk && !filterUncertain && (verdict == "clear" || verdict == "hazy");
     if (stackable && m_autoStack) {
-        const LiveStacker::Report added = m_stack.add(F, exposureS, m_minTransparency, iso, filter);
+        const LiveStacker::Report added = m_stack.add(F, exposureS, m_minTransparency, iso, filter, captured);
         rep.accepted = added.accepted; rep.frames = added.frames;
         QJsonObject reg = o["registration"].toObject(); reg["stacked"] = added.accepted; reg["frames_in_stack"] = added.frames;
         if (!added.reason.isEmpty()) reg["refused_because"] = added.reason;
@@ -412,6 +457,8 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     } else if (haveStack) {
         QJsonObject reg = o["registration"].toObject(); reg["stacked"] = false; reg["frames_in_stack"] = m_stack.frames();
         if (verdict != "clear" && verdict != "hazy") reg["refused_because"] = "frame judged " + verdict;
+        else if (filterUncertain) reg["refused_because"] = QString("filter %1 (%2), the stack is %3: %4 of %5 good frames in a row needed to start a new stack")
+                                                             .arg(filter, detectedFilter.isEmpty() ? QString("from FILTER") : QString("from the stars")).arg(m_stack.referenceFilter()).arg(m_filterSwitchRun).arg(kFilterSwitchFrames);
         o["registration"] = reg;
     }
 

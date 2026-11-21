@@ -11,9 +11,11 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QProcess>
 #include <QThread>
 #include <QTimer>
 #include <QUrlQuery>
+#include <QUuid>
 #include <cstdio>
 
 namespace Mail {
@@ -54,6 +56,50 @@ Reply http(const QString& url, const QByteArray& body, const QByteArray& content
     rep->deleteLater();
     return r;
 }
+// RFC 2047 encoded-word for a header value that is not plain ASCII
+QByteArray headerText(const QString& s)
+{
+    const QByteArray u = s.toUtf8();
+    for (char c : u) if (uchar(c) < 0x20 || uchar(c) > 0x7e) return "=?UTF-8?B?" + u.toBase64() + "?=";
+    return u;
+}
+
+// the briefing as an RFC 5322 message: UTF-8 text, base64 body (safe for any content and line length), CRLF line ends
+QByteArray smtpMessage(const QString& fromName, const QString& from, const QString& to, const QString& subject, const QString& body)
+{
+    const QString domain = from.section('@', 1);
+    QByteArray m;
+    m += "From: " + headerText(fromName) + " <" + from.toUtf8() + ">\r\n";
+    m += "To: <" + to.toUtf8() + ">\r\n";
+    m += "Subject: " + headerText(subject) + "\r\n";
+    m += "Date: " + QDateTime::currentDateTime().toString(Qt::RFC2822Date).toUtf8() + "\r\n";
+    m += "Message-ID: <" + QUuid::createUuid().toString(QUuid::WithoutBraces).toUtf8() + "@" + domain.toUtf8() + ">\r\n";
+    m += "MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n";
+    const QByteArray b = body.toUtf8().toBase64();
+    for (int i = 0; i < b.size(); i += 76) m += b.mid(i, 76) + "\r\n";
+    return m;
+}
+
+QJsonObject sendSmtp(const QJsonObject& smtp, const QString& to, const QString& subject, const QString& body)
+{
+    const QString url = smtp["url"].toString(), from = smtp["from"].toString();
+    if (url.isEmpty() || !from.contains('@')) return {{"ok", false}, {"error", "smtp in " + configPath() + " needs \"url\" and \"from\""}};
+    QStringList args{"-sS", "--max-time", "60", "--ssl-reqd", "--url", url, "--mail-from", from, "--mail-rcpt", to, "--upload-file", "-"};
+    if (!smtp["user"].toString().isEmpty()) {
+        QFile pf(dir() + "/" + smtp["password_file"].toString("smtp.password"));
+        if (!pf.open(QIODevice::ReadOnly)) return {{"ok", false}, {"error", "cannot read " + pf.fileName()}};
+        args << "--user" << smtp["user"].toString() + ":" + QString::fromUtf8(pf.readAll()).trimmed();   // trimmed: the file's newline is not part of it
+    }
+    QProcess curl;
+    curl.start("curl", args);
+    if (!curl.waitForStarted(10000)) return {{"ok", false}, {"error", "cannot run curl: " + curl.errorString()}};
+    curl.write(smtpMessage(smtp["from_name"].toString("Origin observatory"), from, to, subject, body));
+    curl.closeWriteChannel();
+    if (!curl.waitForFinished(90000)) { curl.kill(); return {{"ok", false}, {"error", "curl timed out sending to " + url}}; }
+    if (curl.exitStatus() == QProcess::NormalExit && curl.exitCode() == 0) return {{"ok", true}, {"to", to}, {"subject", subject}, {"via", url}};
+    return {{"ok", false}, {"error", QString("SMTP send failed (curl exit %1): %2").arg(curl.exitCode()).arg(QString::fromUtf8(curl.readAllStandardError()).trimmed())}};
+}
+
 QByteArray form(const QList<QPair<QString, QString>>& kv) { QUrlQuery q; for (const auto& p : kv) q.addQueryItem(p.first, p.second); return q.toString(QUrl::FullyEncoded).toUtf8(); }
 QString errText(const Reply& r) { return !r.error.isEmpty() ? r.error : r.json["error_description"].toString(r.json["error"].isObject() ? r.json["error"].toObject()["message"].toString() : r.json["error"].toString("HTTP " + QString::number(r.status))); }
 }
@@ -86,8 +132,12 @@ QJsonObject login()
 QJsonObject send(const QString& subject, const QString& body, const QString& toIn)
 {
     const QJsonObject cfg = readJson(configPath());
-    if (cfg["client_id"].toString().isEmpty()) return {{"ok", false}, {"error", "mail is not configured: no client_id in " + configPath()}};
     const QString to = toIn.isEmpty() ? cfg["to"].toString() : toIn;
+    if (cfg["smtp"].isObject()) {
+        if (to.isEmpty()) return {{"ok", false}, {"error", "no recipient: set \"to\" in " + configPath()}};
+        return sendSmtp(cfg["smtp"].toObject(), to, subject, body);
+    }
+    if (cfg["client_id"].toString().isEmpty()) return {{"ok", false}, {"error", "mail is not configured: no smtp or client_id in " + configPath()}};
     if (to.isEmpty()) return {{"ok", false}, {"error", "no recipient: set \"to\" in " + configPath()}};
     const QString refresh = readJson(tokenPath())["refresh_token"].toString();
     if (refresh.isEmpty()) return {{"ok", false}, {"error", "not signed in: run OriginHeadless mail-login"}};

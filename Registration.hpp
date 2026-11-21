@@ -23,4 +23,5 @@ struct RegResult {
  * Register a target star list onto a reference one (scale fixed near 1: same camera). With a guess, refinement from it is tried first,
  * which is nearly instant for consecutive frames; otherwise pair voting over the brightest stars finds the rotation and shift.
  */
-RegResult registerStars(const std::vector<SkyStar>& ref, const std::vector<SkyStar>& tgt, const Similarity* guess = nullptr, int minInliers = 10);
+/// maxK limits the pair voting to the brightest maxK stars of each list (40, 80, 160 and 300 are tried in turn up to it).
+RegResult registerStars(const std::vector<SkyStar>& ref, const std::vector<SkyStar>& tgt, const Similarity* guess = nullptr, int minInliers = 10, int maxK = 300);

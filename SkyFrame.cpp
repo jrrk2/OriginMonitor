@@ -108,14 +108,21 @@ SkyFrame analyseFrame(const QByteArray& data, double detectSigma, int maxStars)
         }
     std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.peak > b.peak; });
 
-    // Green diagonal from the brightest candidates: the two green sensels carry more star light than red or blue
+    // Green diagonal. The Origin's sensor has its greens on the main diagonal of each 2x2 cell as read here (the header's BAYERPAT says RGGB, counting rows the
+    // other way). This used to be voted per frame (the two greens carry more star light than red and blue), but through the tri-band filter red + blue carry about
+    // as much as the greens, and a third of those frames came out with the greens taken for red and blue, washing out the stacks' colour (186 of 595 archive
+    // frames, 2026-11-21; bright or trailed Clear frames flipped too). The sensor does not change, so the layout is fixed: ORIGIN_BAYER_GREEN=anti for a camera
+    // with the other layout, =vote for the per-frame vote.
     {
-        double main = 0, anti = 0;
-        for (size_t i = 0; i < cands.size() && i < 200; ++i) {
-            const size_t k = size_t(cands[i].y) * w + cands[i].x;
-            main += p[0][k] + p[3][k] - 2 * med; anti += p[1][k] + p[2][k] - 2 * med;
-        }
-        F.greenOnMainDiagonal = main >= anti;                  // GRBG-like (red at (0,1)) when true, RGGB-like (red at (0,0)) otherwise
+        static const QString mode = qEnvironmentVariable("ORIGIN_BAYER_GREEN", "main").toLower();
+        if (mode == "vote") {
+            double main = 0, anti = 0;
+            for (size_t i = 0; i < cands.size() && i < 200; ++i) {
+                const size_t k = size_t(cands[i].y) * w + cands[i].x;
+                main += p[0][k] + p[3][k] - 2 * med; anti += p[1][k] + p[2][k] - 2 * med;
+            }
+            F.greenOnMainDiagonal = main >= anti;
+        } else F.greenOnMainDiagonal = mode != "anti";        // GRBG-like (red at (0,1)) when true, RGGB-like (red at (0,0)) otherwise
     }
     const std::vector<float>& R = F.greenOnMainDiagonal ? p[1] : p[0];
     const std::vector<float>& Bl = F.greenOnMainDiagonal ? p[2] : p[3];
@@ -181,4 +188,62 @@ StreakInfo streakInfo(const SkyFrame& f)
     if (n > 0) { r.coherence = std::hypot(sc, ss) / n; r.angleDeg = 0.5 * std::atan2(ss, sc) * 180.0 / 3.14159265358979323846; }
     r.trailed = n >= 25 && r.coherence >= 0.8;
     return r;
+}
+
+FilterGuess detectFilter(const SkyFrame& f)
+{
+    FilterGuess g;
+    if (!f.valid) return g;
+    const int w = f.width, h = f.height;
+    std::vector<double> bg;
+    std::vector<float> ar, ag, ab;
+    auto median = [](std::vector<float>& v) { std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end()); return double(v[v.size() / 2]); };
+    for (const SkyStar& s : f.stars) {
+        if (!s.isolated) continue;
+        const int cx = int(std::lround(s.x)), cy = int(std::lround(s.y));
+        if (cx < 9 || cy < 9 || cx >= w - 9 || cy >= h - 9) continue;
+        double sr = 0, sg = 0, sb = 0; int na = 0; ar.clear(); ag.clear(); ab.clear();
+        for (int dy = -9; dy <= 9; ++dy) for (int dx = -9; dx <= 9; ++dx) {
+            const size_t i = size_t(cy + dy) * w + cx + dx; const double r = std::hypot(dx, dy);
+            if (r <= 4) { sr += f.r[i]; sg += f.g[i]; sb += f.b[i]; ++na; } else if (r >= 7) { ar.push_back(f.r[i]); ag.push_back(f.g[i]); ab.push_back(f.b[i]); }
+        }
+        sr -= median(ar) * na; sg -= median(ag) * na; sb -= median(ab) * na;
+        if (sr > 0 && sg > 0 && sb > 0) bg.push_back(sb / sg);
+    }
+    g.stars = int(bg.size());
+    if (g.stars < kFilterMinStars) return g;
+    std::nth_element(bg.begin(), bg.begin() + bg.size() / 2, bg.end());
+    g.starBG = bg[bg.size() / 2];
+    if (g.starBG > 0.3 && g.starBG < kClearMaxBG) g.name = "Clear";
+    else if (g.starBG > kTribandMinBG && g.starBG < 2.0) g.name = "Nebula";
+    return g;
+}
+
+QByteArray fitsWithCards(const QByteArray& fits, const QList<QByteArray>& cards)
+{
+    // the END card of the primary header, on an 80-byte boundary
+    qsizetype end = -1;
+    for (qsizetype i = 0; i + 80 <= fits.size() && i < 2880 * 40; i += 80) if (fits.mid(i, 80).startsWith("END     ") || fits.mid(i, 80).trimmed() == "END") { end = i; break; }
+    if (end < 0 || cards.isEmpty()) return fits;
+    const qsizetype dataStart = (end / 2880 + 1) * 2880;
+    QByteArray header = fits.left(end);
+    for (QByteArray c : cards) header += c.leftJustified(80, ' ', true);
+    header += QByteArray("END").leftJustified(80, ' ');
+    header += QByteArray((2880 - header.size() % 2880) % 2880, ' ');
+    return header + fits.mid(dataStart);
+}
+
+QByteArray fitsCard(const char* key, const QString& value, const QString& comment, bool quoted)
+{
+    QByteArray v = quoted ? ("'" + value.toLatin1().replace('\'', "''").leftJustified(8, ' ') + "'") : value.toLatin1().rightJustified(20, ' ');
+    QByteArray c = QByteArray(key).leftJustified(8, ' ', true) + "= " + v;
+    if (!comment.isEmpty()) c += " / " + comment.toLatin1();
+    return c.leftJustified(80, ' ', true);
+}
+
+QList<QByteArray> filterCards(const FilterGuess& g)
+{
+    return {fitsCard("FILTDTCT", g.name.isEmpty() ? "UNKNOWN" : g.name, "filter seen in the stars' colour (FILTER: as configured)", true),
+            fitsCard("FILTDBG", QString::number(g.starBG, 'f', 3), "median raw blue/green of isolated stars", false),
+            fitsCard("FILTDN", QString::number(g.stars), "stars measured for FILTDTCT", false)};
 }
