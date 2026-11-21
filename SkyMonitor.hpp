@@ -50,7 +50,8 @@ public:
     QJsonObject calibrateColour(bool force);
 
     /// Analyse one snapshot (raw 16-bit FITS bytes) taken at the mount position (ra, dec in radians).
-    QJsonObject process(const QByteArray& fits, double exposureS, int iso, double raRad, double decRad, const QDateTime& utc);
+    /// analysed: the frame already through analyseFrame (the backend does that to stamp FILTDTCT), saving a second pass
+    QJsonObject process(const QByteArray& fits, double exposureS, int iso, double raRad, double decRad, const QDateTime& utc, const SkyFrame* analysed = nullptr);
 
     /// Evidence from a deliberate twilight survey (frames pointed at the places the night will use): a clear view counts as good, a blocked one as an obstruction.
     void noteSurvey(double az, double alt, bool obstructed, const QDateTime& utc) { noteSkyMap(az, alt, obstructed ? Kind::Obstruction : Kind::Good, utc); }

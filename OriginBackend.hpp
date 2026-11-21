@@ -245,7 +245,7 @@ private:
     SkyMonitor m_sky;
     QList<QJsonObject> m_events;
     qint64 m_eventSeq = 0;
-    void evaluateSnapshotFocus(const QString& filePath, const QByteArray& imageData, double ra, double dec, double exposure);
+    void evaluateSnapshotFocus(const QString& filePath, const QByteArray& imageData, double ra, double dec, double exposure, const SkyFrame* analysed = nullptr);
     // User's manual settings; the telescope reverts live-stream exposure/ISO after each sample capture
     double m_requestedExposure = 0.0;
     int m_requestedISO = 0;
