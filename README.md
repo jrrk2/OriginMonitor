@@ -25,6 +25,24 @@ The program talks to the Celestron Origin through `OriginBackend`, but nothing p
 Third-party pieces are used under their own terms and are not part of this repository: Qt 6, NAIF's CSPICE and the JPL DE440 ephemeris, astrometry.net (run as an external
 program), Open-Meteo (free for non-commercial use) and aviationweather.gov observations.
 
+The live stack's display stretch (`LiveStacker.cpp`) is a C++ port of Riccardo Paterniti's **VeraLux HyperMetric Stretch** (GPL-3.0-or-later), by way of the author's
+earlier ports in PCLDev and mkmosaic. Only VeraLux's published algorithm is used: no PixInsight or PCL code.
+
+**Gaia data.** The colour calibration reads a catalogue of Gaia DR3 stars brighter than G 14. The catalogue is not part of this repository and is not under its GPL. Gaia data are
+distributed by ESA under [CC BY-NC 3.0 IGO](https://creativecommons.org/licenses/by-nc/3.0/igo/), and the credit is "ESA/Gaia/DPAC". Commercial use needs ESA's prior permission
+(data.licences@esa.int). There are two ways to get it:
+- Download it from the separate release [gaia-dr3-g14-v1](https://github.com/jrrk2/OriginMonitor/releases/tag/gaia-dr3-g14-v1). Its README gives the licence, the credit, the
+  papers to cite and the file format.
+- Build it yourself straight from ESA with `tools/gaia_fetch.py` and `tools/gaia_pack.py`.
+
+**PixInsight and PCL (record of 2026-11-21).** The PixInsight Class Library licence (v2.0) does not allow PCL source code to be used for automated code generation without
+written permission. All of the author's commits since December 2024 were made with AI assistance, so the author's PCL-based repositories (PCL arm64 port, PCLDev, starmask,
+simpleXISF) and mkmosaic, which carries a stretch ported from PCLDev, were made private on 2026-11-21.
+- This repository contains no PCL code.
+- The Gaia colour calibration was written from the published method and ESA's own data. It does not use PCL, PixInsight's SPCC, or DSPX, whose end-user licence forbids
+  reverse engineering its catalogue.
+- `tools/pi_flow` drives a separately installed PixInsight through its scripting interface. It ships no PixInsight code and is optional.
+
 ## Contents
 
 1. [Results of the first night (9/10 October)](#results-of-the-first-night-910-october)

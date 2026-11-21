@@ -117,7 +117,8 @@ inline float sampleBilinear(const std::vector<float>& img, int w, int h, double 
 
 }   // namespace
 
-// ---- display stretch, ported from jrrk2/mkmosaic (VeraLux): background extraction, neutralisation, colour-preserving hyperbolic stretch ----
+// ---- display stretch: background extraction, neutralisation, colour-preserving hyperbolic stretch. A port of VeraLux HyperMetric Stretch by Riccardo Paterniti
+// (GPL-3.0-or-later), by way of jrrk2/mkmosaic; VeraLux's published algorithm only, no PixInsight/PCL code ----
 namespace {
 
 float percentileOf(std::vector<float> v, double p)
