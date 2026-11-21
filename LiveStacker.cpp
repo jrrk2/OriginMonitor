@@ -234,7 +234,7 @@ static Image16 vlStretchToImage(std::vector<float> col[3], int w, int h)
 void LiveStacker::reset()
 {
     m_w = m_h = m_frames = m_refIso = 0; m_refFilter.clear(); m_totalExposure = m_refExposure = m_bestRaw = 0; m_recentRaw.clear(); m_haveLast = false; m_refStars.clear();
-    m_pointRa = 0; m_pointDec = -999; m_ccR = m_ccB = 1; m_ccStars = m_ccFrames = 0; m_ccReport = QJsonObject();
+    m_pointRa = 0; m_pointDec = -999; m_ccR = m_ccB = 1; m_ccStars = m_ccFrames = 0; m_ccReport = QJsonObject(); m_fixedLayout = false; m_firstCapture = m_lastCapture = QDateTime();
     for (int c = 0; c < 3; ++c) { m_sx[c].clear(); m_sx2[c].clear(); m_sw[c].clear(); }
 }
 
@@ -287,7 +287,7 @@ LiveStacker::Report LiveStacker::assess(const SkyFrame& f, double exposureS, int
     return r;
 }
 
-LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double minTransparency, int iso, const QString& filter)
+LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double minTransparency, int iso, const QString& filter, const QDateTime& captured)
 {
     Report rep;
     if (!f.valid) { rep.reason = "unreadable frame"; return rep; }
@@ -299,6 +299,7 @@ LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double
     if (m_frames == 0) {                                           // first frame defines the grid and the reference stars
         if (f.stars.size() < 12) { rep.reason = "too few stars for a reference"; return rep; }
         m_w = w; m_h = h; m_refExposure = exposureS; m_refIso = std::max(0, iso); m_refFilter = filter;
+        m_fixedLayout = qEnvironmentVariable("ORIGIN_BAYER_GREEN", "main").toLower() != "vote";
         // 300 (was 150): detection skips saturated stars, so frames of very different exposure share only the fainter part of their lists (M1, 4 s against 17 s, 2026-10-14)
         m_refStars.assign(f.stars.begin(), f.stars.begin() + std::min<size_t>(f.stars.size(), 300));
         for (int c = 0; c < 3; ++c) { m_sx[c].assign(size_t(w) * h, 0.0); m_sx2[c].assign(size_t(w) * h, 0.0); m_sw[c].assign(size_t(w) * h, 0.0); }
@@ -360,6 +361,11 @@ LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double
             }
     }
     ++m_frames; m_totalExposure += exposureS;
+    if (captured.isValid()) {
+        const QDateTime t = captured.toUTC();
+        if (!m_firstCapture.isValid() || t < m_firstCapture) m_firstCapture = t;
+        if (!m_lastCapture.isValid() || t > m_lastCapture) m_lastCapture = t;
+    }
     m_recentRaw.push_back(rep.rawTransparency);
     rep.accepted = true; rep.frames = m_frames;
     return rep;
@@ -514,6 +520,8 @@ QJsonObject LiveStacker::summary() const
 {
     QJsonObject o{{"frames", m_frames}, {"total_exposure_s", m_totalExposure}, {"width", m_w}, {"height", m_h}, {"best_raw_transparency", m_bestRaw}, {"reference_iso", m_refIso}, {"reference_filter", m_refFilter}};
     if (m_ccFrames > 0) o["colour_calibration"] = m_ccReport;
+    o["bayer_layout_fixed"] = m_fixedLayout;
+    if (m_firstCapture.isValid()) { o["first_capture"] = m_firstCapture.toString(Qt::ISODate); o["last_capture"] = m_lastCapture.toString(Qt::ISODate); }
     return o;
 }
 
@@ -577,6 +585,8 @@ bool LiveStacker::saveColour(const QString& dir) const
     QJsonObject o;
     if (hasPointing()) o["pointing"] = QJsonObject{{"ra_deg", m_pointRa}, {"dec_deg", m_pointDec}};
     if (m_ccFrames > 0) o["calibration"] = m_ccReport;
+    if (m_fixedLayout) o["bayer_layout"] = "fixed";
+    if (m_firstCapture.isValid()) o["capture"] = QJsonObject{{"first", m_firstCapture.toString(Qt::ISODate)}, {"last", m_lastCapture.toString(Qt::ISODate)}};
     if (o.isEmpty()) { QFile::remove(dir + "/colour.json"); return true; }
     QFile f(dir + "/colour.json");
     return f.open(QIODevice::WriteOnly | QIODevice::Truncate) && f.write(QJsonDocument(o).toJson()) > 0;
@@ -587,6 +597,9 @@ void LiveStacker::loadColour(const QString& dir)
     QFile f(dir + "/colour.json");
     if (!f.open(QIODevice::ReadOnly)) return;
     const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+    m_fixedLayout = o["bayer_layout"].toString() == "fixed";
+    const QJsonObject cap = o["capture"].toObject();
+    m_firstCapture = QDateTime::fromString(cap["first"].toString(), Qt::ISODate); m_lastCapture = QDateTime::fromString(cap["last"].toString(), Qt::ISODate);
     const QJsonObject p = o["pointing"].toObject();
     if (p.contains("dec_deg")) { m_pointRa = p["ra_deg"].toDouble(); m_pointDec = p["dec_deg"].toDouble(); }
     const QJsonObject c = o["calibration"].toObject();

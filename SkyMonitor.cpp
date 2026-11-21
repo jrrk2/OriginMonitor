@@ -1,4 +1,6 @@
 #include "SkyMonitor.hpp"
+
+#include <QTimeZone>
 #include "FocusAnalyzer.hpp"
 #include "DataDir.hpp"
 #include "Image16.hpp"
@@ -260,6 +262,9 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     if (!headerFilter.isEmpty()) o["filter_header"] = headerFilter;
     o["filter_detected"] = detectedFilter.isEmpty() ? QJsonValue() : QJsonValue(detectedFilter);
     if (!F.valid) { o["verdict"] = "unreadable"; o["reasons"] = QJsonArray{F.note}; return o; }
+    // when the frame was taken: DATE-OBS (start of the exposure, UTC) if the header has it, else the analysis time
+    QDateTime captured = QDateTime::fromString(fitsHeaderString(fits, "DATE-OBS"), Qt::ISODate);
+    if (captured.isValid()) captured.setTimeZone(QTimeZone::UTC); else captured = utc;
 
     { const QString pic = writePicture(F, m_blackLevel, utc, &m_pictureMs); if (!pic.isEmpty()) { o["picture"] = pic; o["picture_time"] = utc.toString(Qt::ISODate); } }
 
@@ -425,7 +430,7 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
             o["registration"] = QJsonObject{{"reference_frame", false}, {"stacked", false}, {"frames_in_stack", 0}};
             verdict = "cloudy"; reasons << QString("sky %1% above the dark baseline: not used as the stack reference").arg(int(excess * 100));
         } else {
-            rep = m_autoStack ? m_stack.add(F, exposureS, m_minTransparency, iso, filter) : LiveStacker::Report();
+            rep = m_autoStack ? m_stack.add(F, exposureS, m_minTransparency, iso, filter, captured) : LiveStacker::Report();
             if (rep.accepted && rep.frames == 1) {
                 m_refHfr = focus.hfrPx; m_refStars = focus.stars;
                 if (source != "unknown") m_stack.setPointing(pointing.raHours * 15.0, pointing.decDeg);   // where calibrateColour starts its Gaia match
@@ -439,7 +444,7 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     // Stack the frame only if it is a usable one: clouds, patchy obstruction and wrong pointing would dilute the stack
     const bool stackable = haveStack && pointingOk && !filterUncertain && (verdict == "clear" || verdict == "hazy");
     if (stackable && m_autoStack) {
-        const LiveStacker::Report added = m_stack.add(F, exposureS, m_minTransparency, iso, filter);
+        const LiveStacker::Report added = m_stack.add(F, exposureS, m_minTransparency, iso, filter, captured);
         rep.accepted = added.accepted; rep.frames = added.frames;
         QJsonObject reg = o["registration"].toObject(); reg["stacked"] = added.accepted; reg["frames_in_stack"] = added.frames;
         if (!added.reason.isEmpty()) reg["refused_because"] = added.reason;

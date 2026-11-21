@@ -4,6 +4,7 @@
 #include "SkyFrame.hpp"
 
 #include "Image16.hpp"
+#include <QDateTime>
 #include <QJsonObject>
 #include <QString>
 #include <vector>
@@ -35,7 +36,8 @@ public:
     /// Register only (no stacking): used to judge a frame against the stack's star field. iso <= 0: unknown, taken as the reference's.
     Report assess(const SkyFrame& frame, double exposureS, int iso = 0) const;
     /// Register and stack. Frames that cannot be registered, or that are far below the reference's clarity, are refused.
-    Report add(const SkyFrame& frame, double exposureS, double minTransparency = 0.5, int iso = 0, const QString& filter = QString());
+    /// captured: when the frame was taken (FITS DATE-OBS), kept as the stack's first and last capture times
+    Report add(const SkyFrame& frame, double exposureS, double minTransparency = 0.5, int iso = 0, const QString& filter = QString(), const QDateTime& captured = QDateTime());
 
     bool hasReference() const { return m_frames > 0; }
     int frames() const { return m_frames; }
@@ -58,7 +60,10 @@ public:
     bool hasPointing() const { return m_pointDec >= -90 && m_pointDec <= 90; }
     double pointingRa() const { return m_pointRa; }
     double pointingDec() const { return m_pointDec; }
-    int colourFrames() const { return m_ccFrames; }   // stack size at the last successful colour calibration (0: never)
+    int colourFrames() const { return m_ccFrames; }
+    bool fixedLayout() const { return m_fixedLayout; }
+    QDateTime firstCapture() const { return m_firstCapture; }   // earliest and latest capture time of the stacked frames (invalid: not recorded, stacks saved before 2026-11-21)
+    QDateTime lastCapture() const { return m_lastCapture; }    // every frame split with the fixed Bayer layout (stacks begun since 2026-11-21); false: an older stack, some frames possibly swapped   // stack size at the last successful colour calibration (0: never)
     static constexpr double kArcsecPerPx = 2.955;     // half-resolution pixel of the Origin (2 x 2.4 um at 335 mm)
 
     bool save(const QString& dir) const;                   // state.bin + colour.json (pointing, colour calibration) + preview.png
@@ -85,6 +90,8 @@ private:
     double m_ccR = 1, m_ccB = 1;                           // Gaia colour calibration, on top of m_wbR/m_wbB (display only)
     int m_ccStars = 0, m_ccFrames = 0;                     // stars it used, stack size when it ran (0: not calibrated)
     QJsonObject m_ccReport;                                // the last successful calibration's report
+    bool m_fixedLayout = false;                            // begun with the fixed Bayer layout (SkyFrame.cpp), recorded in colour.json
+    QDateTime m_firstCapture, m_lastCapture;               // capture times of the stacked frames, UTC, recorded in colour.json
     std::vector<double> m_sx[3], m_sx2[3], m_sw[3];        // per colour: sum w*v, sum w*v^2, sum w
 };
 

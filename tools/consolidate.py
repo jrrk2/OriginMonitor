@@ -102,7 +102,8 @@ def main():
             shutil.move(os.path.join(stacks, d), to)
     for dest, v in plan.items():
         p = os.path.join(stacks, dest); os.makedirs(p)
-        for n in ('state.bin', 'preview.png'): shutil.copy2(os.path.join(v['src'], n), os.path.join(p, n))
+        for n in ('state.bin', 'preview.png', 'colour.json'):
+            if os.path.exists(os.path.join(v['src'], n)): shutil.copy2(os.path.join(v['src'], n), os.path.join(p, n))
         last = max(l.split('\t')[3] for l in open(os.path.join(v['src'], 'frames.tsv')) if l.strip())
         t = calendar.timegm(time.strptime(last, '%Y-%m-%dT%H:%M:%S'))
         for x in (os.path.join(p, 'state.bin'), os.path.join(p, 'preview.png'), p): os.utime(x, (t, t))
