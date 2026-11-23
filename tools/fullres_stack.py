@@ -221,6 +221,12 @@ def preview(rgb, path):
     cv2.imwrite(path, (out[..., ::-1] * 65535).astype(np.uint16))
 
 
+def session_of(path):
+    """frames of one session share a directory; the live frames, DATA/frames/<target>/ since 2026-11-23 (DATA/ before), count as one session as they did when flat"""
+    d = os.path.dirname(path)
+    return os.path.dirname(os.path.dirname(d)) if os.path.basename(os.path.dirname(d)) == 'frames' else d
+
+
 def run(g, out, jobs, kappa, pattern_file=None, ref_file=None):
     t0 = time.time(); d = os.path.join(out, restack.safe(g['name'])); os.makedirs(d, exist_ok=True)
     rs = g['rows']
@@ -240,9 +246,9 @@ def run(g, out, jobs, kappa, pattern_file=None, ref_file=None):
     import collections
     sessions = collections.defaultdict(list)
     for k, i in enumerate(infos):
-        if not okf(i): sessions[os.path.dirname(rs[k]['file'])].append(k)
+        if not okf(i): sessions[session_of(rs[k]['file'])].append(k)
     for sess, ks in sessions.items():
-        allk = [k for k, r in enumerate(rs) if os.path.dirname(r['file']) == sess]
+        allk = [k for k, r in enumerate(rs) if session_of(r['file']) == sess]
         if len(ks) < 5: continue
         Ma = None; rsN = {n: stars(ry, n=n, satlevel=0.9 * 65535 * flux_scale(ref['file'])) for n in (300, 500)}
         samefmt = frame_format(read_raw(rs[allk[0]]['file'])[1]) == reffmt

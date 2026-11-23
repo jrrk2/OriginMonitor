@@ -162,7 +162,7 @@ void Sequencer::onImage(const QString& remotePath, const QByteArray& data, doubl
     --m_awaitDl;
     m_curDownloadMs = m_dlT.elapsed(); m_sumDownloadMs += m_curDownloadMs;
     QString ext = QFileInfo(remotePath).suffix().toLower(); if (ext.isEmpty()) ext = "fits";
-    m_curPath = QString("%1/snapshot_%2.%3").arg(originDataDir(), QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz"), ext);
+    m_curPath = QString("%1/snapshot_%2.%3").arg(m_b->sky().framesDirectory(), QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz"), ext);
     QFile f(m_curPath);
     if (!(f.open(QIODevice::WriteOnly) && f.write(data) == data.size())) { m_curPath.clear(); m_b->recordEvent("sequence_error", "could not write " + f.fileName()); }
     m_expectAnalysis = true; m_anaT.start();

@@ -134,7 +134,7 @@ TelescopeGUI::TelescopeGUI(QWidget *parent)
 		qDebug() << "Exposure:" << exposure << "sec";
 
 		// Create save directory
-		QString baseDir = originDataDir();
+		QString baseDir = originBackend->sky().framesDirectory();
 		QDir().mkpath(baseDir);
 
 		// Generate filename with timestamp

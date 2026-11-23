@@ -502,7 +502,7 @@ QJsonObject ControlServer::doSolve(const QJsonObject& req)
 QJsonObject ControlServer::doSnapshot(const QJsonObject& req)
 {
     if (!m_backend->isConnected()) return fail("not connected");
-    QString dir = req["dir"].toString(originDataDir());
+    QString dir = req["dir"].toString(m_backend->sky().framesDirectory());
     QDir().mkpath(dir);
     int timeoutMs = req["timeout"].toInt(30) * 1000;
 

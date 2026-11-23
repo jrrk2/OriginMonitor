@@ -176,6 +176,8 @@ CelestronOriginMonitor --headless --connect 192.168.1.195 [--control-port 8765] 
 * Quit cleanly with `{"cmd":"quit"}` (it saves the live stack); never kill it while a capture is in flight if you can avoid it.
 * **Data directory**: `$ORIGIN_DATA_DIR`, default `/mnt/fits-backup/claude` when that path exists, is writable and is on a different filesystem from `/`
   (so frames never fill the root disk under an unmounted mount point); otherwise `~/Pictures/CelestronOrigin`. Change the default in `DataDir.hpp`.
+  Snapshots go to `DATA/frames/<target>/` (the target name as `stacks/<target>` names it; a mosaic's tiles share `frames/<mosaic>/`; `frames/auto/` with no target set).
+  Frames from before 2026-11-23 were moved there, and the paths in the logs rewritten, by `tools/frames_by_target.py` (`--undo` with its `frames/moves_*.tsv` reverses it).
 
 ## Control interface reference
 

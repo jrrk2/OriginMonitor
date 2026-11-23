@@ -1,5 +1,6 @@
 #include "OriginBackend.hpp"
 #include "DataDir.hpp"
+#include <QRegularExpression>
 #include <QEventLoop>
 #include <QDebug>
 #include <QDateTime>
@@ -1306,7 +1307,9 @@ void OriginBackend::evaluateSnapshotFocus(const QString& filePath, const QByteAr
             QTextStream t(&log);
             const QJsonObject reg = o["registration"].toObject();
             if (fresh) t << "time,file,exposure,target,verdict,stars,hfr_px,hfr_arcsec,hfr_spread_px,transparency,matched_fraction,sky_rate,sky_gradient_sigma,alt_deg,az_deg,moon_alt_deg,moon_separation_deg,stack_frames\n";
-            t << o["time"].toString() << ',' << QFileInfo(filePath).fileName() << ',' << exposure << ',' << o["target"].toString() << ',' << o["verdict"].toString() << ',' << o["stars"].toInt() << ','
+            // RFC 4180 quoting: a mosaic tile's target "<name> i,j" was written bare and shifted the columns (3-23 Nov)
+            const auto csv = [](const QString& v) { return v.contains(QRegularExpression("[,\"\r\n]")) ? '"' + QString(v).replace('"', "\"\"") + '"' : v; };
+            t << o["time"].toString() << ',' << csv(QFileInfo(filePath).fileName()) << ',' << exposure << ',' << csv(o["target"].toString()) << ',' << csv(o["verdict"].toString()) << ',' << o["stars"].toInt() << ','
               << o["hfr_px"].toDouble() << ',' << o["hfr_arcsec"].toDouble() << ',' << o["hfr_spread_px"].toDouble() << ',' << reg["transparency"].toDouble() << ',' << reg["matched_fraction"].toDouble() << ','
               << o["sky_rate"].toDouble() << ',' << o["sky_gradient_sigma"].toDouble() << ',' << o["alt_deg"].toDouble() << ',' << o["az_deg"].toDouble() << ',' << o["moon_alt_deg"].toDouble() << ','
               << o["moon_separation_deg"].toDouble() << ',' << o["stack"].toObject()["frames"].toInt() << '\n';

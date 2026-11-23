@@ -1,5 +1,6 @@
 #include "SkyMonitor.hpp"
 
+#include <QRegularExpression>
 #include <QTimeZone>
 #include "FocusAnalyzer.hpp"
 #include "DataDir.hpp"
@@ -83,6 +84,12 @@ QJsonObject SkyMonitor::settings() const
 }
 
 QString SkyMonitor::stackDirectory() const { return baseDir() + "/stacks/" + safeName(m_target); }
+// a mosaic tile's target is "<mosaic name> i,j" (HeadlessMain cmdMosaic): all tiles of a mosaic share the mosaic's folder
+QString SkyMonitor::framesDirectory() const
+{
+    QString t = m_target; t.remove(QRegularExpression(" \\d+,\\d+$"));
+    const QString d = baseDir() + "/frames/" + safeName(t); QDir().mkpath(d); return d;
+}
 
 QJsonObject SkyMonitor::setTarget(const QString& name, double raHours, double decDeg, bool reset)
 {

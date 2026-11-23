@@ -44,6 +44,7 @@ public:
     LiveStacker& stacker() { return m_stack; }
     QJsonObject stackSummary() const;
     QString stackDirectory() const;
+    QString framesDirectory() const;                       // where this target's snapshot FITS are written: <data>/frames/<target> (a mosaic's tiles share <data>/frames/<mosaic>), created on demand
     void archiveStack(const QString& tag = QString());      // save the stack and move it aside (stacks/<target>[_<tag>]_<UTC>) so a replacement stack does not overwrite it
     bool saveStack();
     /// Gaia colour calibration of the current stack (LiveStacker::calibrateColour) from its reference pointing, else the target position. Unless forced, only when due.

@@ -66,9 +66,9 @@ def robust_centre(pts):
 
 
 def snapshot_index(data):
-    """snapshot FITS files by UTC time of their name (local time: GMT/BST)"""
+    """snapshot FITS files by UTC time of their name (local time: GMT/BST): DATA/frames/<target>/ since 2026-11-23, DATA/ itself before"""
     out = []
-    for f in glob.glob(os.path.join(data, 'snapshot_*.fits')):
+    for f in glob.glob(os.path.join(data, 'snapshot_*.fits')) + glob.glob(os.path.join(data, 'frames', '*', 'snapshot_*.fits')):
         b = os.path.basename(f)
         try: t = datetime.strptime(b[9:28], '%Y%m%d_%H%M%S_%f').replace(tzinfo=LONDON).astimezone(timezone.utc)
         except ValueError: continue
