@@ -200,7 +200,7 @@ public:
                 for (auto it = bins.begin(); it != bins.end(); ++it) { const QJsonObject b = it.value().toObject(); const int n = b["ex_n"].toInt(); if (n >= 5) { const double mm = b["ex_sum"].toDouble() / n; means << mm; all.append({it.key(), mm}); } }
                 if (means.size() >= 4) {
                     std::sort(means.begin(), means.end()); const double med = means[means.size() / 2];
-                    for (const auto& e : all) if (e.second >= std::max(1.6 * med, med + 0.4)) { const QStringList p = e.first.split('_'); if (p.size() == 2 && p[1].toInt() < 60) m_bins.append({p[0].toInt(), p[1].toInt()}); }
+                    for (const auto& e : all) if (e.second >= std::max(1.6 * med, med + 0.4)) { const QStringList p = e.first.split('_'); if (p.size() == 2 && p[1].toInt() < 60) m_glare.append({p[0].toInt(), p[1].toInt()}); }
                 }
             }
             for (auto it = bins.begin(); it != bins.end(); ++it) {
@@ -213,8 +213,8 @@ public:
         }
     }
     bool hasFile() const { return !m_pts.isEmpty(); }
-    int learnedBins() const { return m_bins.size(); }
-    double minAlt(double az) const
+    int learnedBins() const { return m_bins.size() + m_glare.size(); }
+    double minAlt(double az, bool ignoreGlare = false) const      // ignoreGlare: a target the user boosted braves the bright bins (the Helix low in the town's glow); obstructions still count
     {
         az = std::fmod(az, 360.0); if (az < 0) az += 360.0;
         double h = m_flat;
@@ -229,12 +229,13 @@ public:
                 if (az >= p[i].first && az <= p[i + 1].first) { const double d = p[i + 1].first - p[i].first; h = d > 0 ? p[i].second + (p[i + 1].second - p[i].second) * (az - p[i].first) / d : p[i].second; break; }
         }
         for (const auto& b : m_bins) if (az >= b.first && az < b.first + 10) h = std::max(h, double(b.second) + 5);   // an obstructed bin blocks up to its top edge
+        if (!ignoreGlare) for (const auto& b : m_glare) if (az >= b.first && az < b.first + 10) h = std::max(h, double(b.second) + 5);
         return h;
     }
 private:
     double m_flat;
     QList<QPair<double, double>> m_pts;
-    QList<QPair<int, int>> m_bins;
+    QList<QPair<int, int>> m_bins, m_glare;                 // obstructed bins; glare bins (avoided unless the target is boosted)
 };
 
 // How well the Moon suits a target over steps [i, i+m): faint targets want a dark sky, bright ones can take the glow (and should use it, leaving the dark hours of a new moon to the faint ones).
@@ -332,7 +333,7 @@ QJsonObject schedule(const Options& o)
             // sky brightening by the Moon on this target: illumination, how high the Moon is, and how close it is to the target (0 none .. 1 strong)
             // a bright Moon lights the whole sky: full strength once it is 30 deg up, wherever the target is; closeness adds the rest (x0.7 at 90 deg or more, x1 next to it)
             r.glow[i] = std::clamp(illum[i] * std::min(1.0, std::max(0.0, std::sin(moonAlt[i] * kPi / 180)) / 0.5) * (1.0 - 0.3 * std::min(sep, 90.0) / 90.0), 0.0, 1.0);
-            r.ok[i] = dark[i] && aa.alt > hz.minAlt(aa.az) && (sep > o.moonSep || moonAlt[i] < -2) && wq[i] >= o.minQuality;
+            r.ok[i] = dark[i] && aa.alt > hz.minAlt(aa.az, tg.boosted) && (sep > o.moonSep || moonAlt[i] < -2) && wq[i] >= o.minQuality;
             any |= r.ok[i];
         }
         if (!any) continue;

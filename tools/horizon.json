@@ -1,2 +1,2 @@
-{"_comment": "az deg (N=0,E=90) -> minimum usable altitude deg. N foliage ~40, E/W fences ~30 (user, 2026-10-09); S buildings height ASSUMED 35, not yet measured.",
- "points": [[0, 40], [45, 40], [70, 30], [110, 30], [135, 35], [225, 35], [250, 30], [290, 30], [315, 40]]}
+{"_comment": "az deg (N=0,E=90) -> minimum usable altitude deg. N foliage ~40, E/W fences ~30 (user, 2026-10-09); S buildings height ASSUMED 35, not yet measured. Measured 2026-11-23 17:34 UTC: az 166 clear down to at least 19.6 (a 10 s frame at alt 20 plate-solved there, stars across the whole field; 20 is the goto floor, so lower is untested). S az 160-210 set to 15 on trial (2026-11-23) for the Helix (max 17 deg): unmeasured below 19.6; the run's obstruction check and the learned bins catch it if blocked.",
+ "points": [[0, 40], [45, 40], [70, 30], [110, 30], [135, 35], [160, 15], [210, 15], [225, 35], [250, 30], [290, 30], [315, 40]]}

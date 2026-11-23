@@ -7,6 +7,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace {
@@ -35,19 +36,25 @@ bool solve(std::vector<double>& A, std::vector<double>& b, int n)
     return true;
 }
 
-// Background model: 30th-percentile block values on a coarse grid, blocks lifted by the galaxy or a bright star rejected iteratively and
-// the gaps filled from the surrounding sky (normalised convolution), then interpolated to full size and subtracted. The smoothing scale
-// (about 100 px) is small enough to follow sensor vignetting and fixed patterns, and the rejection stops it eating a galaxy's halo.
-// Returns the residual pixel noise.
-double flattenPlane(std::vector<float>& img, int w, int h)
+// Smooth block model of a plane: frac-percentile block values on a coarse grid (B = 48 px), blocks lifted by the galaxy or a bright star rejected
+// iteratively and the gaps filled from the surrounding sky (normalised convolution). G is the grid, block centres at (x + 0.5) * B.
+struct BlockModel { static constexpr int B = 48; int bx = 0, by = 0; std::vector<float> G;
+    float at(int x, int y) const {
+        const double fy = std::clamp((y + 0.5) / B - 0.5, 0.0, by - 1.0001); const int y0 = int(fy); const double ty = fy - y0;
+        const double fx = std::clamp((x + 0.5) / B - 0.5, 0.0, bx - 1.0001); const int x0 = int(fx); const double tx = fx - x0;
+        const size_t i = size_t(y0) * bx + x0;
+        return float((G[i] * (1 - tx) + G[i + 1] * tx) * (1 - ty) + (G[i + bx] * (1 - tx) + G[i + bx + 1] * tx) * ty);
+    } };
+BlockModel blockModel(const std::vector<float>& img, int w, int h, double frac)
 {
-    const int B = 48, bx = std::max(3, w / B), by = std::max(3, h / B);
+    BlockModel m; const int B = BlockModel::B; m.bx = std::max(3, w / B); m.by = std::max(3, h / B);
+    const int bx = m.bx, by = m.by;
     std::vector<float> g(size_t(bx) * by), wt(size_t(bx) * by, 1.f), G(size_t(bx) * by);
     std::vector<float> v;
     for (int y = 0; y < by; ++y) for (int x = 0; x < bx; ++x) {
         v.clear();
         for (int yy = 0; yy < B; yy += 2) for (int xx = 0; xx < B; xx += 2) { const int Y = y * B + yy, X = x * B + xx; if (Y < h && X < w) v.push_back(img[size_t(Y) * w + X]); }
-        std::nth_element(v.begin(), v.begin() + v.size() * 3 / 10, v.end()); g[size_t(y) * bx + x] = v[v.size() * 3 / 10];
+        const size_t k = size_t(v.size() * frac); std::nth_element(v.begin(), v.begin() + k, v.end()); g[size_t(y) * bx + x] = v[k];
     }
     const double sgm = 2.0; const int R = 5;
     auto blur = [&](const std::vector<float>& src, std::vector<float>& dst) {
@@ -68,15 +75,12 @@ double flattenPlane(std::vector<float>& img, int w, int h)
         std::nth_element(r.begin(), r.begin() + r.size() / 2, r.end()); const float sd = 1.4826f * r[r.size() / 2] + 1e-6f;
         for (size_t i = 0; i < g.size(); ++i) wt[i] = (g[i] - G[i] - md) > 1.5f * sd ? 0.f : 1.f;
     }
-    // bilinear interpolation of the block model (block centres at (x + 0.5) * B)
-    for (int y = 0; y < h; ++y) {
-        const double fy = std::clamp((y + 0.5) / B - 0.5, 0.0, by - 1.0001); const int y0 = int(fy); const double ty = fy - y0;
-        for (int x = 0; x < w; ++x) {
-            const double fx = std::clamp((x + 0.5) / B - 0.5, 0.0, bx - 1.0001); const int x0 = int(fx); const double tx = fx - x0;
-            const size_t i = size_t(y0) * bx + x0;
-            img[size_t(y) * w + x] -= float((G[i] * (1 - tx) + G[i + 1] * tx) * (1 - ty) + (G[i + bx] * (1 - tx) + G[i + bx + 1] * tx) * ty);
-        }
-    }
+    m.G = std::move(G);
+    return m;
+}
+
+double robustSigma(const std::vector<float>& img, int w, int h)
+{
     std::vector<float> s; for (int y = 0; y < h; y += 4) for (int x = 0; x < w; x += 4) s.push_back(img[size_t(y) * w + x]);
     std::nth_element(s.begin(), s.begin() + s.size() / 2, s.end()); const float md = s[s.size() / 2];
     for (auto& t : s) t = std::fabs(t - md);
@@ -84,24 +88,116 @@ double flattenPlane(std::vector<float>& img, int w, int h)
     return 1.4826 * s[s.size() / 2] + 1e-6;
 }
 
+// Background model: 30th-percentile block model, interpolated to full size and subtracted. The smoothing scale (about 100 px) is small enough to
+// follow sensor vignetting and fixed patterns, and the rejection stops it eating a galaxy's halo. It also takes out anything wider than about
+// 5 arcmin, and the frame's whole level: a nebula that fills the field is lost (see levelPlane). Returns the residual pixel noise.
+double flattenPlane(std::vector<float>& img, int w, int h)
+{
+    const BlockModel m = blockModel(img, w, h, 0.3);
+    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) img[size_t(y) * w + x] -= m.at(x, y);
+    return robustSigma(img, w, h);
+}
+
+// $ORIGIN_FLATTEN=level: for a frame already divided by the master flat, remove only a plane (the sky's slope) and the level of the frame's darkest
+// part, so emission wider than the frame keeps its level and structure: the field-filling nebulae (IC 1396, the Heart and Soul, the Rosette) came
+// out as a dim brown sky (2026-11-22). Block medians, not the 30th percentile: the gap between them is half the pixel noise, which differs from
+// night to night and left steps in the stack where the nights' coverage changes. hp gets the high-pass copy (the 100 px model removed) that the
+// banding is measured on. Returns the residual pixel noise.
+double levelPlane(std::vector<float>& img, int w, int h, std::vector<float>& hp)
+{
+    const BlockModel m = blockModel(img, w, h, 0.5);
+    hp.resize(img.size());
+    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) hp[size_t(y) * w + x] = img[size_t(y) * w + x] - m.at(x, y);
+    // plane through the block model, both bright (nebula) and dark (globules) blocks rejected
+    std::vector<char> use(m.G.size(), 1); double c[3] = {0, 0, 0};
+    for (int it = 0; it < 4; ++it) {
+        std::vector<double> A(9, 0), b(3, 0);
+        for (int y = 0; y < m.by; ++y) for (int x = 0; x < m.bx; ++x) {
+            const size_t i = size_t(y) * m.bx + x; if (!use[i]) continue;
+            const double t[3] = {1, (x + 0.5) * BlockModel::B / w - 0.5, (y + 0.5) * BlockModel::B / h - 0.5};
+            for (int r = 0; r < 3; ++r) { b[r] += t[r] * m.G[i]; for (int k = 0; k < 3; ++k) A[r * 3 + k] += t[r] * t[k]; }
+        }
+        if (!solve(A, b, 3)) break;
+        c[0] = b[0]; c[1] = b[1]; c[2] = b[2];
+        std::vector<double> r;
+        for (int y = 0; y < m.by; ++y) for (int x = 0; x < m.bx; ++x) r.push_back(m.G[size_t(y) * m.bx + x] - c[0] - c[1] * ((x + 0.5) * BlockModel::B / w - 0.5) - c[2] * ((y + 0.5) * BlockModel::B / h - 0.5));
+        std::vector<double> a(r); for (double& t : a) t = std::fabs(t); const double sd = 1.4826 * medianOf(a) + 1e-6;
+        for (size_t i = 0; i < r.size(); ++i) use[i] = std::fabs(r[i]) < 2 * sd;
+    }
+    auto plane = [&](double x, double y) { return c[0] + c[1] * ((x + 0.5) / w - 0.5) + c[2] * ((y + 0.5) / h - 0.5); };
+    // the darkest part: the 5th percentile of the block model above the plane (smooth already, so not a noise dip)
+    std::vector<double> d;
+    for (int y = 0; y < m.by; ++y) for (int x = 0; x < m.bx; ++x) d.push_back(m.G[size_t(y) * m.bx + x] - plane((x + 0.5) * BlockModel::B, (y + 0.5) * BlockModel::B));
+    std::nth_element(d.begin(), d.begin() + d.size() / 20, d.end()); const double floorLevel = d[d.size() / 20];
+    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) img[size_t(y) * w + x] -= float(plane(x, y) + floorLevel);
+    return robustSigma(hp, w, h);
+}
+
+bool levelMode() { static const bool on = qEnvironmentVariable("ORIGIN_FLATTEN") == "level"; return on; }
+
+// $ORIGIN_MASTER_FLAT (with ORIGIN_FLATTEN=level): a master flat from OriginHeadless flats, planes R, G, B at half resolution. Each plane's own plane
+// fit is divided out first: a twilight flat carries the sky's slope (40% across the 15 Oct one), not just the optics' vignetting. Empty when absent.
+const std::vector<float>& masterFlat(int c, int w, int h)
+{
+    static std::vector<float> planes[3]; static bool tried = false; static int fw = 0, fh = 0;
+    static const std::vector<float> none;
+    if (!tried) {
+        tried = true;
+        QFile f(qEnvironmentVariable("ORIGIN_MASTER_FLAT"));
+        if (!f.fileName().isEmpty() && f.open(QIODevice::ReadOnly)) {
+            const QByteArray b = f.readAll(); int n1 = 0, n2 = 0, n3 = 0, bitpix = 0; qsizetype pos = 0; bool end = false;
+            for (; pos + 80 <= b.size() && !end; pos += 80) {
+                const QByteArray card = b.mid(pos, 80), key = card.left(8).trimmed(), val = card.mid(10, 20).trimmed();
+                if (key == "END") end = true; else if (key == "BITPIX") bitpix = val.toInt(); else if (key == "NAXIS1") n1 = val.toInt(); else if (key == "NAXIS2") n2 = val.toInt(); else if (key == "NAXIS3") n3 = val.toInt();
+            }
+            pos = (pos + 2879) / 2880 * 2880;
+            if (end && bitpix == -32 && n3 == 3 && n1 > 0 && n2 > 0 && pos + qsizetype(n1) * n2 * 12 <= b.size()) {
+                fw = n1; fh = n2;
+                for (int p = 0; p < 3; ++p) {
+                    planes[p].resize(size_t(n1) * n2);
+                    for (size_t i = 0; i < planes[p].size(); ++i) {
+                        const uchar* q = reinterpret_cast<const uchar*>(b.constData() + pos + (qsizetype(p) * n1 * n2 + qsizetype(i)) * 4);
+                        const quint32 u = (quint32(q[0]) << 24) | (quint32(q[1]) << 16) | (quint32(q[2]) << 8) | q[3]; float v; memcpy(&v, &u, 4); planes[p][i] = v;
+                    }
+                    // least-squares plane over the plane's pixels (every 4th), divided out
+                    std::vector<double> A(9, 0), r(3, 0);
+                    for (int y = 0; y < n2; y += 4) for (int x = 0; x < n1; x += 4) {
+                        const double t[3] = {1, (x + 0.5) / n1 - 0.5, (y + 0.5) / n2 - 0.5}, v = planes[p][size_t(y) * n1 + x];
+                        for (int i = 0; i < 3; ++i) { r[i] += t[i] * v; for (int k = 0; k < 3; ++k) A[i * 3 + k] += t[i] * t[k]; }
+                    }
+                    if (!solve(A, r, 3)) { planes[p].clear(); continue; }
+                    for (int y = 0; y < n2; ++y) for (int x = 0; x < n1; ++x) {
+                        float& v = planes[p][size_t(y) * n1 + x];
+                        v = float(v / (r[1] * ((x + 0.5) / n1 - 0.5) + r[2] * ((y + 0.5) / n2 - 0.5) + r[0]));
+                        if (!(v > 0.2f)) v = 1.f;
+                    }
+                }
+            }
+        }
+    }
+    return fw == w && fh == h ? planes[c] : none;
+}
+
 // Row and column offsets, measured after flattening from sky pixels only: values within 2 sigma of zero, so stars and the galaxy's bright
 // parts are excluded (a faint halo still contributes a little, but only a fraction of a line's pixels). Wide stripes are removed as well
 // as narrow ones. Two rounds, rows then columns.
-void removeBanding(std::vector<float>& img, int w, int h, double sigma)
+void removeBanding(std::vector<float>& img, int w, int h, double sigma, std::vector<float>* measure = nullptr)
 {
+    // measure: measure the offsets on this copy instead (the high-pass one, whose sky is at zero) and take them out of both
+    std::vector<float>& ms = measure ? *measure : img;
     // Truncated mean over [-2, +0.5] sigma: the cut is asymmetric so that a faint halo or galaxy arm (a few tenths of a sigma per pixel) cannot
     // lift a line's estimate and carve a dark cross through the object; the constant bias of the truncation is the same for every line.
     const double lo = -2.0 * sigma, hi = 0.5 * sigma;
     for (int it = 0; it < 2; ++it) {
         for (int y = 0; y < h; ++y) {
-            double s = 0; int n = 0; float* r = &img[size_t(y) * w];
+            double s = 0; int n = 0; const float* r = &ms[size_t(y) * w];
             for (int x = 0; x < w; ++x) if (r[x] > lo && r[x] < hi) { s += r[x]; ++n; }
-            if (n > w / 4) { const float m = float(s / n); for (int x = 0; x < w; ++x) r[x] -= m; }
+            if (n > w / 4) { const float m = float(s / n); for (int x = 0; x < w; ++x) { img[size_t(y) * w + x] -= m; if (measure) ms[size_t(y) * w + x] -= m; } }
         }
         for (int x = 0; x < w; ++x) {
             double s = 0; int n = 0;
-            for (int y = 0; y < h; ++y) { const float v = img[size_t(y) * w + x]; if (v > lo && v < hi) { s += v; ++n; } }
-            if (n > h / 4) { const float m = float(s / n); for (int y = 0; y < h; ++y) img[size_t(y) * w + x] -= m; }
+            for (int y = 0; y < h; ++y) { const float v = ms[size_t(y) * w + x]; if (v > lo && v < hi) { s += v; ++n; } }
+            if (n > h / 4) { const float m = float(s / n); for (int y = 0; y < h; ++y) { img[size_t(y) * w + x] -= m; if (measure) ms[size_t(y) * w + x] -= m; } }
         }
     }
 }
@@ -171,6 +267,33 @@ void extractBackground(std::vector<float>& plane, int w, int h, int cell, double
 
 }   // namespace
 
+// Sky levels R, G, B to neutralise on. Normally each channel's median over the frame, which is mostly sky once the model is removed (picking the
+// darkest pixels by mean brightness instead selects the noise dips of the noisiest channel, R, and turned the background red). With ORIGIN_FLATTEN=level
+// a nebula can fill the frame, and its median is the nebula: the mean of the darkest 5% of 32 px block medians instead (the dark globules), where
+// the block medians are smooth enough not to be noise dips.
+static std::array<float, 3> skyLevels(const std::vector<float>& rgb, int w, int h)
+{
+    std::array<float, 3> m{};
+    if (!levelMode()) {
+        std::vector<float> bg[3]; for (size_t i = 0; i < size_t(w) * h; i += 4) for (int c = 0; c < 3; ++c) bg[c].push_back(rgb[i * 3 + c]);
+        for (int c = 0; c < 3; ++c) m[c] = percentileOf(bg[c], 50);
+        return m;
+    }
+    const int B = 32, bx = w / B, by = h / B;
+    struct Blk { float l, v[3]; }; std::vector<Blk> blk; std::vector<float> v[3];
+    for (int y = 0; y < by; ++y) for (int x = 0; x < bx; ++x) {
+        for (int c = 0; c < 3; ++c) v[c].clear();
+        for (int yy = 0; yy < B; yy += 2) for (int xx = 0; xx < B; xx += 2) { const size_t i = size_t(y * B + yy) * w + x * B + xx; for (int c = 0; c < 3; ++c) v[c].push_back(rgb[i * 3 + c]); }
+        Blk k; for (int c = 0; c < 3; ++c) k.v[c] = percentileOf(v[c], 50);
+        k.l = 0.2126f * k.v[0] + 0.7152f * k.v[1] + 0.0722f * k.v[2]; blk.push_back(k);
+    }
+    if (blk.size() < 40) { m = {0, 0, 0}; return m; }
+    std::sort(blk.begin(), blk.end(), [](const Blk& a, const Blk& b) { return a.l < b.l; });
+    const size_t n = std::max<size_t>(4, blk.size() / 20);
+    for (size_t i = 0; i < n; ++i) for (int c = 0; c < 3; ++c) m[c] += blk[i].v[c] / n;
+    return m;
+}
+
 static Image16 vlStretchToImage(std::vector<float> col[3], int w, int h)
 {
     const size_t n = size_t(w) * h;
@@ -179,7 +302,7 @@ static Image16 vlStretchToImage(std::vector<float> col[3], int w, int h)
         std::vector<float> s; for (size_t i = 0; i < n; i += 7) s.push_back(col[1][i]);
         const float med = percentileOf(s, 50); for (auto& t : s) t = std::fabs(t - med); const float sg = 1.4826f * percentileOf(s, 50) + 1e-6f;
         for (int c = 0; c < 3; ++c) for (size_t i = 0; i < n; ++i) col[c][i] = std::max(0.f, col[c][i] + 4 * sg);
-        for (int c = 0; c < 3; ++c) extractBackground(col[c], w, h, 48, 3.0);
+        if (!levelMode()) for (int c = 0; c < 3; ++c) extractBackground(col[c], w, h, 48, 3.0);
     }
     std::vector<float> rgb(n * 3), lum(n);
     for (size_t i = 0; i < n; ++i) for (int c = 0; c < 3; ++c) rgb[i * 3 + c] = col[c][i];
@@ -187,8 +310,7 @@ static Image16 vlStretchToImage(std::vector<float> col[3], int w, int h)
     // neutralise: R and B sky levels matched to G. Each channel's own median over the whole frame, which is mostly sky once the model is removed;
     // picking the darkest pixels by mean brightness instead selects the noise dips of the noisiest channel (R) and turned the background red
     {
-        std::vector<float> bg[3]; for (size_t i = 0; i < n; i += 4) for (int c = 0; c < 3; ++c) bg[c].push_back(rgb[i * 3 + c]);
-        const float mr = percentileOf(bg[0], 50), mg = percentileOf(bg[1], 50), mb = percentileOf(bg[2], 50);
+        const std::array<float, 3> sky = skyLevels(rgb, w, h); const float mr = sky[0], mg = sky[1], mb = sky[2];
         for (size_t i = 0; i < n; ++i) { rgb[i * 3] = std::clamp(rgb[i * 3] + mg - mr, 0.f, 1.f); rgb[i * 3 + 2] = std::clamp(rgb[i * 3 + 2] + mg - mb, 0.f, 1.f); }
     }
     // hyperbolic stretch, strength solved so the median luminance lands on the target background
@@ -222,8 +344,7 @@ static Image16 vlStretchToImage(std::vector<float> col[3], int w, int h)
         const float cur = percentileOf(l2, 50);
         if (cur > 0 && cur < 1 && std::fabs(cur - targetBg) > 1e-3f) { const float m = cur * (targetBg - 1) / (cur * (2 * targetBg - 1) - targetBg); for (auto& v : rgb) v = mtfF(v, m); }
         // the stretch treats the noisier R and B planes differently from G, so match the sky medians once more where they are seen
-        std::vector<float> bg[3]; for (size_t i = 0; i < n; i += 4) for (int c = 0; c < 3; ++c) bg[c].push_back(rgb[i * 3 + c]);
-        const float mr = percentileOf(bg[0], 50), mg = percentileOf(bg[1], 50), mb = percentileOf(bg[2], 50);
+        const std::array<float, 3> sky = skyLevels(rgb, w, h); const float mr = sky[0], mg = sky[1], mb = sky[2];
         for (size_t i = 0; i < n; ++i) { rgb[i * 3] = std::clamp(rgb[i * 3] + mg - mr, 0.f, 1.f); rgb[i * 3 + 2] = std::clamp(rgb[i * 3 + 2] + mg - mb, 0.f, 1.f); }
         for (auto& v : rgb) v = softClipF(v);
     }
@@ -344,17 +465,43 @@ LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double
     const double c2 = T.a * T.a + T.b * T.b;
     for (int ch = 0; ch < 3; ++ch) {
         std::vector<float> img = *src[ch];
-        const double noise = flattenPlane(img, w, h);
-        removeBanding(img, w, h, noise);
+        double noise;
+        if (levelMode()) {
+            const std::vector<float>& flat = masterFlat(ch, w, h);
+            // black level off first, or the division imprints the vignetting on it ($ORIGIN_BLACK_LEVEL, 4985 as SkyMonitor; uncertain by a few
+            // hundred ADU without dark frames, which leaves a faint radial pattern of that much times the vignetting)
+            static const double black = qEnvironmentVariableIsSet("ORIGIN_BLACK_LEVEL") ? qEnvironmentVariable("ORIGIN_BLACK_LEVEL").toDouble() : 4985.0;
+            if (!flat.empty()) for (size_t i = 0; i < img.size(); ++i) img[i] = float((img[i] - black) / flat[i]);
+            std::vector<float> hp;
+            noise = levelPlane(img, w, h, hp);
+            removeBanding(img, w, h, noise, &hp);
+        } else {
+            noise = flattenPlane(img, w, h);
+            removeBanding(img, w, h, noise);
+        }
         const double gain = (ch == 0 ? m_wbR : ch == 2 ? m_wbB : 1.0) * scaleFactor;
         const double wt = 1.0 / std::max(noise * gain * noise * gain, 1e-9);
+        // ORIGIN_FLATTEN=level keeps each frame's level, which differs from night to night (the Moon, the sky's brightness, which part of the field was
+        // darkest): matched to the stack's over the overlap before it is added (the median difference on an 8 px grid), or every edge of a night's
+        // coverage is a step (a straight diagonal across IC 1396, 2026-11-22). The first frame sets the level.
+        double offset = 0;
+        if (levelMode() && m_frames > 0) {
+            std::vector<double> d;
+            for (int y = 4; y < m_h; y += 8) for (int x = 4; x < m_w; x += 8) {
+                const size_t i = size_t(y) * m_w + x; if (m_sw[ch][i] <= 0) continue;
+                const double qx = x - T.tx, qy = y - T.ty;
+                bool inside; const float v0 = sampleBilinear(img, w, h, (T.a * qx + T.b * qy) / c2, (-T.b * qx + T.a * qy) / c2, inside);
+                if (inside) d.push_back(v0 * gain - m_sx[ch][i] / m_sw[ch][i]);
+            }
+            if (d.size() > 200) offset = medianOf(d);
+        }
         for (int y = 0; y < m_h; ++y)
             for (int x = 0; x < m_w; ++x) {
                 const double qx = x - T.tx, qy = y - T.ty;
                 const double px = (T.a * qx + T.b * qy) / c2, py = (-T.b * qx + T.a * qy) / c2;
                 bool inside; const float v0 = sampleBilinear(img, w, h, px, py, inside);
                 if (!inside) continue;
-                const double v = v0 * gain; const size_t i = size_t(y) * m_w + x;
+                const double v = v0 * gain - offset; const size_t i = size_t(y) * m_w + x;
                 if (m_frames >= 8 && m_sw[ch][i] > 0) {                       // running-variance clip
                     const double mean = m_sx[ch][i] / m_sw[ch][i];
                     const double var = std::max(0.0, m_sx2[ch][i] / m_sw[ch][i] - mean * mean);
@@ -378,9 +525,10 @@ LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double
 Image16 LiveStacker::preview() const
 {
     if (m_frames == 0) return Image16();
-    // Well-covered area: shrink the rectangle until every border row/column is at least 98% covered by 60% of the peak weight
+    // Well-covered area: shrink the rectangle until every border row/column is at least 98% covered by 85% of the peak weight (60% until 2026-11-22
+    // left wedges of the thinner coverage at the edges, 10-15% darker where fewer nights overlap)
     double mx = 0; for (double v : m_sw[1]) mx = std::max(mx, v);
-    auto cov = [&](int x, int y) { return m_sw[1][size_t(y) * m_w + x] >= 0.6 * mx; };
+    auto cov = [&](int x, int y) { return m_sw[1][size_t(y) * m_w + x] >= 0.85 * mx; };
     int x0 = 0, y0 = 0, x1 = m_w, y1 = m_h;
     for (int guard = 0; guard < 4000 && x1 - x0 > 32 && y1 - y0 > 32; ++guard) {
         auto frac = [&](int a, int b, bool horizontal, int fixed) { int n = 0; for (int k = a; k < b; ++k) n += horizontal ? cov(k, fixed) : cov(fixed, k); return double(n) / std::max(1, b - a); };
@@ -475,6 +623,9 @@ QJsonObject LiveStacker::calibrateColour(double raDeg, double decDeg, const QStr
     const std::array<double, 3> white = model.white();
     std::vector<double> rr, rb, col;
     int candidates = 0;
+    // $ORIGIN_COLOUR_DUMP: each measured star (position, Gaia photometry, raw camera fluxes) as CSV, for checking the colour model offline
+    QFile dump(qEnvironmentVariable("ORIGIN_COLOUR_DUMP"));
+    if (!dump.fileName().isEmpty() && dump.open(QIODevice::WriteOnly | QIODevice::Text)) dump.write("ra,dec,g,bp_rp,raw_r,raw_g,raw_b\n");
     for (size_t i = 0; i < cat.size(); ++i) {
         const GaiaStar& g = cat[i];
         if (g.g < 9 || g.g > 13.5 || !(g.bpRp > -0.2 && g.bpRp < 3.0)) continue;
@@ -501,6 +652,7 @@ QJsonObject LiveStacker::calibrateColour(double raDeg, double decDeg, const QStr
         for (int c = 0; c < 3; ++c) m[c] = sum[c] - percentileOf(ann[c], 50) * na;
         if (m[0] <= 0 || m[1] <= 0 || m[2] <= 0) continue;
         const std::array<double, 3> p = model.predict(g.bpRp);
+        if (dump.isOpen()) dump.write(QString::asprintf("%.7f,%.7f,%.3f,%.4f,%.6g,%.6g,%.6g\n", g.raDeg, g.decDeg, g.g, g.bpRp, m[0] / m_wbR, m[1], m[2] / m_wbB).toUtf8());
         rr.push_back((m[1] / p[1]) / (m[0] / p[0]));
         rb.push_back((m[1] / p[1]) / (m[2] / p[2]));
         col.push_back(g.bpRp);

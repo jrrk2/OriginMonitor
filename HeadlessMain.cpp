@@ -18,6 +18,8 @@
 
 #include <QCoreApplication>
 #include <QSaveFile>
+#include <atomic>
+#include <thread>
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QFile>
@@ -181,7 +183,8 @@ const QList<Cmd>& commands()
                                        O("max-exposure", 'd', "longest exposure, s: used for faint targets, 40% of it for the brightest, and further limited by field rotation for each block", "20"),
                                        O("cloud-patience", 'd', "minutes of cloud before going to a backup target", "10"), O("stop-for-rain", 'b', "park and end the night on a rain forecast (off by default: there is no dome, so parking keeps nothing dry, and the dew heater copes with light rain; rain is handled as cloud)"), O("give-up", 'd', "minutes of cloud on one block before moving to the next block", "60"),
                                        O("not-before", 's', "\"dusk\" (Sun below -12 deg at the site) or a local HH:MM; no slewing before this", "dusk"), O("connect", 's', "telescope host to reconnect to (default: the server's)"),
-                                       O("mail", 'b', "e-mail a summary of the night when the run ends")};
+                                       O("mail", 'b', "e-mail a summary of the night when the run ends"),
+                                       O("sky-ref", 'd', "minutes between sky reference hops on targets wider than the field (0: none): the same altitude, offset in azimuth either side, frames for the stacker's sky level", "0")};
                        QList<Arg> pa = plannerArgs();
                        for (Arg& x : pa) if (x.name == "min-quality") x.help += " (run default 0.2: the forecast is a soft prior, the sky monitor decides)";
                        return a + pa; }()});
@@ -195,8 +198,10 @@ const QList<Cmd>& commands()
         v.append({"sky-survey", "action", "Sky brightness survey: point at a fixed grid of places (near the zenith, four at 65 deg, eight at 45 deg; those under the horizon profile are left out), take a frame at each and measure the sky level and the stars. Reports each place's sky brightness relative to the darkest one (delta mag; 0 = darkest) and, with --zero-point, in mag/arcsec^2. The star count is a transparency hint. Needs an aligned mount, the Sun below --sun-limit and no unattended run. Writes sky_survey_<night>.json.",
                   "", true, false, [] { QList<Arg> a = {O("exposure", 'd', "starting exposure, s (adapted when the frame is too bright or too faint)", "5"), O("iso", 'i', "ISO", "800"), O("sun-limit", 'd', "Sun altitude it must be below, deg", "-15"), O("max-minutes", 'd', "stop after this long", "30"),
                                                    O("zero-point", 'd', "magnitude that gives 1 ADU/s at this ISO (instrument calibration; without it only relative values are reported)"), O("dry-run", 'b', "list the places, do nothing")}; return a + plannerArgs(); }()});
-        v.append({"flats", "action", "Take flat frames of a uniformly lit sky (an overcast deck, or twilight near the zenith) at the pointing the tube has now and analyse them: vignetting, dust shadows, colour, gradient, noise. Adapts the exposure to put the sky --target-adu above black, writes master_flat_<tag>.fits and two pictures to <data dir>/flats/. Does not move the telescope.",
-                  "", true, false, {O("frames", 'i', "frames to take", "16"), O("iso", 'i', "ISO (use the ISO of the lights)", "800"), O("target-adu", 'd', "sky level above black to aim for, ADU", "20000"), O("max-exposure", 'd', "longest exposure, s", "2"), O("tag", 's', "name for the outputs (default: iso and time)"), O("no-keep", 'b', "delete the raw frames after the analysis")}});
+        v.append({"flats", "action", "Take flat frames of a uniformly lit sky (an overcast deck, or twilight near the zenith) at the pointing the tube has now and analyse them: vignetting, dust shadows, colour, gradient, noise. Adapts the exposure to put the sky --target-adu above black, writes master_flat_<tag>.fits and two pictures to <data dir>/flats/. Does not move the telescope. With --next-dawn the request is remembered and the unattended run takes them at dawn instead.",
+                  "", true, false, {O("frames", 'i', "frames to take", "16"), O("iso", 'i', "ISO (use the ISO of the lights)", "800"), O("target-adu", 'd', "sky level above black to aim for, ADU", "20000"), O("max-exposure", 'd', "longest exposure, s", "2"), O("tag", 's', "name for the outputs (default: iso and time)"), O("no-keep", 'b', "delete the raw frames after the analysis"),
+                                     O("next-dawn", 'b', "do not take them now: remember to take them at the end of the next unattended run that lasts until dawn (pointed 75 deg up away from the Sun, at the run's ISO unless --iso is given), then park; kept until they are taken"),
+                                     O("cancel", 'b', "forget a --next-dawn request"), O("pending", 'b', "show the --next-dawn request, if any")}});
         v.append({"flat-analyze", "analysis", "Analyse existing raw flat frames (see flats): --dir with snapshot_*.fits, or --files a.fits,b.fits.", "", false, true,
                   {O("dir", 's', "directory of raw FITS flat frames"), O("files", 's', "comma-separated FITS files"), O("tag", 's', "name for the outputs", "analysis")}});
         v.append({"goto-altaz", "action", "Slew to a horizontal position by converting it to J2000 RA/Dec for the current time and using the ordinary goto (bounded by the mount's own limits). Needs an aligned (or fake-initialized) mount.", "", true, false,
@@ -227,6 +232,7 @@ const QList<Cmd>& commands()
         v.append({"forecast-accuracy", "planning", "How good the weather forecast has been: compares the archived dusk forecast of each night with the frames the sequencer took (usable fraction per hour). Writes forecast_accuracy.csv/.json in the data dir; reports bias (positive = the sky was better than forecast).", "", false, true, {}});
         v.append({"autorun", "planning", "Dusk launcher for cron (every 5 minutes): once per night, if the telescope is out and reachable, starts the daemon, connects, initializes the mount if needed and starts 'run --unattended --mail' in the background. Does nothing (quietly) when the telescope does not answer, when nothing is observable, when rain is forecast (with --stop-for-rain), or when ~/.config/origin/autorun.off exists. Slews the telescope: only schedule it if that is wanted.", "", true, false,
                   [] { QList<Arg> a = {O("telescope", 's', "telescope host", "192.168.1.195"), O("stop-for-rain", 'b', "do not launch on a rain forecast, and pass --stop-for-rain to the run (off by default)"), O("start-after", 's', "\"dusk\" (autorun begins when the Sun is below --probe-sun-alt; the run itself waits for -12 deg) or a local HH:MM; never act before this", "dusk"), O("probe-sun-alt", 'd', "Sun altitude below which autorun starts: raises the tube, probes with plate solves (exposure scaled to the sky brightness) and initializes; the run still waits for -12", "-7"), O("stop-before-dawn", 'd', "minutes before the end of darkness after which no run is started", "60"),
+                                       O("sky-ref", 'd', "passed to the run: minutes between sky reference hops on targets wider than the field (frames of blank sky at the same altitude either side; 0: none)", "30"),
                                        O("dry-run", 'b', "say what would be done, do nothing"), O("init-fallback", 'o', "off | fake-init: after a failed initialize, fake-initialize, goto sky on the other side of the meridian and retry (UNTESTED on the real mount; off by default)", "off"), O("ignore-time", 'b', "skip the evening/dawn time gates (testing)"), O("no-mail", 'b', "send no e-mails (testing)"), O("iso", 'i', "ISO for the run", "800"), O("max-exposure", 'd', "longest exposure for the run, s", "20")};
                        return a + plannerArgs(); }()});
         v.append({"park", "planning", "Save the stack and slew to Polaris (safe park).", "", true, false, {}});
@@ -460,7 +466,19 @@ Planner::Options plannerOptions(const Parsed& p, const Cmd& c)
     {   // wish list: ~/.config/origin/target_boost.json {"M1": 5} and/or --boost M1=5,M31=2
         QMap<QString, int> boosts;
         QFile bf(QDir::homePath() + "/.config/origin/target_boost.json");
-        if (bf.open(QIODevice::ReadOnly)) { const QJsonObject b = QJsonDocument::fromJson(bf.readAll()).object(); for (auto it = b.begin(); it != b.end(); ++it) boosts[it.key()] = it.value().toInt(); }
+        // a value is a number, or {"boost": N, "max_moon": 0.3}: then the boost counts only on nights whose Moon is at most that fraction lit (at local 22:00), so a
+        // faint target waits for a dark night instead of winning under a full Moon (a boost turns the planner's Moon adjustment off)
+        if (bf.open(QIODevice::ReadOnly)) {
+            const QJsonObject b = QJsonDocument::fromJson(bf.readAll()).object();
+            const QTimeZone tz(o.timeZone.toUtf8());
+            const double ill = Astro::moonIllumination(QDateTime(o.date.isValid() ? o.date : Planner::currentNightDate(o.timeZone), QTime(22, 0), tz.isValid() ? tz : QTimeZone::systemTimeZone()).toUTC());
+            for (auto it = b.begin(); it != b.end(); ++it) {
+                if (!it.value().isObject()) { boosts[it.key()] = it.value().toInt(); continue; }
+                const QJsonObject e = it.value().toObject();
+                if (e.contains("max_moon") && ill > e["max_moon"].toDouble()) continue;
+                boosts[it.key()] = e["boost"].toInt();
+            }
+        }
         if (p.v.contains("boost")) for (const QString& kv : str(p, "boost").split(',', Qt::SkipEmptyParts)) { const QStringList a = kv.split('='); if (a.size() == 2) boosts[a[0].trimmed()] = a[1].toInt(); }
         Planner::setBoosts(boosts);
     }
@@ -970,6 +988,7 @@ struct RunState {
     QJsonObject current;                                    // what is being observed now: {key, until, override}
     qint64 controlDone = 0; bool replan = false, stop = false;
     bool mail = false; int auxReboots = 0;                  // --mail (alerts as well as the summary); reboots tried tonight for a dead aux bus
+    double skyRefMin = 0;                                   // --sky-ref
 };
 RunState g_run;
 
@@ -996,6 +1015,8 @@ QJsonObject readJsonFile(const QString& path) { QFile f(path); return f.open(QIO
 // and every poll inside a block: when one is due it runs it (the caller has stopped the sequence) and returns true.
 QJsonObject dueExtra(const QDateTime& now);
 bool runExtra(const QJsonObject& e);
+// Flats remembered for dawn ('flats --next-dawn', ~/.config/origin/flats_request.json): the run takes them before it parks; see dawnFlats.
+QJsonObject dawnFlats();
 
 void writeRunState(const QString& phase = "running")
 {
@@ -1238,6 +1259,37 @@ RunResult backupOrSkip(const QJsonObject& t, const QDateTime& endUtc, int depth,
     return RunResult::Skipped;
 }
 
+// Sky reference (--sky-ref): a nebula wider than the field (IC 1396, the Heart and Soul) leaves no sky in its own frames, so its level and colour cannot be told
+// from the sky's. Frames of blank sky beside it, at the same altitude (the same airmass and light-pollution level) and the block's exposure and ISO, give the
+// stacker the sky to subtract (tools/restack.py): the black level and the sky glow cancel. Azimuth offsets either side, wide enough to put the field SEP deg
+// from the target's centre on the sky (an azimuth step shrinks by cos(alt) there); none above 86 deg, where that step passes 60 deg. Auto-stacking is off
+// and the live target is "sky_ref" meanwhile, so no stack takes them; each frame is listed in <data dir>/sky_refs.jsonl. The caller has stopped the
+// sequence and goes back to the target after.
+QJsonObject skyRefHop(const QJsonObject& t, double exposure, int iso)
+{
+    const QJsonObject m = call("mount_status", {}, 15000)["mount"].toObject();
+    const double alt = m["Alt"].toDouble() * 180 / M_PI, az = m["Azm"].toDouble() * 180 / M_PI;
+    const double sep = t["size_arcmin"].toDouble() / 120.0 + 1.3;          // the target's radius, the field's half-diagonal (0.77 deg) and a margin
+    if (m.isEmpty() || alt > 86 || alt < 15) return {{"ok", false}, {"error", QString("altitude %1 deg").arg(alt, 0, 'f', 1)}};
+    const double daz = std::min(60.0, sep / std::cos(alt * M_PI / 180));
+    call("monitor", {{"auto_stack", false}}); call("target", {{"name", "sky_ref"}});
+    QJsonArray frames; QString err;
+    for (const int side : {-1, 1}) {
+        const QJsonObject g = call("goto_altaz", {{"alt_deg", alt}, {"az_deg", az + side * daz}, {"wait", true}, {"timeout", 120}}, 150000);
+        if (!g["ok"].toBool()) { err = "goto_altaz: " + g["error"].toString(); continue; }
+        for (int k = 0; k < 2; ++k) {
+            const QJsonObject f = call("snapshot", {{"exposure", exposure}, {"iso", iso}, {"timeout", int(exposure) + 40}}, (int(exposure) + 60) * 1000);
+            if (!f["ok"].toBool() || !f["path"].toString().endsWith(".fits", Qt::CaseInsensitive)) { err = "snapshot: " + f["error"].toString(); continue; }
+            const QJsonObject rec{{"time", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}, {"target", t["key"]}, {"file", f["path"].toString()},       // the full path: DATA/frames/sky_ref/ since 2026-11-23
+                                  {"exposure", exposure}, {"iso", iso}, {"alt_deg", alt}, {"az_deg", az + side * daz}, {"side", side}, {"separation_deg", sep}};
+            frames.append(rec);
+            QFile out(originDataDir() + "/sky_refs.jsonl");
+            if (out.open(QIODevice::Append)) out.write(QJsonDocument(rec).toJson(QJsonDocument::Compact) + "\n");
+        }
+    }
+    return {{"ok", !frames.isEmpty()}, {"frames", frames.size()}, {"alt_deg", alt}, {"daz_deg", daz}, {"separation_deg", sep}, {"error", err}};
+}
+
 RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bool isOverride)
 {
     const QDateTime t0 = QDateTime::currentDateTimeUtc();
@@ -1301,7 +1353,7 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
         const QString bad = recoverCapture("the sequence would not start");
         if (!bad.isEmpty()) return captureFailed(bad);
     }
-    int trailedFrames = 0, regotos = 0; bool defocusIsCloud = false; QDateTime cloudSince, blockCloudStart; double cloudMinTotal = 0; QDateTime lastTick = QDateTime::currentDateTimeUtc();
+    int trailedFrames = 0, regotos = 0; bool defocusIsCloud = false; QDateTime cloudSince, blockCloudStart, lastSkyRef; double cloudMinTotal = 0; QDateTime lastTick = QDateTime::currentDateTimeUtc();
     qint64 seq = call("events", {{"since", 1e12}})["next"].toDouble();            // only events from now on
     bool obstructed = false; int failures = 0, blockRestarts = 0;
     while (true) {
@@ -1475,6 +1527,19 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
         const bool undecided = lastV == "defocused" && !defocusIsCloud;                // focus or cloud, not known until the sweep: leave the cloud timer as it is
         if (probing) { if (!cloudSince.isValid()) cloudSince = now; cloudMinTotal += lastTick.secsTo(now) / 60.0; } else if (!undecided) cloudSince = QDateTime();
         lastTick = now;
+        // a sky reference hop on a target wider than the field (75 arcmin): at the first good frame, then every --sky-ref minutes of the block
+        if (g_run.skyRefMin > 0 && t["size_arcmin"].toDouble() >= 75 && !probing && (lastV == "clear" || lastV == "hazy" || lastV == "moon_glow")
+            && (!lastSkyRef.isValid() || lastSkyRef.secsTo(now) >= g_run.skyRefMin * 60) && now.secsTo(endUtc) > 600) {
+            lastSkyRef = now;
+            const double e = s["exposure"].toDouble(exposure);
+            call("sequence", {{"action", "stop"}, {"reason", "sky reference"}}); call("stack", {}, 60000);
+            const QJsonObject h = skyRefHop(t, e, iso);
+            runLog("sky_ref", {{"target", t["key"]}, {"ok", h["ok"]}, {"frames", h["frames"]}, {"exposure", e}, {"alt_deg", h["alt_deg"]}, {"daz_deg", h["daz_deg"]}, {"separation_deg", h["separation_deg"]}, {"error", h["error"]}});
+            r = slewTo(t, exposure, iso);
+            if (!r["ok"].toBool()) { g_run.current = outer; return backupOrSkip(t, endUtc, depth, "goto failed after a sky reference: " + r["error"].toString()); }
+            if (!startSeq(exposure, iso, endUtc, true)) { const QString cb = recoverCapture("the sequence would not start after a sky reference"); if (!cb.isEmpty()) return captureFailed(cb); }
+            continue;
+        }
         // a high ISO whose dark baseline was never learned reads as cloud on a clear forecast: fall back once to ISO 200
         if (!g_run.isoFallbackDone && iso > 200 && s["frames"].toInt() >= 6 && s["good"].toInt() == 0 && !obstructed) {
             QVector<Weather::Hour> hrs; Weather::fetch(g_run.o.site.latDeg, g_run.o.site.lonDeg, 2, 60, originDataDir(), &hrs);
@@ -1549,7 +1614,7 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
     g_run = RunState();
     g_run.o = o; g_run.zone = QTimeZone(o.timeZone.toUtf8()); g_run.darkEnd = parseZ(S["dark_end"].toString());
     g_stopForRain = p.v.contains("stop-for-rain"); g_run.mail = p.v.contains("mail");
-    g_run.maxExposure = num(p, c, "max-exposure"); g_run.iso = int(num(p, c, "iso")); g_run.patienceMin = num(p, c, "cloud-patience"); g_run.giveUpMin = num(p, c, "give-up");
+    g_run.maxExposure = num(p, c, "max-exposure"); g_run.iso = int(num(p, c, "iso")); g_run.patienceMin = num(p, c, "cloud-patience"); g_run.giveUpMin = num(p, c, "give-up"); g_run.skyRefMin = num(p, c, "sky-ref");
     g_run.host = p.v.contains("connect") ? str(p, "connect") : call("status", {}, 10000)["host"].toString();
     g_run.logPath = originDataDir() + "/run_" + S["night"].toString().remove('-') + ".jsonl";
     g_run.args = p; g_run.cmd = &c; g_run.night = S["night"].toString(); g_run.plan = S["plan"].toArray();
@@ -1626,6 +1691,7 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
         if (g_run.replan) { --i; continue; }
         g_run.tried.clear();
     }
+    if (res == RunResult::Done && !g_run.stop) { const QJsonObject fl = dawnFlats(); if (!fl.isEmpty()) note({{"dawn_flats", fl}}); }
     const bool parkIt = !g_run.stop || readJsonFile(controlPath())["park"].toBool(true);
     const QJsonObject park = parkIt ? cmdPark() : QJsonObject{{"ok", true}, {"skipped", "stopped from OriginWatch without parking"}};
     const QString outcome = g_run.stop ? "stopped" : res == RunResult::Done ? "complete" : res == RunResult::Rain ? "rain" : "failed";
@@ -2254,12 +2320,26 @@ QJsonObject cmdExtras(const Parsed& p, const Cmd& c)
 // ---------------------------------------------------------------------------------------------------------------------------------------
 // flats: frames of a uniformly lit sky at the current pointing, exposure adapted to a fixed signal level, then analysed (FlatAnalyzer). No motion.
 // ---------------------------------------------------------------------------------------------------------------------------------------
+QString flatsRequestPath() { return QDir::homePath() + "/.config/origin/flats_request.json"; }
+
 QJsonObject cmdFlats(const Parsed& p, const Cmd& c)
 {
+    if (p.v.contains("cancel")) { const bool had = QFile::remove(flatsRequestPath()); return {{"ok", true}, {"cancelled", had}}; }
+    if (p.v.contains("pending")) { const QJsonObject r = readJsonFile(flatsRequestPath()); return {{"ok", true}, {"pending", r.isEmpty() ? QJsonValue(false) : QJsonValue(r)}}; }
+    if (p.v.contains("next-dawn")) {
+        QJsonObject r{{"requested", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}, {"frames", int(num(p, c, "frames"))}, {"target_adu", num(p, c, "target-adu")}, {"max_exposure", num(p, c, "max-exposure")}};
+        if (p.v.contains("iso")) r["iso"] = int(num(p, c, "iso"));             // otherwise the run's own ISO, so they match the lights
+        if (p.v.contains("tag")) r["tag"] = str(p, "tag");
+        if (p.v.contains("no-keep")) r["no_keep"] = true;
+        QDir().mkpath(QFileInfo(flatsRequestPath()).absolutePath());
+        QSaveFile f(flatsRequestPath()); if (!(f.open(QIODevice::WriteOnly) && f.write(QJsonDocument(r).toJson()) > 0 && f.commit())) return failure("cannot write " + flatsRequestPath());
+        return {{"ok", true}, {"remembered", r}, {"file", flatsRequestPath()}, {"note", "taken at the end of the next unattended run that lasts until dawn"}};
+    }
     if (!call("status", {}, 10000)["connected"].toBool()) return failure("the daemon is not connected to the telescope");
     if (call("sequence", {{"action", "status"}}, 10000)["status"].toObject()["active"].toBool()) return failure("a sequence is running");
     const int n = std::max(2, int(num(p, c, "frames"))), iso = int(num(p, c, "iso")); const double target = num(p, c, "target-adu"), maxExp = num(p, c, "max-exposure");
-    const QString tag = p.v.contains("tag") ? str(p, "tag") : QString("iso%1_%2").arg(iso).arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmm"));
+    const QString filt = call("filter", {}, 10000)["filter"].toString().toLower().remove(QRegularExpression("[^a-z0-9]"));    // flats belong to a filter: it leads the default tag
+    const QString tag = p.v.contains("tag") ? str(p, "tag") : QString("%1iso%2_%3").arg(filt.isEmpty() ? QString() : filt + "_").arg(iso).arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmm"));
     const QString outDir = originDataDir() + "/flats", rawDir = outDir + "/raw_" + tag; QDir().mkpath(rawDir);
     call("manual", {}, 15000);
     double expo = 0.001; QJsonObject fs;
@@ -2287,6 +2367,60 @@ QJsonObject cmdFlats(const Parsed& p, const Cmd& c)
     if (p.v.contains("no-keep")) for (const QString& f : files) QFile::remove(f);
     QFile jf(outDir + "/flats_" + tag + ".json"); if (jf.open(QIODevice::WriteOnly | QIODevice::Truncate)) jf.write(QJsonDocument(r).toJson());
     return r;
+}
+
+// The end of a run that lasted until dawn, with a 'flats --next-dawn' request pending: point 75 deg up opposite the Sun (the flattest twilight sky; the mount is
+// initialised and tracks), probe every 2 minutes with --max-exposure frames until the sky is at least half --target-adu above black, then take the flats as
+// 'flats' does (it follows the brightening sky). The request is removed only when flats were taken; giving up (the Sun at -1 deg first, a failed goto) keeps it
+// for the next night. Returns {} when nothing was pending, else the flats result. The caller parks afterwards.
+QJsonObject dawnFlats()
+{
+    const QJsonObject req = readJsonFile(flatsRequestPath());
+    if (req.isEmpty()) return {};
+    if (QDateTime::currentDateTimeUtc() < g_run.darkEnd.addSecs(-3600)) { runLog("flats_skipped", {{"why", "the run ended more than an hour before dawn"}, {"dark_end", g_run.darkEnd.toString(Qt::ISODate)}}); return {}; }
+    const Astro::Site site = g_run.o.site;
+    auto sun = [&] { const QDateTime t = QDateTime::currentDateTimeUtc(); return Astro::altAz(Astro::sunPosition(t), site, t); };
+    const int iso = req.contains("iso") ? req["iso"].toInt() : g_run.iso;
+    const double target = req["target_adu"].toDouble(20000), maxExp = req["max_exposure"].toDouble(2);
+    auto end = [&](const QJsonObject& r) { runLog("flats_end", {{"ok", r["ok"]}, {"tag", r["tag"]}, {"error", r["error"]}, {"sun_alt", sun().alt}}); return r; };
+    runLog("flats_start", {{"request", req}, {"iso", iso}, {"sun_alt", sun().alt}});
+    g_run.current = {{"flats", "dawn"}}; writeRunState("flats");
+    // autorun counts a run whose run_state.json is 3 minutes old as dead; waiting for the twilight and 'flats' itself take longer than that without a word
+    std::atomic<bool> beat{true};
+    std::thread heart([&beat, st = readJsonFile(originDataDir() + "/run_state.json")]() mutable {
+        for (int k = 0; beat; ++k) {
+            QThread::msleep(1000);
+            if (k % 60 != 59) continue;
+            st["updated"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+            QSaveFile f(originDataDir() + "/run_state.json"); if (f.open(QIODevice::WriteOnly)) { f.write(QJsonDocument(st).toJson()); f.commit(); }
+        }
+    });
+    struct Join { std::atomic<bool>& b; std::thread& t; ~Join() { b = false; t.join(); } } joinHeart{beat, heart};
+    const QJsonObject g = gotoAltAz(75, std::fmod(sun().az + 180, 360), site, 240);
+    if (!g["ok"].toBool()) return end(failure("goto for the flats failed: " + g["error"].toString()));
+    waitIdle(180);
+    call("manual", {}, 15000);
+    const QString probeDir = originDataDir() + "/flats/probe"; QDir().mkpath(probeDir);
+    while (true) {
+        Control k; if (takeControl(&k) && k.action == "stop") { g_run.stop = true; return end(failure("stop requested")); }
+        if (sun().alt > -1) return end(failure("the Sun rose before the sky was bright enough"));
+        const QJsonObject fs = call("frame_stats", {{"exposure", maxExp}, {"iso", iso}, {"binning", 1}, {"target_adu", target}, {"max_exposure", maxExp}, {"dir", probeDir}}, 90000);
+        runLog("flats_probe", {{"ok", fs["ok"]}, {"error", fs["error"]}, {"median_adu", fs["median_adu"]}, {"exposure_s", maxExp}, {"sun_alt", sun().alt}});
+        if (fs["ok"].toBool() && fs["median_adu"].toDouble() - 4985 >= 0.5 * target) break;
+        sleepMs(120000);
+    }
+    for (const QFileInfo& f : QDir(probeDir).entryInfoList(QDir::Files)) QFile::remove(f.absoluteFilePath());
+    const Cmd* fc = nullptr; for (const Cmd& c : commands()) if (c.name == "flats") fc = &c;
+    Parsed fp; fp.v["frames"] = req["frames"].toInt(16); fp.v["iso"] = iso; fp.v["target-adu"] = target; fp.v["max-exposure"] = maxExp;
+    if (req.contains("tag")) fp.v["tag"] = req["tag"].toString();
+    if (req["no_keep"].toBool()) fp.v["no-keep"] = true;
+    QJsonObject r = cmdFlats(fp, *fc);
+    if (r["ok"].toBool()) {
+        QJsonObject rq = req; rq["done"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate); rq["tag"] = r["tag"];
+        QSaveFile f(originDataDir() + "/flats/last_dawn_request.json"); if (f.open(QIODevice::WriteOnly)) { f.write(QJsonDocument(rq).toJson()); f.commit(); }
+        QFile::remove(flatsRequestPath());
+    }
+    return end(r);
 }
 
 QJsonObject cmdFlatAnalyze(const Parsed& p, const Cmd&)
@@ -3308,7 +3442,7 @@ QJsonObject cmdAutorun(const Parsed& p, const Cmd& c)
     if (runActive()) return idle("a run or track session is in progress (run_state.json)");
     // launch the supervisor, detached, logging to its own file
     QProcess run; run.setProgram(QCoreApplication::applicationFilePath());
-    run.setArguments({"run", "--unattended", "--iso", str(p, "iso", "800"), "--max-exposure", str(p, "max-exposure", "20"), "--not-before", str(p, "start-after", "dusk"), "--port", QString::number(g_port)});
+    run.setArguments({"run", "--unattended", "--iso", str(p, "iso", "800"), "--max-exposure", str(p, "max-exposure", "20"), "--not-before", str(p, "start-after", "dusk"), "--sky-ref", str(p, "sky-ref", "30"), "--port", QString::number(g_port)});
     if (!p.v.contains("no-mail")) run.setArguments(run.arguments() << "--mail");
     if (p.v.contains("stop-for-rain")) run.setArguments(run.arguments() << "--stop-for-rain");
     run.setStandardOutputFile(originDataDir() + "/autorun_" + QString(night).remove('-') + ".log", QIODevice::Append);

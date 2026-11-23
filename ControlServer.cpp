@@ -464,13 +464,16 @@ QJsonObject ControlServer::doSolve(const QJsonObject& req)
     QString idx = req["index_dir"].toString(); if (idx.isEmpty()) idx = qEnvironmentVariable("ORIGIN_INDEX_DIR", QDir::homePath() + "/astrometry_indices");
     if (!QDir(idx).exists() && req["index_dir"].toString().isEmpty() && QDir("/usr/share/astrometry").exists()) idx = "/usr/share/astrometry";   // the distribution's index package
     if (!QDir(idx).exists()) return fail("index directory not found: " + idx + " (astrometry.net index files for 20-120 arcmin fields)");
-    QTemporaryDir tmp; if (!tmp.isValid()) return fail("no temporary directory");
+    // on the data disk, not /tmp: /tmp is a tmpfs with per-user quotas, and when other programs had filled ours (23 Nov 2026) every solve failed at the
+    // image conversion and came back as "no solution"
+    QDir().mkpath(originDataDir() + "/solve_tmp");
+    QTemporaryDir tmp(originDataDir() + "/solve_tmp/solve_XXXXXX"); if (!tmp.isValid()) return fail("no temporary directory under " + originDataDir() + "/solve_tmp");
     const int cpu = req["cpulimit"].toInt(60);
     QFile cfg(tmp.filePath("solve.cfg")); if (!cfg.open(QIODevice::WriteOnly)) return fail("cannot write solver config");
     cfg.write(QString("cpulimit %1\nadd_path %2\n%3autoindex\n").arg(cpu).arg(idx, QDir("/usr/share/astrometry").exists() ? "add_path /usr/share/astrometry\n" : "").toUtf8()); cfg.close();
     QProcess p; p.setProcessChannelMode(QProcess::MergedChannels);
     p.start("solve-field", {"--config", cfg.fileName(), "-z", QString::number(req["downsample"].toInt(2)), "--overwrite", "--no-plots", "--scale-units", "arcsecperpix",
-                            "--scale-low", QString::number(req["scale_low"].toDouble(1.3)), "--scale-high", QString::number(req["scale_high"].toDouble(3.2)), "-D", tmp.path(), file});
+                            "--scale-low", QString::number(req["scale_low"].toDouble(1.3)), "--scale-high", QString::number(req["scale_high"].toDouble(3.2)), "--temp-dir", tmp.path(), "-D", tmp.path(), file});
     if (!p.waitForStarted(5000)) return fail("cannot run solve-field (is astrometry.net installed?)");
     {   // wait on the event loop, not with waitForFinished: a blocked loop stops the websocket answering the telescope's pings and it hangs up
         QEventLoop loop; QTimer limit; limit.setSingleShot(true);
@@ -484,7 +487,16 @@ QJsonObject ControlServer::doSolve(const QJsonObject& req)
     const QRegularExpressionMatch c = QRegularExpression(R"(Field center: \(RA,Dec\) = \(([-\d.]+), ([-\d.]+)\) deg)").match(out);
     QJsonObject r{{"file", file}, {"stats", fs}};
     if (!snap.isEmpty()) r["snapshot"] = snap;
-    if (!c.hasMatch()) { r["ok"] = false; r["solved"] = false; r["error"] = "no solution (too few stars, cloud, or no matching index)"; return r; }
+    if (!c.hasMatch()) {
+        r["ok"] = false; r["solved"] = false;
+        // solve-field ran to the end without a match, or broke first (no space, a missing tool): say which
+        QStringList trouble; for (const QString& l : out.split('\n')) if (l.contains(QRegularExpression("quota|No space|Failed|failed|[Ee]rror|Traceback|not found")) && !trouble.contains(l.trimmed())) trouble << l.trimmed();
+        const QRegularExpressionMatch srcs = QRegularExpression(R"(simplexy: found (\d+) sources)").match(out);
+        if (srcs.hasMatch()) r["sources"] = srcs.captured(1).toInt();
+        if (!trouble.isEmpty()) { r["error"] = "solve-field failed: " + trouble.mid(0, 3).join(" | ").left(400); r["solver_output"] = out.right(2000); }
+        else r["error"] = QString("no solution (%1; too few stars, cloud, or no matching index)").arg(srcs.hasMatch() ? srcs.captured(1) + " sources found" : QString("no sources found"));
+        return r;
+    }
     const double ra = c.captured(1).toDouble(), dec = c.captured(2).toDouble();
     const QRegularExpressionMatch rot = QRegularExpression(R"(up is ([-\d.]+) degrees E of N)").match(out), sz = QRegularExpression(R"(Field size: ([\d.]+) x ([\d.]+) arcminutes)").match(out);
     const Astro::Site site{req["lat_deg"].toDouble(52.2054), req["lon_deg"].toDouble(0.1218)};

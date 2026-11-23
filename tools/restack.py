@@ -29,7 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 # live verdicts that say nothing against the frame itself: the stacker judges these again. Last night's live verdicts carried bugs since fixed (2026-10-28): "cloudy" from stale
 # pre-filter references and the ISO fallback, "patchy" from reference stars outside a shifted field
 REJECT = {'no_pointing', 'defocused', 'unreadable', 'trailed'}
-DROP = {'Polaris_test', ''}
+DROP = {'Polaris_test', 'sky_ref', ''}
 LONDON = ZoneInfo('Europe/London')
 
 
