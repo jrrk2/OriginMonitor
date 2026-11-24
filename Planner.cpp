@@ -33,7 +33,7 @@ const QHash<QString, int>& priorities()
     return p;
 }
 
-struct Target { QString name, key, type, seen; double ra = 0, dec = 0, size = 0; int prio = 3; double faint = 0.5; bool boosted = false, narrowband = false; };   // faint: 0 = bright (high surface brightness: clusters, compact nebulae), 1 = faint (extended nebulae)
+struct Target { QString name, key, type, seen; double ra = 0, dec = 0, size = 0; int prio = 3; double faint = 0.5; bool boosted = false, narrowband = false, cluster = false; };   // faint: 0 = bright (high surface brightness: clusters, compact nebulae), 1 = faint (extended nebulae)
 
 QMap<QString, int> g_boost;   // catalogue id -> priority added (the user's wish list, e.g. M1 +5)
 QString g_stacksDir;          // where the live stacks of earlier nights are kept; empty = no novelty preference
@@ -156,6 +156,9 @@ QList<Target> loadTargets()
         Target t; t.key = m.name; t.name = m.name + (m.common_name.isEmpty() ? "" : " " + m.common_name);
         t.ra = m.sky_position.ra_deg / 15.0; t.dec = m.sky_position.dec_deg; t.size = m.size_arcmin.width();
         t.prio = priorities().value(m.name, 3); t.type = "MESSIER";
+        // star clusters get shorter blocks (Options::clusterBlockMin); not the Pleiades, whose faint reflection nebulosity wants the full time
+        t.cluster = (m.object_type == MessierObjectType::OPEN_CLUSTER || m.object_type == MessierObjectType::GLOBULAR_CLUSTER || m.object_type == MessierObjectType::ASTERISM
+                     || m.object_type == MessierObjectType::DOUBLE_STAR) && m.name != "M45";
         t.faint = faintness(integratedMagnitudes().value(m.name, 99.0), m.size_arcmin.width(), m.size_arcmin.height());
         out.append(t);
     }
@@ -172,7 +175,8 @@ QList<Target> loadTargets()
         {"NGC 7331 + Stephan Quintet", 22.62, 34.4, 10, 5, 0.7}, {"NGC 6946 Fireworks Galaxy", 20.58, 60.15, 11, 5, 0.7}, {"NGC 4565 Needle Galaxy", 12.6, 25.99, 16, 4, 0.6},
         {"NGC 2264 Cone/Christmas Tree", 6.68, 9.9, 60, 6, 0.8}, {"M81 + M82", 9.9286, 69.3725, 60, 7, 0.6}, {"Mel 20 Alpha Persei Cluster", 3.4, 49.0, 300, 4, 0.0},
         {"IC 434 Horsehead / NGC 2024 Flame", 5.6833, -2.4, 90, 8, 0.9}, {"NGC 1333", 3.4, 31.4, 10, 4, 0.6}, {"NGC 7789 Caroline's Rose", 23.95, 56.7, 15, 4, 0.0}};
-    for (const E& e : extras) { Target t; t.name = t.key = e.n; t.ra = e.ra; t.dec = e.dec; t.size = e.size; t.prio = e.p; t.faint = e.f; t.type = "EXTRA"; out.append(t); }
+    for (const E& e : extras) { Target t; t.name = t.key = e.n; t.ra = e.ra; t.dec = e.dec; t.size = e.size; t.prio = e.p; t.faint = e.f; t.type = "EXTRA";
+        t.cluster = t.name.contains("Cluster") || t.name.startsWith("NGC 7789"); out.append(t); }
     applyNovelty(out);
     applyFilter(out);
     applySize(out);
@@ -341,7 +345,7 @@ QJsonObject schedule(const Options& o)
         for (int i = 0; i < n; ++i) {
             if (r.ok[i]) { if (cur == 0) s = i; ++cur; if (cur > bestN) { bestN = cur; bestS = s; bestE = i; } } else cur = 0;
         }
-        if (bestN * o.stepMin < o.minBlockMin) continue;
+        if (bestN * o.stepMin < (tg.cluster ? std::min(o.minBlockMin, o.clusterBlockMin) : o.minBlockMin)) continue;
         r.i0 = bestS; r.i1 = bestE; r.mins = bestN * o.stepMin;
         r.peak = bestS; for (int i = bestS; i <= bestE; ++i) if (r.alt[i] > r.alt[r.peak]) r.peak = i;
         r.score = (tg.prio + moonAdjust(tg, r.glow, bestS, bestE - bestS + 1)) * std::min(1.0, r.mins / 180) * (0.6 + 0.4 * std::min(1.0, r.alt[r.peak] / 60));
@@ -359,13 +363,14 @@ QJsonObject schedule(const Options& o)
             const Row& r = rows[k];
             if (used.contains(r.t.key) || !r.ok[i]) continue;
             int run = 0; while (i + run < n && r.ok[i + run]) ++run;
-            if (run < need) continue;
-            const int m = std::min(run, cap); double mean = 0; for (int j = 0; j < m; ++j) mean += r.alt[i + j]; mean /= m;
-            const double v = (r.t.prio + moonAdjust(r.t, r.glow, i, m)) * (0.5 + 0.5 * std::min(1.0, mean / 60)) + (run <= 1.5 * cap ? 2 : 0);
+            const int capR = r.t.cluster ? std::max(1, std::min(cap, int(o.clusterBlockMin / o.stepMin))) : cap, needR = std::min(need, capR);
+            if (run < needR) continue;
+            const int m = std::min(run, capR); double mean = 0; for (int j = 0; j < m; ++j) mean += r.alt[i + j]; mean /= m;
+            const double v = (r.t.prio + moonAdjust(r.t, r.glow, i, m)) * (0.5 + 0.5 * std::min(1.0, mean / 60)) + (run <= 1.5 * capR ? 2 : 0);
             if (bestRow < 0 || v > bestV) { bestV = v; bestRow = k; bestRun = run; }
         }
         if (bestRow < 0) { ++i; continue; }
-        const int len = std::min(bestRun, cap);
+        const int len = std::min(bestRun, rows[bestRow].t.cluster ? std::max(1, std::min(cap, int(o.clusterBlockMin / o.stepMin))) : cap);
         plan.append({i, i + len - 1, bestRow}); used.insert(rows[bestRow].t.key); i += len;
     }
 

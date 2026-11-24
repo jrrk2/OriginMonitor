@@ -90,6 +90,7 @@ private:
     LiveStacker m_stack;
     int m_sinceSave = 0, m_mapDirty = 0;
     int m_colourTried = 0;                     // stack size at the last colour calibration attempt
+    QList<double> m_recentSky; QString m_recentSkyKey;   // the last frames' sky rates (target and ISO in the key), for the light-on check
     int m_filterSwitchRun = 0;                 // good frames in a row whose stars say another filter than the stack's
     static constexpr int kFilterSwitchFrames = 3;
     QMap<QString, double> m_darkRate;          // "iso800" -> lowest (sky ADU per second) seen in dark conditions

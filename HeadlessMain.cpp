@@ -73,7 +73,7 @@ QList<Arg> plannerArgs()
 {
     return {O("date", 's', "local evening date YYYY-MM-DD (default: the night we are in)"), O("horizon", 's', "horizon JSON file (default: $ORIGIN_HORIZON or tools/horizon.json)"),
             O("min-alt", 'd', "flat horizon floor when there is no file, deg", "20"), O("sun-alt", 'd', "Sun altitude below which it is dark, deg", "-18"),
-            O("moon-sep", 'd', "minimum Moon separation, deg", "30"), O("min-block", 'd', "shortest useful block, minutes", "45"), O("max-block", 'd', "longest time on one target, minutes", "60"),
+            O("moon-sep", 'd', "minimum Moon separation, deg", "30"), O("min-block", 'd', "shortest useful block, minutes", "45"), O("max-block", 'd', "longest time on one target, minutes", "60"), O("cluster-block", 'd', "longest (and shortest needed) time on a star cluster, minutes", "30"),
             O("step", 'd', "time step, minutes", "5"), O("sky-map", 'b', "also use the obstruction bins learned in <data dir>/sky_map.json"),
             O("lat", 'd', "site latitude, deg north", "52.2054"), O("lon", 'd', "site longitude, deg east", "0.1218"), O("top", 'i', "targets to list", "25"), O("text", 'b', "human-readable table instead of JSON"),
             O("boost", 's', "priority boosts, e.g. M1=5,M31=2 (added to ~/.config/origin/target_boost.json); a boosted target wins whenever it is observable"),
@@ -461,7 +461,7 @@ Planner::Options plannerOptions(const Parsed& p, const Cmd& c)
     // the learned obstruction and glare bins are always used by the unattended commands (run, autorun, survey); for the others they are opt-in
     if (p.v.contains("sky-map") || c.name == "run" || c.name == "autorun" || c.name == "survey") o.skyMapFile = originDataDir() + "/sky_map.json";
     o.minAlt = num(p, c, "min-alt"); o.sunAlt = num(p, c, "sun-alt"); o.moonSep = num(p, c, "moon-sep");
-    o.minBlockMin = num(p, c, "min-block"); o.maxBlockMin = num(p, c, "max-block"); o.stepMin = num(p, c, "step"); o.top = int(num(p, c, "top"));
+    o.minBlockMin = num(p, c, "min-block"); o.maxBlockMin = num(p, c, "max-block"); o.clusterBlockMin = num(p, c, "cluster-block"); o.stepMin = num(p, c, "step"); o.top = int(num(p, c, "top"));
     Planner::setStacksDir(str(p, "novelty", "on") == "off" ? QString() : originDataDir() + "/stacks");     // prefer targets not imaged before
     {   // wish list: ~/.config/origin/target_boost.json {"M1": 5} and/or --boost M1=5,M31=2
         QMap<QString, int> boosts;

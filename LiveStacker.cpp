@@ -91,8 +91,47 @@ double robustSigma(const std::vector<float>& img, int w, int h)
 // Background model: 30th-percentile block model, interpolated to full size and subtracted. The smoothing scale (about 100 px) is small enough to
 // follow sensor vignetting and fixed patterns, and the rejection stops it eating a galaxy's halo. It also takes out anything wider than about
 // 5 arcmin, and the frame's whole level: a nebula that fills the field is lost (see levelPlane). Returns the residual pixel noise.
+// Trial flattening modes, compiled only with -DORIGIN_TRIAL_FLATTEN (then picked by $ORIGIN_FLATTEN=surface or =flat). Neither beat the plain block model
+// (2026-11-24): kept for later experiments, out of the normal build.
+#ifdef ORIGIN_TRIAL_FLATTEN
+// A second-order surface through the frame's sky (64 px block 30th percentiles, clipped against the surface: stars, the target, a bright edge), removed before
+// the block model. Alone, the block model sagged on the bright side of a steep gradient (it rejects blocks well above its own blurred fit, and on a slope those
+// are the bright side's): a warm light low in the west put a red diagonal gradient into every M92 frame (2026-11-23) and its remainders added up to diagonal
+// stripes in the stack. Trial, $ORIGIN_FLATTEN=surface (M92 2026-11-23: background structure G -10%, B -11%, R-B -9%; the stripes remain).
+void subtractSurface(std::vector<float>& img, int w, int h)
+{
+    const int B = 64, bx = w / B, by = h / B; if (bx < 4 || by < 4) return;
+    std::vector<double> X, Y, V; std::vector<float> v;
+    for (int y = 0; y < by; ++y) for (int x = 0; x < bx; ++x) {
+        v.clear();
+        for (int yy = 0; yy < B; yy += 2) for (int xx = 0; xx < B; xx += 2) v.push_back(img[size_t(y * B + yy) * w + x * B + xx]);
+        const size_t k = v.size() * 3 / 10; std::nth_element(v.begin(), v.begin() + k, v.end());
+        X.push_back((x + 0.5) * B / w - 0.5); Y.push_back((y + 0.5) * B / h - 0.5); V.push_back(v[k]);
+    }
+    auto terms = [](double x, double y, double* t) { t[0] = 1; t[1] = x; t[2] = y; t[3] = x * x; t[4] = x * y; t[5] = y * y; };
+    std::vector<char> use(V.size(), 1); double c[6] = {0, 0, 0, 0, 0, 0};
+    for (int it = 0; it < 5; ++it) {
+        std::vector<double> A(36, 0), b(6, 0); double t[6];
+        for (size_t i = 0; i < V.size(); ++i) { if (!use[i]) continue; terms(X[i], Y[i], t); for (int r = 0; r < 6; ++r) { b[r] += t[r] * V[i]; for (int q = 0; q < 6; ++q) A[r * 6 + q] += t[r] * t[q]; } }
+        if (!solve(A, b, 6)) return;
+        for (int r = 0; r < 6; ++r) c[r] = b[r];
+        std::vector<double> res(V.size()), a;
+        for (size_t i = 0; i < V.size(); ++i) { terms(X[i], Y[i], t); double m = 0; for (int r = 0; r < 6; ++r) m += c[r] * t[r]; res[i] = V[i] - m; if (use[i]) a.push_back(std::fabs(res[i])); }
+        if (a.size() < 12) return;
+        const double sd = 1.4826 * medianOf(a) + 1e-6;
+        for (size_t i = 0; i < V.size(); ++i) use[i] = res[i] < 2.5 * sd && res[i] > -4 * sd;      // stars and the target are bright: clip that side harder
+    }
+    for (int y = 0; y < h; ++y) { const double yy = (y + 0.5) / h - 0.5;
+        for (int x = 0; x < w; ++x) { const double xx = (x + 0.5) / w - 0.5; img[size_t(y) * w + x] -= float(c[0] + c[1] * xx + c[2] * yy + c[3] * xx * xx + c[4] * xx * yy + c[5] * yy * yy); } }
+}
+#endif
+
 double flattenPlane(std::vector<float>& img, int w, int h)
 {
+#ifdef ORIGIN_TRIAL_FLATTEN
+    static const bool surface = qEnvironmentVariable("ORIGIN_FLATTEN") == "surface";
+    if (surface) subtractSurface(img, w, h);
+#endif
     const BlockModel m = blockModel(img, w, h, 0.3);
     for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) img[size_t(y) * w + x] -= m.at(x, y);
     return robustSigma(img, w, h);
@@ -135,7 +174,7 @@ double levelPlane(std::vector<float>& img, int w, int h, std::vector<float>& hp)
 
 bool levelMode() { static const bool on = qEnvironmentVariable("ORIGIN_FLATTEN") == "level"; return on; }
 
-// $ORIGIN_MASTER_FLAT (with ORIGIN_FLATTEN=level): a master flat from OriginHeadless flats, planes R, G, B at half resolution. Each plane's own plane
+// $ORIGIN_MASTER_FLAT (with ORIGIN_FLATTEN=level or flat): a master flat from OriginHeadless flats, planes R, G, B at half resolution. Each plane's own plane
 // fit is divided out first: a twilight flat carries the sky's slope (40% across the 15 Oct one), not just the optics' vignetting. Empty when absent.
 const std::vector<float>& masterFlat(int c, int w, int h)
 {
@@ -476,6 +515,17 @@ LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double
             noise = levelPlane(img, w, h, hp);
             removeBanding(img, w, h, noise, &hp);
         } else {
+#ifdef ORIGIN_TRIAL_FLATTEN
+            // $ORIGIN_FLATTEN=flat (trial, 2026-11-24): the master flat's fixed pattern (vignetting, dust) divided out first, then the usual per-frame
+            // background model, which still removes the sky's own gradients. Level mode alone left them in (M1 12 Nov: background 2x as uneven); this
+            // was still worse than no flat with our flat or the factory one, black at 4985 or 4685 (corners 3.0-4.4 vs 1.3 noise units)
+            static const bool flatFirst = qEnvironmentVariable("ORIGIN_FLATTEN") == "flat";
+            if (flatFirst) {
+                const std::vector<float>& flat = masterFlat(ch, w, h);
+                static const double black = qEnvironmentVariableIsSet("ORIGIN_BLACK_LEVEL") ? qEnvironmentVariable("ORIGIN_BLACK_LEVEL").toDouble() : 4985.0;
+                if (!flat.empty()) for (size_t i = 0; i < img.size(); ++i) img[i] = float((img[i] - black) / flat[i]);
+            }
+#endif
             noise = flattenPlane(img, w, h);
             removeBanding(img, w, h, noise);
         }

@@ -6,7 +6,8 @@
 Live stacks are fragments: a stack per name the target was given (M31 and M31_centred, NGC7000_iso200 and NGC 7000 North America Nebula), archived copies after a bad reference,
 pre-filter stacks set aside, frames taken while the analyser had no target ("auto"). The raw snapshots are all kept, so this rebuilds from them:
 
-  * frames: every row of focus_log.csv (the live analysis of each snapshot) except those rejected for a fault of the frame (no pointing, defocused, unreadable, trailed),
+  * frames: every row of focus_log.csv (the live analysis of each snapshot) except those rejected for a fault of the frame (no pointing, defocused, unreadable, trailed, a light
+    switched on), and moonlit ones (moon_glow, or the Moon up and over --max-moon lit),
     matched to its snapshot_*.fits by time; cloud, haze and pointing are judged again by the stacker against the final stack's own reference
     (the file name is the local download time, the log row the UTC analysis time a moment later)
   * targets: the log's target name, grouped by pointing: names whose frames centre within 0.5 deg of each other are one target, "auto" frames join the nearest target within 0.6 deg,
@@ -28,7 +29,7 @@ from zoneinfo import ZoneInfo
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 # live verdicts that say nothing against the frame itself: the stacker judges these again. Last night's live verdicts carried bugs since fixed (2026-10-28): "cloudy" from stale
 # pre-filter references and the ISO fallback, "patchy" from reference stars outside a shifted field
-REJECT = {'no_pointing', 'defocused', 'unreadable', 'trailed'}
+REJECT = {'no_pointing', 'defocused', 'unreadable', 'trailed', 'light_on', 'moon_glow'}
 DROP = {'Polaris_test', 'sky_ref', ''}
 LONDON = ZoneInfo('Europe/London')
 
@@ -77,12 +78,28 @@ def snapshot_index(data):
     return out
 
 
-def frames(data):
-    snaps = snapshot_index(data); times = [t for t, _ in snaps]; used = set(); rows = []
+_ILLUM = {}
+def moon_illumination(t):
+    """fraction of the Moon lit at t (to the hour)"""
+    k = t.replace(minute=0, second=0, microsecond=0)
+    if k not in _ILLUM:
+        from astropy.time import Time
+        from astropy.coordinates import get_body
+        tt = Time(k); _ILLUM[k] = (1 - math.cos(math.radians(get_body('sun', tt).separation(get_body('moon', tt)).deg))) / 2
+    return _ILLUM[k]
+
+
+def frames(data, max_moon=0.3):
+    """max_moon: leave out frames taken with the Moon above the horizon and more than this fraction lit (1 keeps them). Moon glow was set after stacking and only on clear
+    frames until 2026-11-24 (SkyMonitor), so hazy frames under a bright moon are logged "hazy": the log's moon_alt_deg catches them."""
+    snaps = snapshot_index(data); times = [t for t, _ in snaps]; used = set(); rows = []; moonlit = 0
     with open(os.path.join(data, 'focus_log.csv')) as fh:
         for r in csv.DictReader(fh):
             if r['verdict'] in REJECT or r['target'] in DROP: continue
             t = datetime.fromisoformat(r['time'].replace('Z', '+00:00'))
+            try: moon_alt = float(r.get('moon_alt_deg') or -90)
+            except ValueError: moon_alt = -90
+            if max_moon < 1 and moon_alt > 0 and moon_illumination(t) > max_moon: moonlit += 1; continue
             i = bisect.bisect_left(times, t - timedelta(seconds=4)); best = None
             while i < len(snaps) and snaps[i][0] <= t + timedelta(seconds=0.5):   # downloaded (named) just before it was analysed
                 if snaps[i][1] not in used and (best is None or abs((snaps[i][0] - t).total_seconds()) < abs((best[0] - t).total_seconds())): best = snaps[i]
@@ -92,6 +109,7 @@ def frames(data):
             try: hfr, nst = float(r['hfr_px'] or 0), int(float(r['stars'] or 0))
             except ValueError: continue          # a mosaic tile name with a comma ("IC 1805 Heart 0,0", 3-4 Nov) was logged unquoted and shifts the columns
             rows.append({'file': best[1], 'utc': t, 'target': r['target'], 'hfr': hfr, 'stars': nst, 'verdict': r['verdict']})
+    if moonlit: print(f'{moonlit} frames left out: moon up and over {max_moon:.0%} lit (--max-moon)', file=sys.stderr)
     return rows
 
 
@@ -172,9 +190,10 @@ def main():
     ap.add_argument('--data', default=os.environ.get('ORIGIN_DATA_DIR', '/mnt/fits-backup/claude')); ap.add_argument('--out')
     ap.add_argument('--only', default=''); ap.add_argument('--jobs', type=int, default=3); ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--redo', action='store_true', help='rebuild groups that already have a manifest.json (default: skip them)')
+    ap.add_argument('--max-moon', type=float, default=0.3, help='leave out frames with the Moon up and more than this fraction lit (default 0.3; 1 keeps them)')
     ap.add_argument('--stackfiles', default=os.path.join(ROOT, 'build', 'stackfiles', 'StackFiles'))
     a = ap.parse_args(); out = a.out or os.path.join(a.data, 'finals')
-    groups = group(frames(a.data))
+    groups = group(frames(a.data, a.max_moon))
     if a.only: groups = [g for g in groups if any(o.lower() in (g['name'] + ' ' + ' '.join(g['aliases'])).lower() for o in a.only.split(','))]
     groups.sort(key=lambda g: -len(g['rows']))
     with ThreadPoolExecutor(max(1, a.jobs)) as ex:

@@ -453,6 +453,33 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
         }
     }
 
+    // A light switched on near the telescope (a neighbour's security light, PIR-triggered for a minute; car headlights): the sky jumps well above the last few
+    // frames' level, with its own colour and gradient, and stacked it leaves bands (M92 18:04, 2026-11-23: six frames 9-21% up overall, 35% in green). Judged
+    // against the median of the last 15 frames of this target at this ISO, so the slow drift of the Moon, twilight or the town's glow is followed, and a light
+    // that stays on becomes the new level within a few frames. Every frame joins the window, rejected or not.
+    {
+        const QString key = m_target + "|" + QString::number(iso);
+        if (key != m_recentSkyKey) { m_recentSky.clear(); m_recentSkyKey = key; }
+        if (m_recentSky.size() >= 5 && bgRate > 0 && (verdict == "clear" || verdict == "hazy")) {
+            QList<double> v = m_recentSky; std::sort(v.begin(), v.end()); const double med = v[v.size() / 2];
+            QList<double> dev; for (double x : v) dev << std::abs(x - med); std::sort(dev.begin(), dev.end());
+            const double sigma = 1.4826 * dev[dev.size() / 2];
+            // 8% and 3 sigma of the recent frames' own scatter: a bright sky (M92 2026-11-23, sky ~480) varies by under 5% and the burst was 17-21%, but a dark one (~36) by
+            // +-20% from frame to frame, and the 8% alone threw out 27-34% of good dark frames (M1 11-12 Nov replayed: 158 of 588; with 3 sigma 15, and the burst still caught)
+            if (med > 0 && bgRate > std::max(1.08 * med, med + 3 * sigma)) {
+                verdict = "light_on"; o["cause"] = "light";
+                reasons << QString("sky %1% above the last %2 frames (%3 against %4 ADU/s): a light switched on?").arg(int(std::lround((bgRate / med - 1) * 100))).arg(m_recentSky.size())
+                               .arg(bgRate, 0, 'f', 0).arg(med, 0, 'f', 0);
+            }
+        }
+        if (bgRate > 0) { m_recentSky.append(bgRate); while (m_recentSky.size() > 15) m_recentSky.removeFirst(); }
+    }
+
+    // Moon glow is decided here, before the stacking below, and for hazy frames too. Until 2026-11-24 it was set after the frame had been stacked, and only on clear frames, so
+    // every moonlit frame went in: 844 of the 1897 in the M1 stack, with the sky up to 30x the dark rate.
+    const bool moonGlow = moonAlt > 0 && moonIll > 0.05 && (excess > 0.3 || gradient > 8);
+    if ((verdict == "clear" || verdict == "hazy") && moonGlow) verdict = "moon_glow";
+
     // Stack the frame only if it is a usable one: clouds, patchy obstruction and wrong pointing would dilute the stack
     const bool stackable = haveStack && pointingOk && !filterUncertain && (verdict == "clear" || verdict == "hazy");
     if (stackable && m_autoStack) {
@@ -474,9 +501,8 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
     if (!refNote.isEmpty()) notes << refNote;
     if (!filterNote.isEmpty()) notes << filterNote;
     if (sunAlt > -12) notes << (sunAlt > -6 ? "bright twilight" : "twilight");
-    if (moonAlt > 0 && moonIll > 0.05 && (excess > 0.3 || gradient > 8)) notes << QString("moon glow (moon alt %1, illumination %2, separation %3 deg)").arg(moonAlt, 0, 'f', 0).arg(moonIll, 0, 'f', 2).arg(moonSep, 0, 'f', 0);
+    if (moonGlow) notes << QString("moon glow (moon alt %1, illumination %2, separation %3 deg)").arg(moonAlt, 0, 'f', 0).arg(moonIll, 0, 'f', 2).arg(moonSep, 0, 'f', 0);
     else if (excess > 0.5 && dark) notes << "sky brighter than the dark baseline without the moon or sun up (light pollution, thin cloud lit from below, or dew)";
-    if (verdict == "clear" && !notes.isEmpty() && (moonAlt > 0 && moonIll > 0.05 && (excess > 0.3 || gradient > 8))) verdict = "moon_glow";
     if (verdict == "clear" && sunAlt > -12) verdict = "twilight";
     if (aa.alt < 20) notes << QString("low altitude (%1 deg): extinction, murk and obstructions likely").arg(aa.alt, 0, 'f', 0);
     o["notes"] = QJsonArray::fromStringList(notes);
