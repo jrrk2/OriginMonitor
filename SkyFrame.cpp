@@ -1,6 +1,8 @@
 #include "SkyFrame.hpp"
 
+#include <QFile>
 #include <QList>
+#include <cstring>
 
 #include <algorithm>
 #include <cmath>
@@ -10,7 +12,7 @@ namespace {
 constexpr int kRadius = 7;                    // aperture radius in half-res pixels
 constexpr double kSaturation = 0.9 * 65535.0;
 
-struct Fits { int w = 0, h = 0; double bzero = 0, bscale = 1; qsizetype dataStart = 0; };
+struct Fits { int w = 0, h = 0; double bzero = 0, bscale = 1, exposure = 0, iso = 0; qsizetype dataStart = 0; };
 
 bool parseHeader(const QByteArray& d, Fits& f, QString& why)
 {
@@ -24,6 +26,8 @@ bool parseHeader(const QByteArray& d, Fits& f, QString& why)
         else if (key == "BITPIX") bitpix = val.toInt();
         else if (key == "BZERO") f.bzero = val.toDouble();
         else if (key == "BSCALE") f.bscale = val.toDouble();
+        else if (key == "EXPTIME") f.exposure = val.toDouble();
+        else if (key == "ISOSPEED") f.iso = val.toDouble();
         else if (key == "END") { end = true; f.dataStart = ((i / 80 + 36) / 36) * 2880; }
     }
     if (!end || f.w < 64 || f.h < 64) { why = "not a FITS image"; return false; }
@@ -39,6 +43,33 @@ double medianOf(std::vector<float>& v)
     return v[v.size() / 2];
 }
 
+// $ORIGIN_DARK_CAL: tools/dark_calibration.py's file from the camera's factory darks (mirrored to our readout): plane 1 a hot-pixel mask, plane 2 the
+// amp glow in ADU per ISO.s (a corner glow, +200 ADU at ISO 800 x 8 s at 24 C). Hot pixels are replaced by the mean of their same-colour neighbours
+// that are not hot; the glow, times ISO x exposure x $ORIGIN_GLOW_SCALE (default 1), is subtracted. Empty when unset or unreadable.
+struct DarkCal { int w = 0, h = 0; std::vector<unsigned char> hot; std::vector<float> glow; };
+const DarkCal& darkCal()
+{
+    static DarkCal c; static bool tried = false;
+    if (tried) return c;
+    tried = true;
+    QFile f(qEnvironmentVariable("ORIGIN_DARK_CAL"));
+    if (f.fileName().isEmpty() || !f.open(QIODevice::ReadOnly)) return c;
+    const QByteArray b = f.readAll(); int n1 = 0, n2 = 0, n3 = 0, bitpix = 0; qsizetype pos = 0; bool end = false;
+    for (; pos + 80 <= b.size() && !end; pos += 80) {
+        const QByteArray card = b.mid(pos, 80), key = card.left(8).trimmed(), val = card.mid(10, 20).trimmed();
+        if (key == "END") end = true; else if (key == "BITPIX") bitpix = val.toInt(); else if (key == "NAXIS1") n1 = val.toInt(); else if (key == "NAXIS2") n2 = val.toInt(); else if (key == "NAXIS3") n3 = val.toInt();
+    }
+    pos = (pos + 2879) / 2880 * 2880;
+    if (!end || bitpix != -32 || n3 != 2 || n1 <= 0 || n2 <= 0 || pos + qsizetype(n1) * n2 * 8 > b.size()) return c;
+    auto at = [&](qsizetype k) { const uchar* q = reinterpret_cast<const uchar*>(b.constData() + pos + k * 4);
+                                 const quint32 u = (quint32(q[0]) << 24) | (quint32(q[1]) << 16) | (quint32(q[2]) << 8) | q[3]; float v; memcpy(&v, &u, 4); return v; };
+    const qsizetype n = qsizetype(n1) * n2;
+    c.hot.resize(size_t(n)); c.glow.resize(size_t(n));
+    for (qsizetype i = 0; i < n; ++i) { c.hot[size_t(i)] = at(i) > 0.5f; c.glow[size_t(i)] = at(n + i); }
+    c.w = n1; c.h = n2;
+    return c;
+}
+
 }   // namespace
 
 SkyFrame analyseFrame(const QByteArray& data, double detectSigma, int maxStars)
@@ -50,7 +81,25 @@ SkyFrame analyseFrame(const QByteArray& data, double detectSigma, int maxStars)
     const int w = f.w / 2, h = f.h / 2;
     F.width = w; F.height = h;
     const uchar* d = reinterpret_cast<const uchar*>(data.constData()) + f.dataStart;
-    auto px = [&](int x, int y) { const qsizetype i = (qsizetype(y) * f.w + x) * 2; return float(double(qint16((d[i] << 8) | d[i + 1])) * f.bscale + f.bzero); };
+    auto rawpx = [&](int x, int y) { const qsizetype i = (qsizetype(y) * f.w + x) * 2; return float(double(qint16((d[i] << 8) | d[i + 1])) * f.bscale + f.bzero); };
+    // dark calibration (ORIGIN_DARK_CAL): hot pixels patched and the amp glow taken off in raw coordinates, before anything else sees the frame
+    std::vector<float> cal;
+    const DarkCal& dc = darkCal();
+    if (dc.w == f.w && dc.h == f.h) {
+        cal.resize(size_t(f.w) * f.h);
+        static const double glowScale = qEnvironmentVariableIsSet("ORIGIN_GLOW_SCALE") ? qEnvironmentVariable("ORIGIN_GLOW_SCALE").toDouble() : 1.0;
+        const float g = float(f.iso * f.exposure * glowScale);
+        for (int y = 0; y < f.h; ++y) for (int x = 0; x < f.w; ++x) { const size_t i = size_t(y) * f.w + x; cal[i] = rawpx(x, y) - g * dc.glow[i]; }
+        for (int y = 2; y < f.h - 2; ++y) for (int x = 2; x < f.w - 2; ++x) {
+            const size_t i = size_t(y) * f.w + x; if (!dc.hot[i]) continue;
+            const size_t nb[4] = {i - 2, i + 2, i - size_t(2 * f.w), i + size_t(2 * f.w)};
+            double s = 0; int k = 0; for (size_t j : nb) if (!dc.hot[j]) { s += cal[j]; ++k; }
+            if (!k) for (size_t j : nb) { s += cal[j]; ++k; }
+            cal[i] = float(s / k);
+        }
+        F.note = F.note.isEmpty() ? QString("dark calibrated") : F.note + "; dark calibrated";
+    }
+    auto px = [&](int x, int y) { return cal.empty() ? rawpx(x, y) : cal[size_t(y) * f.w + x]; };
 
     // Four sensel planes -> luminance, then work out which diagonal carries the greens (the FITS header's BAYERPAT is not reliable)
     std::vector<float> p[4];

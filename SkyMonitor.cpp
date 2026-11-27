@@ -1,4 +1,6 @@
 #include "SkyMonitor.hpp"
+#include "GlareMap.hpp"
+#include <cmath>
 
 #include <QRegularExpression>
 #include <QTimeZone>
@@ -189,20 +191,34 @@ void SkyMonitor::noteGlare(double az, double alt, double excess, const QDateTime
     bool have = false; for (const auto& v : dates) if (v.toString() == day) have = true;
     if (!have) { dates.append(day); while (dates.size() > 30) dates.removeFirst(); }
     b["ex_dates"] = dates;
+    // per night as well (Glare::map: a bin is glare only when it read bright on two nights); the oldest nights go after 30, their readings stay in ex_sum/ex_n
+    QJsonObject nights = b["ex_nights"].toObject(); QJsonArray a = nights[day].toArray();
+    nights[day] = QJsonArray{a.at(0).toDouble() + excess, a.at(1).toInt() + 1};
+    while (nights.size() > 30) nights.remove(nights.begin().key());              // keys are ISO dates: the first is the oldest
+    b["ex_nights"] = nights;
     m_skyMap[key] = b;
     if (++m_mapDirty >= 20) { saveSkyMap(); m_mapDirty = 0; }
 }
 
+double SkyMonitor::noteSkyRate(double az, double alt, double rate, double exposureS, int iso, const QDateTime& utc)
+{
+    const QString isoKey = QString("iso%1").arg(iso);
+    if (exposureS < 8.0 || !(rate > 0) || !m_darkRate.contains(isoKey) || !(m_darkRate[isoKey] > 0)) return std::nan("");
+    const double excess = rate / m_darkRate[isoKey] - 1.0;
+    noteGlare(az, alt, excess, utc); saveSkyMap(); m_mapDirty = 0;
+    return excess;
+}
+
 QJsonObject SkyMonitor::obstructionMap() const
 {
-    // glare: bins (at least 5 clear dark frames) whose mean sky excess is far above the typical bin: at least 1.6x the median and 0.4 above it (needs 4 such bins to have a median)
-    QJsonArray glare;
+    // glare: bins whose clear, moonless sky is far above the typical bin on two nights or more (Glare::map); candidates (bright on one night) listed apart
+    QJsonArray glare, glareCandidates;
     {
-        QList<double> means; QList<QPair<QString, QPair<double, int>>> all;
-        for (auto it = m_skyMap.begin(); it != m_skyMap.end(); ++it) { const QJsonObject b = it.value().toObject(); const int n = b["ex_n"].toInt(); if (n >= 5) { const double m = b["ex_sum"].toDouble() / n; means << m; all.append({it.key(), {m, n}}); } }
-        if (means.size() >= 4) {
-            std::sort(means.begin(), means.end()); const double med = means[means.size() / 2];
-            for (const auto& e : all) if (e.second.first >= std::max(1.6 * med, med + 0.4)) glare.append(QJsonObject{{"bin", e.first}, {"mean_excess", std::round(e.second.first * 100) / 100}, {"frames", e.second.second}, {"median_excess", std::round(med * 100) / 100}});
+        const Glare::Map gm = Glare::map(m_skyMap);
+        for (const Glare::Bin& g : gm.bins) {
+            const QJsonObject e{{"bin", g.key}, {"mean_excess", std::round(g.mean * 100) / 100}, {"frames", g.frames}, {"bright_nights", g.brightNights}, {"normal_nights", g.normalNights},
+                                {"median_excess", std::round(gm.median * 100) / 100}};
+            if (g.glare) glare.append(e); else if (g.brightNights > 0) glareCandidates.append(e);
         }
     }
     // A bin is an obstruction when frames attributed to an obstruction were seen on at least two different nights and no good frame was ever seen there.
@@ -219,7 +235,7 @@ QJsonObject SkyMonitor::obstructionMap() const
             else { suspect.append(e); profile.append(QJsonObject{{"az", az}, {"obstructed_up_to_alt", alt + 5}, {"horizon_file_alt", std::round(horizonAlt(az + 5))}}); }
         } else if (bad > 0 || b["cloud"].toInt() > 0) mixed.append(e);
     }
-    return QJsonObject{{"ok", true}, {"likely_obstructed", suspect}, {"obstruction_profile", profile}, {"sometimes_bad", mixed}, {"implausible", implausible}, {"glare_bins", glare}, {"bins_total", m_skyMap.size()}};
+    return QJsonObject{{"ok", true}, {"likely_obstructed", suspect}, {"obstruction_profile", profile}, {"sometimes_bad", mixed}, {"implausible", implausible}, {"glare_bins", glare}, {"glare_candidates", glareCandidates}, {"bins_total", m_skyMap.size()}};
 }
 
 // A picture of the frame for the eye (checking for trees, roofs and cloud): half-resolution colour binned again 2x2, black level removed, R and B scaled to the green
@@ -486,6 +502,7 @@ QJsonObject SkyMonitor::process(const QByteArray& fits, double exposureS, int is
         const LiveStacker::Report added = m_stack.add(F, exposureS, m_minTransparency, iso, filter, captured);
         rep.accepted = added.accepted; rep.frames = added.frames;
         QJsonObject reg = o["registration"].toObject(); reg["stacked"] = added.accepted; reg["frames_in_stack"] = added.frames;
+        if (added.trails) { reg["trails_masked"] = added.trails; reg["trail_pixels"] = added.trailPixels; }
         if (!added.reason.isEmpty()) reg["refused_because"] = added.reason;
         o["registration"] = reg;
     } else if (haveStack) {

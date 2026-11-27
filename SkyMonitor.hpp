@@ -59,6 +59,9 @@ public:
 
     /// Sky background of a CLEAR frame taken in the dark, by direction: a bin much brighter than the others is glare (a neighbour's security light, a street lamp), not cloud.
     void noteGlare(double az, double alt, double excessOverDark, const QDateTime& utc);
+    // a sky reading from the run's dark-sky check (moonless, Sun below -18: the caller's test): the excess over the dark baseline goes to the glare map
+    // as noteGlare would record it from an imaging frame; NaN (nothing recorded) for exposures under 8 s or before there is a dark baseline at this ISO
+    double noteSkyRate(double az, double alt, double skyRateAduPerS, double exposureS, int iso, const QDateTime& utc);
 
     QJsonObject obstructionMap() const;
 

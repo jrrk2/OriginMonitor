@@ -317,9 +317,16 @@ public:
                         "Bayer: <b>fixed</b> = every frame split into colour the right way, <b>old</b> = stacked before 2026-11-21, when a third or more of tri-band frames "
                         "had red/blue and green swapped (washed-out nebula colour); restacking fixes it.</p>"
                         "<table><tr><th>Stack</th><th>Frames</th><th>Min</th><th>Filter</th><th>Colour</th><th>Bayer</th><th>Captured</th></tr>";
-            int good = 0;
+            int good = 0, live = 0; bool inFinals = false;
+            const QString head = "<tr><th>Stack</th><th>Frames</th><th>Min</th><th>Filter</th><th>Colour</th><th>Bayer</th><th>Captured</th></tr>";
             for (int i = 0; i < m_list->count(); ++i) {
                 const QString dir = m_list->item(i)->data(Qt::UserRole).toString();
+                if (m_list->item(i)->data(Qt::UserRole + 1).toBool() && !inFinals) {
+                    inFinals = true;
+                    h += "</table><h2>Finals</h2><p class=dim>Restacks of every good frame of a target across nights (tools/restack.py; imported CCDciel captures: "
+                         "tools/import_ccdciel.py), in " + esc(m_dir) + "/finals.</p><table>" + head;
+                }
+                if (!inFinals) ++live;
                 StackInfo s = readHeader(dir + "/state.bin"); readColour(dir, s);
                 if (s.gaia && s.fixedLayout) ++good;
                 h += QString("<tr><td><a href='/stack/%1'>%2</a></td><td>%3</td><td>%4</td><td>%5</td><td>%6</td><td>%7</td><td class=dim>%8</td></tr>")
@@ -327,7 +334,7 @@ public:
                          .arg(s.gaia ? "<b>Gaia</b>" : "star WB").arg(s.fixedLayout ? "<b>fixed</b>" : "old")
                          .arg(esc(captureRange(s, dir)));
             }
-            return html(h + QString("</table><p class=dim>%1 of %2 stacks fully corrected (Gaia colour and fixed Bayer layout).</p>").arg(good).arg(m_list->count()), 0);
+            return html(h + QString("</table><p class=dim>%1 of %2 stacks fully corrected (Gaia colour and fixed Bayer layout); %3 live, %4 finals.</p>").arg(good).arg(m_list->count()).arg(live).arg(m_list->count() - live), 0);
         }
         if (path.startsWith("/stack/")) {
             bool ok = false; const int i = path.mid(7).toInt(&ok); if (!ok || i < 0 || i >= m_list->count()) { r.status = 404; r.type = "text/plain"; r.body = "no such stack\n"; return r; }
@@ -632,21 +639,25 @@ private:
         const QString keep = m_list->currentItem() ? m_list->currentItem()->data(Qt::UserRole).toString() : QString();
         m_list->clear();
         // newest first by the last frame captured (colour.json), else by when state.bin was saved: a directory's own time only changes when files come or go
-        struct Entry { QFileInfo d; StackInfo s; QDateTime when; };
+        // then DATA/finals/<name>_<filter>: the restacks across nights (tools/restack.py, tools/import_ccdciel.py), marked "final:", after the live stacks
+        struct Entry { QFileInfo d; StackInfo s; QDateTime when; bool final; };
         std::vector<Entry> entries;
-        for (const QFileInfo& d : QDir(m_dir + "/stacks").entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
-            if (d.fileName().startsWith('_')) continue;                                  // stacks/_fragments_<date>: superseded fragments (tools/consolidate.py)
-            Entry e{d, readHeader(d.absoluteFilePath() + "/state.bin"), {}}; readColour(d.absoluteFilePath(), e.s);
-            e.when = e.s.last.isValid() ? e.s.last : QFileInfo(d.absoluteFilePath() + "/state.bin").exists() ? QFileInfo(d.absoluteFilePath() + "/state.bin").lastModified() : d.lastModified();
-            entries.push_back(e);
+        for (const bool final : {false, true}) {
+            for (const QFileInfo& d : QDir(m_dir + (final ? "/finals" : "/stacks")).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+                if (d.fileName().startsWith('_')) continue;                              // stacks/_fragments_<date>: superseded fragments (tools/consolidate.py)
+                if (final && !QFileInfo::exists(d.absoluteFilePath() + "/state.bin")) continue;      // a restack still running, or one that stacked nothing
+                Entry e{d, readHeader(d.absoluteFilePath() + "/state.bin"), {}, final}; readColour(d.absoluteFilePath(), e.s);
+                e.when = e.s.last.isValid() ? e.s.last : QFileInfo(d.absoluteFilePath() + "/state.bin").exists() ? QFileInfo(d.absoluteFilePath() + "/state.bin").lastModified() : d.lastModified();
+                entries.push_back(e);
+            }
         }
-        std::stable_sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) { return a.when > b.when; });
+        std::stable_sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) { return a.final != b.final ? !a.final : a.when > b.when; });
         for (const Entry& e : entries) {
             const QFileInfo& d = e.d; const StackInfo& s = e.s;
-            const QString text = s.ok ? QString("%1\n  %2 frames, %3 min%4   %5\n  %6").arg(d.fileName()).arg(s.frames).arg(s.exposure / 60, 0, 'f', 0)
+            const QString text = s.ok ? QString("%1\n  %2 frames, %3 min%4   %5\n  %6").arg((e.final ? "final: " : "") + d.fileName()).arg(s.frames).arg(s.exposure / 60, 0, 'f', 0)
                                             .arg(s.filter.isEmpty() ? QString() : ", " + s.filter).arg(captureRange(s, d.absoluteFilePath())).arg(corrections(s))
                                       : QString("%1\n  (no state)   %2").arg(d.fileName(), d.lastModified().toString("yyyy-MM-dd HH:mm"));
-            auto* it = new QListWidgetItem(text); it->setData(Qt::UserRole, d.absoluteFilePath()); m_list->addItem(it);
+            auto* it = new QListWidgetItem(text); it->setData(Qt::UserRole, d.absoluteFilePath()); it->setData(Qt::UserRole + 1, e.final); m_list->addItem(it);
             if (d.absoluteFilePath() == keep) m_list->setCurrentItem(it);
         }
         if (!m_list->count()) m_stackInfo->setText("no stacks under " + m_dir + "/stacks");

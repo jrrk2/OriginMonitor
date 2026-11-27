@@ -146,7 +146,7 @@ def safe(s):
     return ''.join(ch if ch.isalnum() or ch in '-_' else '_' for ch in s).strip('_')
 
 
-def stack(g, out, exe, dry, redo=False):
+def stack(g, out, exe, dry, redo=False, extra=()):
     rs = g['rows']; nights = collections.Counter((r['utc'] - timedelta(hours=12)).date().isoformat() for r in rs)
     main = nights.most_common(1)[0][0]
     cands = [r for r in rs if (r['utc'] - timedelta(hours=12)).date().isoformat() == main and r['stars'] >= 100 and r['hfr'] > 0] or rs
@@ -166,7 +166,7 @@ def stack(g, out, exe, dry, redo=False):
     work = os.path.join(d, 'work'); os.makedirs(work, exist_ok=True)
     env = dict(os.environ, ORIGIN_DATA_DIR=work)
     subprocess.run([exe, tsv, '--target', g['name'], '--ra-hours', str(g['pos'][0] / 15), '--dec-deg', str(g['pos'][1]), '--lat', '52.2054', '--lon', '0.1218',
-                    '--out', os.path.join(d, 'records.jsonl'), '--keep-reference'], env=env, stdout=subprocess.DEVNULL, stderr=open(os.path.join(d, 'stackfiles.log'), 'w'), check=False)
+                    '--out', os.path.join(d, 'records.jsonl'), '--keep-reference', *extra], env=env, stdout=subprocess.DEVNULL, stderr=open(os.path.join(d, 'stackfiles.log'), 'w'), check=False)
     sdir = glob.glob(os.path.join(work, 'stacks', '*'))
     stacked = exp = 0; verdicts = collections.Counter()
     for l in open(os.path.join(d, 'records.jsonl')):

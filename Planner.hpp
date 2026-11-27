@@ -1,5 +1,6 @@
 #pragma once
 
+#include "GlareMap.hpp"
 #include "Astro.hpp"
 #include "Weather.hpp"
 
@@ -37,6 +38,7 @@ void setStacksDir(const QString& dir);
 /// Priority added to named targets ("M1" -> 5), applied on top of the novelty preference; the planner already keeps a target out of the plan while it is below the horizon profile or a learned obstruction.
 void setBoosts(const QMap<QString, int>& boosts);
 QJsonObject schedule(const Options& o);
+
 /// Human-readable table of the same thing.
 QString scheduleText(const QJsonObject& s, int top);
 /// The evening date that "now" belongs to (before noon we are still in last evening's night).

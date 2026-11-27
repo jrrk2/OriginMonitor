@@ -499,11 +499,13 @@ LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double
         m_last = T; m_haveLast = true;
     }
 
-    // Preprocess each colour plane, then resample into the reference grid and accumulate
+    // Preprocess each colour plane, then (trail mask) resample into the reference grid and accumulate
     const std::vector<float>* src[3] = {&f.r, &f.g, &f.b};
     const double c2 = T.a * T.a + T.b * T.b;
+    std::vector<float> imgs[3]; double gains[3] = {1, 1, 1}, wts[3] = {1, 1, 1}, offsets[3] = {0, 0, 0}, noises[3] = {1, 1, 1};
     for (int ch = 0; ch < 3; ++ch) {
-        std::vector<float> img = *src[ch];
+        std::vector<float>& img = imgs[ch];
+        img = *src[ch];
         double noise;
         if (levelMode()) {
             const std::vector<float>& flat = masterFlat(ch, w, h);
@@ -545,6 +547,66 @@ LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double
             }
             if (d.size() > 200) offset = medianOf(d);
         }
+        gains[ch] = gain; wts[ch] = wt; offsets[ch] = offset; noises[ch] = noise;
+    }
+    // Satellite and plane trails, masked before they reach the stack. The running-variance clip below only starts at the 8th frame and only catches what
+    // is 5 sigma off one pixel's history: a trail in one of the first frames went straight in (M45, 2026-10-14 04:54:42, the 7th of 176: a line across
+    // the final). Here every frame after the reference is compared with the stack so far (green): pixels 4 sigma of this frame's noise above it, away
+    // from bright stack pixels, are tested for straight lines (Hough transform); a line of 120+ such pixels running continuously over 150+ px is
+    // masked 4 px either side, in all three colours. Up to 4 trails per frame. $ORIGIN_TRAIL_MASK=0 turns it off.
+    std::vector<char> trailMask;
+    static const bool trailOn = qEnvironmentVariable("ORIGIN_TRAIL_MASK", "1") != "0";
+    if (trailOn && m_frames > 0) {
+        const double sd = std::max(noises[1] * gains[1], 1e-6);
+        std::vector<std::pair<float, float>> pts;
+        for (int y = 0; y < m_h; ++y)
+            for (int x = 0; x < m_w; ++x) {
+                const size_t i = size_t(y) * m_w + x; if (m_sw[1][i] <= 0) continue;
+                const double mean = m_sx[1][i] / m_sw[1][i];
+                if (mean > 5 * sd) continue;                                      // stars and the target: residuals there are seeing, not trails
+                const double qx = x - T.tx, qy = y - T.ty;
+                bool inside; const float v0 = sampleBilinear(imgs[1], w, h, (T.a * qx + T.b * qy) / c2, (-T.b * qx + T.a * qy) / c2, inside);
+                if (inside && v0 * gains[1] - offsets[1] - mean > 4 * sd) pts.push_back({float(x), float(y)});
+            }
+        if (pts.size() >= 120 && pts.size() < 200000) {
+            constexpr int NT = 720; constexpr double kRhoBin = 2.0;               // 0.25 degree steps, 2 px rho bins
+            const double D = std::hypot(m_w, m_h); const int NR = int(2 * D / kRhoBin) + 2;
+            std::vector<double> ct(NT), st(NT);
+            for (int t = 0; t < NT; ++t) { ct[t] = std::cos(t * M_PI / NT); st[t] = std::sin(t * M_PI / NT); }
+            std::vector<char> alive(pts.size(), 1);
+            for (int trail = 0; trail < 4; ++trail) {
+                std::vector<int> acc(size_t(NT) * NR, 0);
+                for (size_t k = 0; k < pts.size(); ++k) if (alive[k])
+                    for (int t = 0; t < NT; ++t) ++acc[size_t(t) * NR + int((pts[k].first * ct[t] + pts[k].second * st[t] + D) / kRhoBin)];
+                const size_t best = size_t(std::max_element(acc.begin(), acc.end()) - acc.begin());
+                if (acc[best] < 120) break;
+                const int bt = int(best / NR); const double rho = (best % NR + 0.5) * kRhoBin - D;
+                // the points within 2.5 px of the line, by position along it: the longest stretch with no gap over 25 px
+                std::vector<float> along;
+                for (size_t k = 0; k < pts.size(); ++k)
+                    if (alive[k] && std::fabs(pts[k].first * ct[bt] + pts[k].second * st[bt] - rho) < 2.5) along.push_back(float(-pts[k].first * st[bt] + pts[k].second * ct[bt]));
+                std::sort(along.begin(), along.end());
+                size_t runStart = 0, bestN = 0; float bestA = 0, bestB = 0;
+                for (size_t k = 1; k <= along.size(); ++k)
+                    if (k == along.size() || along[k] - along[k - 1] > 25) {
+                        if (k - runStart > bestN) { bestN = k - runStart; bestA = along[runStart]; bestB = along[k - 1]; }
+                        runStart = k;
+                    }
+                if (bestN < 120 || bestB - bestA < 150) break;
+                if (trailMask.empty()) trailMask.assign(size_t(m_w) * m_h, 0);
+                for (int y = 0; y < m_h; ++y)
+                    for (int x = 0; x < m_w; ++x) {
+                        const double d = x * ct[bt] + y * st[bt] - rho, a = -x * st[bt] + y * ct[bt];
+                        if (std::fabs(d) <= 4 && a >= bestA - 30 && a <= bestB + 30) { trailMask[size_t(y) * m_w + x] = 1; ++rep.trailPixels; }
+                    }
+                for (size_t k = 0; k < pts.size(); ++k) if (alive[k] && std::fabs(pts[k].first * ct[bt] + pts[k].second * st[bt] - rho) < 6) alive[k] = 0;
+                ++rep.trails;
+            }
+        }
+    }
+    for (int ch = 0; ch < 3; ++ch) {
+        const std::vector<float>& img = imgs[ch];
+        const double gain = gains[ch], wt = wts[ch], offset = offsets[ch];
         for (int y = 0; y < m_h; ++y)
             for (int x = 0; x < m_w; ++x) {
                 const double qx = x - T.tx, qy = y - T.ty;
@@ -552,6 +614,7 @@ LiveStacker::Report LiveStacker::add(const SkyFrame& f, double exposureS, double
                 bool inside; const float v0 = sampleBilinear(img, w, h, px, py, inside);
                 if (!inside) continue;
                 const double v = v0 * gain - offset; const size_t i = size_t(y) * m_w + x;
+                if (!trailMask.empty() && trailMask[i]) continue;
                 if (m_frames >= 8 && m_sw[ch][i] > 0) {                       // running-variance clip
                     const double mean = m_sx[ch][i] / m_sw[ch][i];
                     const double var = std::max(0.0, m_sx2[ch][i] / m_sw[ch][i] - mean * mean);
@@ -577,15 +640,21 @@ Image16 LiveStacker::preview() const
     if (m_frames == 0) return Image16();
     // Well-covered area: shrink the rectangle until every border row/column is at least 98% covered by 85% of the peak weight (60% until 2026-11-22
     // left wedges of the thinner coverage at the edges, 10-15% darker where fewer nights overlap)
+    // The crop must keep the middle of the reference frame (the target): when the best-covered area lies off to one side, the threshold relaxes (85%, 60%,
+    // 40%, 25% of the peak). A night of field rotation near the zenith plus drift left M51's 85% area a strip beside the galaxy (2026-11-24).
     double mx = 0; for (double v : m_sw[1]) mx = std::max(mx, v);
-    auto cov = [&](int x, int y) { return m_sw[1][size_t(y) * m_w + x] >= 0.85 * mx; };
     int x0 = 0, y0 = 0, x1 = m_w, y1 = m_h;
-    for (int guard = 0; guard < 4000 && x1 - x0 > 32 && y1 - y0 > 32; ++guard) {
-        auto frac = [&](int a, int b, bool horizontal, int fixed) { int n = 0; for (int k = a; k < b; ++k) n += horizontal ? cov(k, fixed) : cov(fixed, k); return double(n) / std::max(1, b - a); };
-        const double t = frac(x0, x1, true, y0), bt = frac(x0, x1, true, y1 - 1), l = frac(y0, y1, false, x0), r = frac(y0, y1, false, x1 - 1);
-        const double worst = std::min({t, bt, l, r});
-        if (worst >= 0.98) break;
-        if (worst == t) ++y0; else if (worst == bt) --y1; else if (worst == l) ++x0; else --x1;
+    for (const double level : {0.85, 0.6, 0.4, 0.25}) {
+        auto cov = [&](int x, int y) { return m_sw[1][size_t(y) * m_w + x] >= level * mx; };
+        x0 = 0; y0 = 0; x1 = m_w; y1 = m_h;
+        for (int guard = 0; guard < 4000 && x1 - x0 > 32 && y1 - y0 > 32; ++guard) {
+            auto frac = [&](int a, int b, bool horizontal, int fixed) { int n = 0; for (int k = a; k < b; ++k) n += horizontal ? cov(k, fixed) : cov(fixed, k); return double(n) / std::max(1, b - a); };
+            const double t = frac(x0, x1, true, y0), bt = frac(x0, x1, true, y1 - 1), l = frac(y0, y1, false, x0), r = frac(y0, y1, false, x1 - 1);
+            const double worst = std::min({t, bt, l, r});
+            if (worst >= 0.98) break;
+            if (worst == t) ++y0; else if (worst == bt) --y1; else if (worst == l) ++x0; else --x1;
+        }
+        if (x0 <= m_w * 2 / 5 && x1 >= m_w * 3 / 5 && y0 <= m_h * 2 / 5 && y1 >= m_h * 3 / 5) break;    // the middle fifth is inside
     }
     const int w = x1 - x0, h = y1 - y0;
     std::vector<float> lum(size_t(w) * h), col[3];

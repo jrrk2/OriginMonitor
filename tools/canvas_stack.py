@@ -3,6 +3,8 @@
 
     tools/canvas_stack.py SOURCE [SOURCE...] [--out DIR] [--every N] [--max N] [--scale 2.95] [--centre RA,DEC] [--size WxH] [--flat auto|none|FILE]
                           [--taper 0.04] [--bg-order 1] [--clip 3] [--jobs 8] [--depth-crop 0.7]
+                          [--rotate auto|none] [--keep RA,DEC;...] [--rect-depth 0.2] [--max-aspect 3]
+    tools/canvas_stack.py --recrop OUT [rectangle options]
 
 SOURCE is a finals directory (tools/restack.py: its records.jsonl, the frames the stacker kept), a mosaic/track log (DATA/mosaic_*.jsonl: its frames with 20+ stars
 and no fault verdict), a frames.tsv, a text file of FITS paths, or FITS files.
@@ -21,8 +23,14 @@ Two passes: the first gives each canvas pixel's weighted mean and scatter, the s
 sigma has a floor of 10% of the level, so seeing changes in star cores are not clipped). Saturated pixels keep a token weight: they only decide a pixel no frame has unsaturated.
 The canvas is a TAN projection, north up, centred on the frames (or --centre) at --scale arcsec/px, sized to their union (or --size, arcmin).
 
-Writes OUT/canvas.fits (3 planes R,G,B, linear, with the canvas WCS), OUT/depth.fits (seconds of exposure per pixel), OUT/preview.png (stretched, cropped to where the depth
-reaches --depth-crop of its 95th percentile), OUT/depth.png, OUT/frames.jsonl (per frame: solved, centre, rotation, noise, weight) and OUT/summary.json.
+Then the rectangle: the canvas is turned to the angle that gives the largest fully covered rectangle (depth >= --rect-depth of the median covered depth, at most
+--max-aspect long) that still holds what matters: the canvas centre, the largest bright extended object (galaxy or nebula: block medians of the green, so stars do not count)
+and any --keep RA,DEC;RA,DEC points, each with a 5' margin. If nothing holds them all the extended object goes, then the rest. --rotate none keeps north up.
+
+Writes OUT/canvas.fits (3 planes R,G,B, linear, with the canvas WCS, north up), OUT/depth.fits (seconds of exposure per pixel), OUT/rect.fits (the rotated rectangle, linear,
+with its own WCS), OUT/preview.png (the rectangle, stretched), OUT/preview_northup.png (the whole canvas where the depth reaches --depth-crop of its 95th percentile),
+OUT/depth.png, OUT/frames.jsonl (per frame: solved, centre, rotation, noise, weight) and OUT/summary.json.
+--recrop OUT redoes only the rectangle and previews from an existing OUT.
 """
 import argparse, glob, json, math, os, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
@@ -183,7 +191,15 @@ def main():
     ap.add_argument('--scale', type=float, default=2.95); ap.add_argument('--centre'); ap.add_argument('--size'); ap.add_argument('--flat', default='self')
     ap.add_argument('--taper', type=float, default=0.04); ap.add_argument('--bg-order', type=int, default=1); ap.add_argument('--clip', type=float, default=3.0)
     ap.add_argument('--jobs', type=int, default=8); ap.add_argument('--depth-crop', type=float, default=0.7)
-    a = ap.parse_args()
+    ap.add_argument('--rotate', default='auto', choices=('auto', 'none')); ap.add_argument('--keep', default='')
+    ap.add_argument('--rect-depth', type=float, default=0.2); ap.add_argument('--max-aspect', type=float, default=3.0); ap.add_argument('--recrop')
+    a = ap.parse_args() if '--recrop' not in sys.argv else ap.parse_args(['-'] + sys.argv[1:])
+    if a.recrop:
+        out = a.recrop; hdr = fits.getheader(os.path.join(out, 'canvas.fits'))
+        img = fits.getdata(os.path.join(out, 'canvas.fits')).astype(np.float32); dep = fits.getdata(os.path.join(out, 'depth.fits')).astype(np.float32)
+        summ = json.load(open(os.path.join(out, 'summary.json')))
+        summ.update(previews(out, img, dep, WCS(hdr).celestial, a)); json.dump(summ, open(os.path.join(out, 'summary.json'), 'w'), indent=1)
+        print(json.dumps(summ)); return
     files = frame_list(a.sources, a.every, a.max)
     if not files: sys.exit('no frames')
     out = a.out or os.path.join(DATA, 'canvas', os.path.basename(os.path.normpath(a.sources[0])).replace('.tsv', ''))
@@ -267,12 +283,7 @@ def main():
     fits.writeto(os.path.join(out, 'canvas.fits'), img, hdr, overwrite=True)
     if depth is not None: fits.writeto(os.path.join(out, 'depth.fits'), depth.astype(np.float32), cw.to_header(), overwrite=True)
     dep = depth if depth is not None else W
-    p95 = float(np.percentile(dep[dep > 0], 95)); crop = dep >= a.depth_crop * p95
-    ys, xs = np.where(crop); y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
-    # the sky outside the crop is left unstretched (black)
-    lum = img[1][crop]; lo, hi = np.percentile(lum, 25), np.percentile(lum, 99.8)
-    pv = np.stack([stretch(img[k], lo, hi) * crop for k in range(3)], -1)[y0:y1, x0:x1]
-    save_png(os.path.join(out, 'preview.png'), pv)
+    pv = previews(out, img, dep, cw, a)
     save_png(os.path.join(out, 'depth.png'), np.repeat((dep / max(dep.max(), 1e-9))[..., None], 3, -1))
     with open(os.path.join(out, 'frames.jsonl'), 'w') as fo:
         for (f, w), rot, c in zip(good, rots, cen):
@@ -281,10 +292,148 @@ def main():
         for f in files:
             if f not in dict(good): fo.write(json.dumps({'file': f, 'solved': False}) + '\n')
     summ = {'frames': len(files), 'solved': len(good), 'canvas_px': list(size), 'scale_arcsec': a.scale, 'centre_deg': [round(centre[0], 5), round(centre[1], 5)],
-            'rotation_range_deg': [round(v, 1) for v in rot_range(rots)], 'depth_s': {'max': float(dep.max()), 'p95': p95, 'median_covered': float(np.median(dep[dep > 0]))},
-            'crop_px': [int(x0), int(y0), int(x1), int(y1)], 'crop_arcmin': [round((x1 - x0) * a.scale / 60, 1), round((y1 - y0) * a.scale / 60, 1)]}
+            'rotation_range_deg': [round(v, 1) for v in rot_range(rots)], 'depth_s': {'max': float(dep.max()), 'median_covered': float(np.median(dep[dep > 0]))}, **pv}
     json.dump(summ, open(os.path.join(out, 'summary.json'), 'w'), indent=1)
     print(json.dumps(summ))
+
+
+def previews(out, img, dep, cw, a):
+    """preview_northup.png (the old --depth-crop view), then the rotated rectangle: rect.fits and preview.png; returns the summary fields"""
+    scale = float(np.sqrt(abs(np.linalg.det(cw.pixel_scale_matrix)))) * 3600
+    p95 = float(np.percentile(dep[dep > 0], 95)); crop = dep >= a.depth_crop * p95
+    ys, xs = np.where(crop); y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+    lum = img[1][crop]; lo, hi = np.percentile(lum, 25), np.percentile(lum, 99.8)     # the sky outside the crop is left unstretched (black)
+    save_png(os.path.join(out, 'preview_northup.png'), np.stack([stretch(img[k], lo, hi) * crop for k in range(3)], -1)[y0:y1, x0:x1])
+    res = {'depth_p95_s': p95, 'northup_crop_px': [int(x0), int(y0), int(x1), int(y1)]}
+    if a.rotate == 'none':
+        save_png(os.path.join(out, 'preview.png'), np.stack([stretch(img[k], lo, hi) * crop for k in range(3)], -1)[y0:y1, x0:x1]); return res
+    thr = a.rect_depth * float(np.median(dep[dep > 0]))
+    cover = ndimage.binary_fill_holes(dep >= thr)              # pinhole dips (clipped hot pixels) do not break a rectangle
+    H, W = dep.shape; margin = 5 * 60 / scale
+    groups = [('centre', [((H - 1) / 2, (W - 1) / 2)])]
+    if a.keep:
+        pts = [tuple(float(v) for v in k.split(',')) for k in a.keep.split(';') if k.strip()]
+        groups.append(('keep', [tuple(cw.world_to_pixel_values(ra, de)[::-1]) for ra, de in pts]))
+    obj = extended_object(img[1], cover)
+    if obj is not None: groups.append(('object', obj))
+    best = None
+    for n in range(len(groups), 0, -1):                        # all groups first, then the object dropped, then the --keep points
+        P = np.array([p for g in groups[:n] for p in g[1]], float)
+        best = best_rect(cover, P, margin, a.max_aspect)
+        if best: best['groups'] = n; break
+    if not best: best = best_rect(cover, np.empty((0, 2)), 0, a.max_aspect); best['groups'] = 0
+    th, (ry0, ry1, rx0, rx1) = best['theta'], best['rect']
+    rect = np.stack([rotate(img[k], th, 1)[ry0:ry1, rx0:rx1] for k in range(3)])
+    rw = rotated_wcs(cw, (H, W), th, ry0, rx0); hh = rw.to_header()
+    hh['ROTDEG'] = (round(float(np.degrees(th)), 2), 'canvas turned for the largest covered rectangle'); hh['COMMENT'] = 'canvas_stack rectangle: planes R, G, B, linear'
+    fits.writeto(os.path.join(out, 'rect.fits'), rect, hh, overwrite=True)
+    lo, hi = np.percentile(rect[1], 30), np.percentile(rect[1], 99.8)
+    save_png(os.path.join(out, 'preview.png'), np.stack([stretch(rect[k], lo, hi) for k in range(3)], -1))
+    res.update({'rect_rotation_deg': round(float(np.degrees(th)), 2), 'rect_holds': [g[0] for g in groups[:best['groups']]] if best['groups'] else [],
+                'rect_px': [rx1 - rx0, ry1 - ry0], 'rect_arcmin': [round((rx1 - rx0) * scale / 60, 1), round((ry1 - ry0) * scale / 60, 1)],
+                'rect_fraction_of_covered': round(float((rx1 - rx0) * (ry1 - ry0) / cover.sum()), 3)})
+    return res
+
+
+def extended_object(g, cover, b=16):
+    """canvas pixels (y,x) outlining the largest bright extended object: block medians (stars gone) over the covered sky, > 4 sigma, at least 40 blocks"""
+    gy, gx = g.shape[0] // b, g.shape[1] // b
+    blk = np.median(np.where(cover, g, np.nan)[:gy * b, :gx * b].reshape(gy, b, gx, b).transpose(0, 2, 1, 3).reshape(gy, gx, -1), -1)
+    ok = np.isfinite(blk) & ndimage.binary_erosion(cover[:gy * b:b, :gx * b:b], iterations=2)
+    if ok.sum() < 100: return None
+    v = blk[ok]; med = np.median(v); sd = 1.4826 * np.median(np.abs(v - med))
+    m = ok & (ndimage.median_filter(np.nan_to_num(blk), 3) > med + 4 * sd)
+    lab, n = ndimage.label(m)
+    if not n: return None
+    sizes = ndimage.sum(m, lab, range(1, n + 1)); k = int(np.argmax(sizes)) + 1
+    if sizes[k - 1] < 40: return None
+    ys, xs = np.where(lab == k)
+    return [((y + 0.5) * b, (x + 0.5) * b) for y, x in zip(ys, xs)]
+
+
+def rot_matrix(th):                                            # output (y,x) offset -> input offset
+    c, s = np.cos(th), np.sin(th); return np.array([[c, -s], [s, c]])
+
+
+def rot_geometry(shape, th):
+    H, W = shape; c, s = abs(np.cos(th)), abs(np.sin(th)); oh, ow = int(H * c + W * s) + 2, int(W * c + H * s) + 2
+    return (oh, ow), np.array([(H - 1) / 2, (W - 1) / 2]), np.array([(oh - 1) / 2, (ow - 1) / 2])
+
+
+def rotate(a, th, order):
+    (oh, ow), ci, co = rot_geometry(a.shape, th); R = rot_matrix(th)
+    return ndimage.affine_transform(a, R, offset=ci - R @ co, output_shape=(oh, ow), order=order, cval=0)
+
+
+def rotated_wcs(cw, shape, th, y0, x0):
+    """the canvas WCS for the rotated image cropped at (y0, x0)"""
+    (oh, ow), ci, co = rot_geometry(shape, th); R = rot_matrix(th)
+    crp = np.array([cw.wcs.crpix[1] - 1, cw.wcs.crpix[0] - 1])
+    q = np.linalg.solve(R, crp - ci) + co - np.array([y0, x0])
+    cd = cw.pixel_scale_matrix @ np.array([[R[1, 1], R[1, 0]], [R[0, 1], R[0, 0]]]); sc = float(np.sqrt(abs(np.linalg.det(cd))))
+    nw = WCS(naxis=2); nw.wcs.ctype = list(cw.wcs.ctype); nw.wcs.crval = list(cw.wcs.crval); nw.wcs.cunit = ['deg', 'deg']
+    nw.wcs.cdelt = [sc, sc]; nw.wcs.pc = cd / sc; nw.wcs.crpix = [q[1] + 1, q[0] + 1]     # PC + CDELT: to_header keeps both
+    return nw
+
+
+def rect_holding(m, B, aspect):
+    """largest all-True rectangle of m holding box B (y0,y1,x0,x1), at most aspect:1 either way; (area, (y0,y1,x0,x1)) or (0, None)"""
+    by0, by1, bx0, bx1 = B
+    if by0 < 0 or bx0 < 0 or by1 > m.shape[0] or bx1 > m.shape[1] or by1 <= by0 or bx1 <= bx0: return (0, None)
+    bad = np.vstack([np.zeros((1, m.shape[1]), int), np.cumsum(~m, 0)])
+    best = (0, None)
+    for y0 in range(by0, -1, -1):
+        if ((bad[by1] - bad[y0]) != 0)[bx0:bx1].any(): break
+        for y1 in range(by1, m.shape[0] + 1):
+            colok = (bad[y1] - bad[y0]) == 0
+            if not colok[bx0:bx1].all(): break
+            h = y1 - y0; l, r = bx0, bx1
+            while l > 0 and colok[l - 1]: l -= 1
+            while r < len(colok) and colok[r]: r += 1
+            if h > aspect * (r - l): continue                  # too tall: a shorter span of rows is tried anyway
+            wmax = int(aspect * h)
+            if r - l > wmax:                                   # too wide: the widest allowed span still holding B, centred on it
+                if bx1 - bx0 > wmax: continue
+                c = (bx0 + bx1) / 2; l2 = int(max(l, min(c - wmax / 2, bx0))); l2 = min(l2, r - wmax); l, r = l2, l2 + wmax
+            if h * (r - l) > best[0]: best = (h * (r - l), (y0, y1, l, r))
+    return best
+
+
+def max_rect(m, aspect):
+    """largest all-True rectangle, at most aspect:1 (row histograms)"""
+    h = np.zeros(m.shape[1], int); best = (0, None)
+    for y in range(m.shape[0]):
+        h = np.where(m[y], h + 1, 0); st = []
+        for x in range(len(h) + 1):
+            cur = h[x] if x < len(h) else 0; start = x
+            while st and st[-1][1] >= cur:
+                s0, hh = st.pop(); w = x - s0; hc, wc = min(hh, int(aspect * w)), min(w, int(aspect * hh))
+                if hc * wc > best[0]: best = (hc * wc, (y + 1 - hc, y + 1, s0, s0 + wc))
+                start = s0
+            st.append((start, cur))
+    return best
+
+
+def best_rect(cover, P, margin, aspect, f=8):
+    """angle search on a 1/f mask (3 deg, then 0.5 deg), then the rectangle at full resolution (1/2 mask) for the best angle"""
+    small = ndimage.zoom(cover.astype(np.float32), 1 / f, order=1) > 0.99
+    def at(th, m, sc):
+        (oh, ow), ci, co = rot_geometry(m.shape, th)
+        mr = ndimage.affine_transform(m.astype(np.float32), rot_matrix(th), offset=ci - rot_matrix(th) @ co, output_shape=(oh, ow), order=0) > 0.5
+        if not len(P): return max_rect(mr, aspect)
+        (ohf, owf), cif, cof = rot_geometry(cover.shape, th)
+        q = np.linalg.solve(rot_matrix(th), (P - cif).T).T + cof
+        B = (int((q[:, 0].min() - margin) / sc), int((q[:, 0].max() + margin) / sc) + 1, int((q[:, 1].min() - margin) / sc), int((q[:, 1].max() + margin) / sc) + 1)
+        return rect_holding(mr, B, aspect)
+    coarse = {d: at(np.radians(d), small, f)[0] for d in range(-45, 46, 3)}          # a quarter turn only swaps the sides: the least turn from north up
+    d0 = max(coarse, key=coarse.get)
+    if coarse[d0] == 0: return None
+    fine = {d: at(np.radians(d), small, f)[0] for d in np.arange(d0 - 2.5, d0 + 2.51, 0.5)}
+    th = np.radians(float(max(fine, key=fine.get)))
+    half = ndimage.binary_erosion(cover, iterations=3)[::2, ::2]
+    area, r = at(th, half, 2)
+    if not r: return None
+    return {'theta': th, 'rect': (2 * r[0] + 2, 2 * r[1] - 2, 2 * r[2] + 2, 2 * r[3] - 2), 'groups': None}
 
 
 def self_flat(files, shape, nmax=60, b=32):

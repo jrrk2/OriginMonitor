@@ -754,6 +754,10 @@ QJsonObject ControlServer::handleUncached(const QJsonObject& req)
     if (cmd == "frame_stats") return doFrameStats(req);
     if (cmd == "sky_note") {                          // {"az","alt","obstructed"}: evidence from a twilight survey for the learned obstruction map
         if (!req.contains("az") || !req.contains("alt")) return fail("need 'az' and 'alt'");
+        if (req.contains("sky_rate")) {                // {"az","alt","sky_rate","exposure","iso"}: a reading from the run's dark-sky check, for the glare map
+            const double ex = m_backend->sky().noteSkyRate(req["az"].toDouble(), req["alt"].toDouble(), req["sky_rate"].toDouble(), req["exposure"].toDouble(), req["iso"].toInt(800), QDateTime::currentDateTimeUtc());
+            return std::isnan(ex) ? QJsonObject{{"ok", true}, {"recorded", false}, {"why", "exposure under 8 s, or no dark baseline yet at this ISO"}} : QJsonObject{{"ok", true}, {"recorded", true}, {"excess", ex}};
+        }
         m_backend->sky().noteSurvey(req["az"].toDouble(), req["alt"].toDouble(), req["obstructed"].toBool(), QDateTime::currentDateTimeUtc());
         return QJsonObject{{"ok", true}};
     }

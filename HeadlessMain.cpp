@@ -10,6 +10,7 @@
 #include "FocusAnalyzer.hpp"
 #include "OriginBackend.hpp"
 #include "Planner.hpp"
+#include "GlareMap.hpp"
 #include "Weather.hpp"
 #include "FlatAnalyzer.hpp"
 #include "Mail.hpp"
@@ -184,7 +185,11 @@ const QList<Cmd>& commands()
                                        O("cloud-patience", 'd', "minutes of cloud before going to a backup target", "10"), O("stop-for-rain", 'b', "park and end the night on a rain forecast (off by default: there is no dome, so parking keeps nothing dry, and the dew heater copes with light rain; rain is handled as cloud)"), O("give-up", 'd', "minutes of cloud on one block before moving to the next block", "60"),
                                        O("not-before", 's', "\"dusk\" (Sun below -12 deg at the site) or a local HH:MM; no slewing before this", "dusk"), O("connect", 's', "telescope host to reconnect to (default: the server's)"),
                                        O("mail", 'b', "e-mail a summary of the night when the run ends"),
-                                       O("sky-ref", 'd', "minutes between sky reference hops on targets wider than the field (0: none): the same altitude, offset in azimuth either side, frames for the stacker's sky level", "0")};
+                                       O("sky-ref", 'd', "minutes between sky reference hops on targets wider than the field (0: none): the same altitude, offset in azimuth either side, frames for the stacker's sky level", "0"),
+                                       O("sky-ref-size", 'd', "sky reference hops on targets at least this big, arcmin (the field is 75 x 50)", "50"),
+                                       O("twilight-survey", 'o', "on|off use the wait between the slew guard (Sun -12) and the first block (Sun -18) for the obstruction survey of tonight's places (see survey)", "on"),
+                                       O("dark-sky-check", 'o', "on|off at the first block of a moonless night (Moon below -5 deg), at most every --dark-sky-every nights: ~6 min of 20 s frames on the places the glare map doubts (bright on one night only), low in the south and near the zenith, read against the dark baseline into the glare map (a place is glare once it is bright on two nights)", "on"),
+                                       O("dark-sky-every", 'd', "nights between dark-sky checks", "6")};
                        QList<Arg> pa = plannerArgs();
                        for (Arg& x : pa) if (x.name == "min-quality") x.help += " (run default 0.2: the forecast is a soft prior, the sky monitor decides)";
                        return a + pa; }()});
@@ -989,6 +994,7 @@ struct RunState {
     qint64 controlDone = 0; bool replan = false, stop = false;
     bool mail = false; int auxReboots = 0;                  // --mail (alerts as well as the summary); reboots tried tonight for a dead aux bus
     double skyRefMin = 0;                                   // --sky-ref
+    double skyRefSize = 50;                                 // --sky-ref-size
 };
 RunState g_run;
 
@@ -1527,8 +1533,9 @@ RunResult runTarget(const QJsonObject& t, const QDateTime& endUtc, int depth, bo
         const bool undecided = lastV == "defocused" && !defocusIsCloud;                // focus or cloud, not known until the sweep: leave the cloud timer as it is
         if (probing) { if (!cloudSince.isValid()) cloudSince = now; cloudMinTotal += lastTick.secsTo(now) / 60.0; } else if (!undecided) cloudSince = QDateTime();
         lastTick = now;
-        // a sky reference hop on a target wider than the field (75 arcmin): at the first good frame, then every --sky-ref minutes of the block
-        if (g_run.skyRefMin > 0 && t["size_arcmin"].toDouble() >= 75 && !probing && (lastV == "clear" || lastV == "hazy" || lastV == "moon_glow")
+        // a sky reference hop on a target that fills the field (--sky-ref-size, 50 arcmin, the field's short side; 75 until 2026-11-24, when only M44 qualified
+        // and the Double Cluster and M81 + M82, 60 arcmin, did not): at the first good frame, then every --sky-ref minutes of the block
+        if (g_run.skyRefMin > 0 && t["size_arcmin"].toDouble() >= g_run.skyRefSize && !probing && (lastV == "clear" || lastV == "hazy" || lastV == "moon_glow")
             && (!lastSkyRef.isValid() || lastSkyRef.secsTo(now) >= g_run.skyRefMin * 60) && now.secsTo(endUtc) > 600) {
             lastSkyRef = now;
             const double e = s["exposure"].toDouble(exposure);
@@ -1598,6 +1605,14 @@ void mailRunSummary(const QString& outcome, const QString& night)
     note({{"summary_mail", r["ok"]}, {"error", r["error"]}});
 }
 
+// The run calls the survey itself in twilight: g_surveyInRun lets it past the "a run holds the telescope" refusal, g_surveyAbort is asked before each sample
+// (the run's stop, replan and rain checks) and keeps run_state.json fresh.
+bool g_surveyInRun = false;
+std::function<bool()> g_surveyAbort;
+QJsonObject cmdSurvey(const Parsed& p, const Cmd& c);
+QJsonObject darkSkyCheck(const Astro::Site& site, const QString& horizonFile, double maxMinutes);
+const Cmd* findCmd(const QString& name) { for (const Cmd& k : commands()) if (k.name == name) return &k; return nullptr; }
+
 QJsonObject cmdRun(const Parsed& p, const Cmd& c)
 {
     if (!p.v.contains("dry-run") && !p.v.contains("unattended")) return failure("run takes over the night and slews the telescope; add --unattended to confirm (or --dry-run to see the plan)");
@@ -1614,7 +1629,7 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
     g_run = RunState();
     g_run.o = o; g_run.zone = QTimeZone(o.timeZone.toUtf8()); g_run.darkEnd = parseZ(S["dark_end"].toString());
     g_stopForRain = p.v.contains("stop-for-rain"); g_run.mail = p.v.contains("mail");
-    g_run.maxExposure = num(p, c, "max-exposure"); g_run.iso = int(num(p, c, "iso")); g_run.patienceMin = num(p, c, "cloud-patience"); g_run.giveUpMin = num(p, c, "give-up"); g_run.skyRefMin = num(p, c, "sky-ref");
+    g_run.maxExposure = num(p, c, "max-exposure"); g_run.iso = int(num(p, c, "iso")); g_run.patienceMin = num(p, c, "cloud-patience"); g_run.giveUpMin = num(p, c, "give-up"); g_run.skyRefMin = num(p, c, "sky-ref"); g_run.skyRefSize = num(p, c, "sky-ref-size");
     g_run.host = p.v.contains("connect") ? str(p, "connect") : call("status", {}, 10000)["host"].toString();
     g_run.logPath = originDataDir() + "/run_" + S["night"].toString().remove('-') + ".jsonl";
     g_run.args = p; g_run.cmd = &c; g_run.night = S["night"].toString(); g_run.plan = S["plan"].toArray();
@@ -1664,6 +1679,29 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
         if (now >= end) continue;
         bool restart = false;
         while (now < start && now < g_run.darkEnd) {
+            // twilight survey: once a night, as soon as the slew guard allows, when at least 8 minutes are left before the block
+            static bool surveyed = false;
+            const double leftMin = now.secsTo(start) / 60.0;
+            if (!surveyed && str(p, "twilight-survey", "on") != "off" && leftMin >= 8 && tooEarlyToSlew(str(p, "not-before", "dusk"), g_run.o.site).isEmpty()) {
+                surveyed = true;
+                const Cmd* sc = findCmd("survey");
+                const double minutes = leftMin - 4;                                     // 4 minutes in hand for the slew to the first target
+                const int samples = std::clamp(int(minutes / 1.4), 3, 30);              // a sample is a goto and two or three short frames: ~1.4 min
+                Parsed sp = sc ? parseArgs(*sc, {"--max-minutes", QString::number(minutes, 'f', 1), "--samples", QString::number(samples)}) : Parsed{};
+                if (sc && sp.error.isEmpty()) {
+                    g_run.current = {{"surveying", QString("twilight obstruction survey, %1 places, until %2").arg(samples).arg(now.addSecs(qint64(minutes * 60)).toTimeZone(g_run.zone).toString("HH:mm"))}};
+                    writeRunState("surveying"); runLog("twilight_survey_start", {{"samples", samples}, {"max_minutes", minutes}});
+                    g_surveyInRun = true;
+                    g_surveyAbort = [&]() { writeRunState("surveying"); const RunResult r = between(); return g_run.stop || g_run.replan || r == RunResult::Rain || r == RunResult::Failed; };
+                    const QJsonObject sv = cmdSurvey(sp, *sc);
+                    g_surveyInRun = false; g_surveyAbort = nullptr;
+                    runLog("twilight_survey", {{"ok", sv["ok"]}, {"sampled", sv["sampled"]}, {"obstructed", sv["obstructed"]}, {"error", sv["error"]}, {"file", "survey_" + QString(g_run.night).remove('-') + ".json"}});
+                    if (sv["ok"].toBool() && sv["obstructed"].toInt() > 0) g_run.replan = true;   // new obstruction evidence: plan the rest of the night again
+                    now = QDateTime::currentDateTimeUtc();
+                    if (g_run.stop || g_run.replan) { restart = true; break; }
+                    continue;
+                }
+            }
             idle(QString("next block %1 at %2").arg(b["key"].toString(), start.toTimeZone(g_run.zone).toString("HH:mm")));
             sleepMs(30000); res = between(); now = QDateTime::currentDateTimeUtc();
             if (g_run.stop || g_run.replan || res == RunResult::Rain || res == RunResult::Failed) { restart = true; break; }
@@ -1676,6 +1714,28 @@ QJsonObject cmdRun(const Parsed& p, const Cmd& c)
         if (g_run.stop) break;
         if (g_run.replan) { --i; continue; }
         if (now >= g_run.darkEnd) break;
+        {   // dark-sky check: the first block of a moonless night, when the last check is old enough
+            static bool darkChecked = false;
+            const QDateTime t = QDateTime::currentDateTimeUtc();
+            const bool moonless = Astro::moonAltitude(g_run.o.site, t) < -5 && Astro::moonAltitude(g_run.o.site, t.addSecs(900)) < -5;
+            const bool sunDown = Astro::altAz(Astro::sunPosition(t), g_run.o.site, t).alt < -18;
+            if (!darkChecked && str(p, "dark-sky-check", "on") != "off" && moonless && sunDown && t.secsTo(end) > 30 * 60) {
+                darkChecked = true;
+                QDate last; for (const QFileInfo& fi : QDir(originDataDir()).entryInfoList({"sky_survey_*.json"}, QDir::Files))
+                    { const QDate d = QDate::fromString(fi.baseName().section('_', -1), "yyyyMMdd"); if (d.isValid() && (!last.isValid() || d > last)) last = d; }
+                const QDate tonight = QDate::fromString(g_run.night, Qt::ISODate);
+                if (!last.isValid() || last.daysTo(tonight) >= num(p, c, "dark-sky-every")) {
+                    g_run.current = {{"surveying", "dark-sky check of the glare map, ~6 min"}}; writeRunState("surveying"); runLog("dark_sky_check_start", {{"last", last.toString(Qt::ISODate)}});
+                    g_surveyAbort = [&]() { writeRunState("surveying"); const RunResult r = between(); return g_run.stop || g_run.replan || r == RunResult::Rain || r == RunResult::Failed; };
+                    const QJsonObject dc = darkSkyCheck(g_run.o.site, g_run.o.horizonFile, 7);
+                    g_surveyAbort = nullptr;
+                    runLog("dark_sky_check", {{"ok", dc["ok"]}, {"recorded", dc["recorded"]}, {"error", dc["error"]}, {"skipped", dc["skipped"]}, {"file", "sky_survey_" + QString(g_run.night).remove('-') + ".json"}});
+                    if (dc["recorded"].toInt() > 0) g_run.replan = true;     // the glare map may have changed: plan the rest of the night again
+                    if (g_run.stop) break;
+                    if (g_run.replan) { --i; continue; }
+                }
+            }
+        }
         g_run.tried = QStringList{b["key"].toString()};
         res = runTarget(b, end, 0);
         ++g_run.blocksDone;
@@ -2509,13 +2569,14 @@ QJsonObject cmdSurvey(const Parsed& p, const Cmd& c)
     if (const QString who = telescopeIdentityProblem(); !who.isEmpty()) return failure(who);
     if (!initialised()) return failure("the telescope is not initialised (mount not aligned, or TaskController not ready); initialize first");
     if (call("sequence", {{"action", "status"}}, 10000)["status"].toObject()["active"].toBool()) return failure("a sequence is running");
-    if (runActive()) return failure("an unattended run is in progress; it holds the telescope");
+    if (!g_surveyInRun && runActive()) return failure("an unattended run is in progress; it holds the telescope");
 
     const QString dir = originDataDir() + "/survey/" + night; QDir().mkpath(dir);
     QJsonArray results; QList<double> rates;
     call("manual", {}, 15000);
     for (const Pt& q : uniq) {
         if (t0.secsTo(QDateTime::currentDateTimeUtc()) > num(p, c, "max-minutes") * 60) { note({{"survey", "out of time; stopping"}}); break; }
+        if (g_surveyAbort && g_surveyAbort()) { note({{"survey", "the run needs the telescope; stopping"}}); break; }
         const QJsonObject g = gotoAltAz(q.alt, q.az, o.site, 240);
         QJsonObject r{{"az", std::round(q.az)}, {"alt", std::round(q.alt)}, {"for", q.what}};
         if (!g["ok"].toBool()) { r["error"] = "goto failed: " + g["error"].toString(); results.append(r); note({{"survey", "goto failed"}, {"at", r}}); continue; }
@@ -2641,6 +2702,67 @@ QJsonObject cmdSkySurvey(const Parsed& p, const Cmd& c)
     }
     QJsonObject res{{"ok", true}, {"night", night}, {"iso", iso}, {"sampled", int(rates.size())}, {"darkest_sky_rate", darkest}, {"zero_point", abs ? QJsonValue(zp) : QJsonValue()},
                     {"note", abs ? "mag_per_arcsec2 from the given zero point" : "relative only: delta_mag is against the darkest place (give --zero-point for mag/arcsec^2)"}, {"samples", samples}, {"skipped", skipped}};
+    QFile f(originDataDir() + "/sky_survey_" + QString(night).remove('-') + ".json"); if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) f.write(QJsonDocument(res).toJson());
+    return res;
+}
+
+// darkSkyCheck: the run's light-pollution pass, at the start of a moonless night. Places: the bins the glare map doubts (bright on some night, not yet confirmed or cleared
+// on two), the low south where the winter nebulae cross (az 150-210, 32 deg) and a reference near the zenith. Each gets one 20 s frame (10 s if that saturates; never under
+// 8 s, which read low) and its sky rate goes to the daemon, which records the excess over the dark baseline in the glare map. If the reference itself reads bright the whole
+// sky is hazy or lit and nothing is recorded: a hazy night must not mark the south. Writes sky_survey_<night>.json ("kind": "dark_check").
+QJsonObject darkSkyCheck(const Astro::Site& site, const QString& horizonFile, double maxMinutes)
+{
+    struct Pt { double az, alt; QString why; };
+    QList<Pt> pts{{180, 78, "reference near the zenith"}};
+    QJsonObject bins; { QFile mf(originDataDir() + "/sky_map.json"); if (mf.open(QIODevice::ReadOnly)) bins = QJsonDocument::fromJson(mf.readAll()).object()["bins"].toObject(); }
+    const Glare::Map gm = Glare::map(bins);
+    QList<Glare::Bin> doubt; for (const Glare::Bin& g : gm.bins) if (g.alt < 60 && g.brightNights > 0 && (g.brightNights < 2 || g.normalNights < 2)) doubt.append(g);
+    std::sort(doubt.begin(), doubt.end(), [](const Glare::Bin& a, const Glare::Bin& b) { return a.mean > b.mean; });   // the ones blocking most first
+    for (const Glare::Bin& g : doubt.mid(0, 8)) pts.append({g.az + 5.0, g.alt + 2.5, QString("glare candidate %1 (bright %2 night(s), normal %3)").arg(g.key).arg(g.brightNights).arg(g.normalNights)});
+    for (double az : {150.0, 165.0, 180.0, 195.0, 210.0}) pts.append({az, 32.0, "low south (winter nebulae)"});
+    QList<Pt> use; QJsonArray skipped;
+    for (const Pt& q : pts) {
+        const double lim = horizonMinAlt(horizonFile, q.az, 20);
+        bool dup = false; for (const Pt& u : use) if (std::abs(std::remainder(u.az - q.az, 360.0)) < 6 && std::abs(u.alt - q.alt) < 4) dup = true;
+        if (q.alt < std::max(22.0, lim + 2)) skipped.append(QJsonObject{{"az", q.az}, {"alt", q.alt}, {"why", "below the horizon profile"}}); else if (!dup) use.append(q);
+    }
+    std::stable_sort(use.begin() + 1, use.end(), [](const Pt& a, const Pt& b) { return a.az < b.az; });   // the reference first, then a sweep in azimuth
+    if (!call("status", {}, 10000)["connected"].toBool()) return failure("the daemon is not connected to the telescope");
+    if (!initialised()) return failure("the telescope is not initialised");
+    const QDateTime t0 = QDateTime::currentDateTimeUtc(); const int iso = 800;
+    QJsonArray out; int recorded = 0; bool hazy = false; double refExcess = std::nan("");
+    call("manual", {}, 15000);
+    for (int k = 0; k < use.size(); ++k) {
+        const Pt& q = use[k];
+        if (t0.secsTo(QDateTime::currentDateTimeUtc()) > maxMinutes * 60) { note({{"dark_check", "out of time; stopping"}}); break; }
+        if (g_surveyAbort && g_surveyAbort()) { note({{"dark_check", "the run needs the telescope; stopping"}}); break; }
+        QJsonObject r{{"az", std::round(q.az)}, {"alt", std::round(q.alt)}, {"for", q.why}};
+        const QJsonObject g = gotoAltAz(q.alt, q.az, site, 240);
+        if (!g["ok"].toBool()) { r["error"] = "goto failed: " + g["error"].toString(); out.append(r); continue; }
+        double expo = 20; QJsonObject fs = call("frame_stats", {{"exposure", expo}, {"iso", iso}, {"binning", 1}}, 120000);
+        if (fs["verdict"].toString() == "too_bright") { expo = 10; fs = call("frame_stats", {{"exposure", expo}, {"iso", iso}, {"binning", 1}}, 120000); }
+        if (!fs["ok"].toBool()) { r["error"] = fs["error"]; out.append(r); continue; }
+        const double rate = fs["sky_rate_adu_per_s"].toDouble();
+        r["exposure_s"] = expo; r["sky_rate"] = rate; r["stars"] = fs["stars"]; r["verdict_frame"] = fs["verdict"]; r["utc"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+        if (k == 0) {
+            // the reference: a hazy or lit sky (or thin cloud) reads bright everywhere; then this is no night to judge the glare map on
+            QJsonObject sm; { QFile mf(originDataDir() + "/sky_map.json"); if (mf.open(QIODevice::ReadOnly)) sm = QJsonDocument::fromJson(mf.readAll()).object(); }
+            const double base = sm["dark_rate"].toObject()[QString("iso%1").arg(iso)].toDouble();
+            refExcess = base > 0 ? rate / base - 1 : std::nan(""); r["excess"] = refExcess;
+            if (std::isnan(refExcess) || refExcess > gm.median + 0.4 || int(fs["stars"].toDouble()) < 30) {
+                hazy = true; r["note"] = std::isnan(refExcess) ? "no dark baseline: nothing recorded" : "the zenith itself reads bright or starless: hazy or lit sky, nothing recorded";
+                out.append(r); break;
+            }
+            out.append(r); continue;
+        }
+        const QJsonObject sn = call("sky_note", {{"az", q.az}, {"alt", q.alt}, {"sky_rate", rate}, {"exposure", expo}, {"iso", iso}}, 15000);
+        r["recorded"] = sn["recorded"]; if (sn.contains("excess")) { r["excess"] = std::round(sn["excess"].toDouble() * 100) / 100; r["bright"] = sn["excess"].toDouble() >= gm.threshold; }
+        if (sn["recorded"].toBool()) ++recorded;
+        out.append(r); note({{"dark_check", "sampled"}, {"at", r}});
+    }
+    const QString night = Planner::currentNightDate("Europe/London").toString(Qt::ISODate);
+    QJsonObject res{{"ok", true}, {"kind", "dark_check"}, {"night", night}, {"iso", iso}, {"recorded", recorded}, {"hazy", hazy}, {"reference_excess", std::isnan(refExcess) ? QJsonValue() : QJsonValue(refExcess)},
+                    {"typical_excess", gm.median}, {"bright_threshold", gm.threshold}, {"samples", out}, {"skipped", skipped}};
     QFile f(originDataDir() + "/sky_survey_" + QString(night).remove('-') + ".json"); if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) f.write(QJsonDocument(res).toJson());
     return res;
 }

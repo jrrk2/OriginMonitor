@@ -28,6 +28,8 @@ public:
         double transparency = 0;      // rawTransparency relative to the best seen so far for this target (1 = as clear as it gets)
         double matchedFraction = 0;   // fraction of the reference's brightest stars found in this frame
         int frames = 0;               // frames in the stack after this one
+        int trails = 0;               // satellite/plane trails masked out of this frame
+        int trailPixels = 0;          // stack pixels they covered
         static constexpr int kTilesX = 4, kTilesY = 3;
         int tileExpected[kTilesX * kTilesY] = {};   // reference stars per tile (reference frame, row-major from the top-left)
         int tileFound[kTilesX * kTilesY] = {};      // of those, found in this frame

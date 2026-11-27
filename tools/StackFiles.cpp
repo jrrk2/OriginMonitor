@@ -1,9 +1,11 @@
 // Offline driver for the live pipeline: runs archive FITS frames through SkyMonitor::process (the same call the daemon makes for each snapshot), so the verdicts, the registration and the
 // stacking are exactly the live ones. Input: a TSV list, one frame per line: path, exposure_s, iso, utc (ISO), ra_deg, dec_deg. .fz files are unpacked with funpack.
-//   StackFiles list.tsv --target "Messier 101" --ra-hours 14.0536 --dec-deg 54.349 [--lat 52.1489 --lon 0.1018] [--out records.jsonl] [--resume]
+//   StackFiles list.tsv --target "Messier 101" --ra-hours 14.0536 --dec-deg 54.349 [--lat 52.1489 --lon 0.1018] [--out records.jsonl] [--resume] [--black ADU]
 // --resume continues the stack already in $ORIGIN_DATA_DIR/stacks/<target> instead of starting a new one. --keep-reference never replaces the stack reference
 // (frames that will not register are skipped): for restacking several nights, where a night framed differently must not discard the stack.
 // A 7th column (target name, with columns 8 and 9 = its RA in hours and Dec in degrees) switches target like a supervisor block change: setTarget() with the stack of that target kept on disk.
+// --black sets the black level (default 4985, the Origin's ISO 800 raw): 0 for frames saved with it already taken off (CCDciel/INDI captures). A frame's
+// own BLACKLVL header card overrides it for that frame (tools/import_ccdciel.py: archives that mix INDI frames, black off, with the Origin app's, black in).
 // $ORIGIN_DATA_DIR decides where the stack (stacks/<target>), previews and sky map go: point it at a scratch directory.
 #include "SkyMonitor.hpp"
 #include <QCoreApplication>
@@ -23,15 +25,16 @@ static QByteArray readFrame(const QString& path)
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
-    QString list, target = "target", out = "records.jsonl"; double raH = -1, decD = 0, lat = 52.1489, lon = 0.1018; bool resume = false, keepRef = false;
+    QString list, target = "target", out = "records.jsonl"; double raH = -1, decD = 0, lat = 52.1489, lon = 0.1018; bool resume = false, keepRef = false; double black = -1;
     for (int i = 1; i < argc; ++i) {
         const QString a = argv[i]; auto nx = [&] { return i + 1 < argc ? QString(argv[++i]) : QString(); };
         if (a == "--target") target = nx(); else if (a == "--ra-hours") raH = nx().toDouble(); else if (a == "--dec-deg") decD = nx().toDouble();
-        else if (a == "--lat") lat = nx().toDouble(); else if (a == "--lon") lon = nx().toDouble(); else if (a == "--out") out = nx(); else if (a == "--resume") resume = true; else if (a == "--keep-reference") keepRef = true; else list = a;
+        else if (a == "--lat") lat = nx().toDouble(); else if (a == "--lon") lon = nx().toDouble(); else if (a == "--out") out = nx(); else if (a == "--resume") resume = true; else if (a == "--keep-reference") keepRef = true; else if (a == "--black") black = nx().toDouble(); else list = a;
     }
     QFile lf(list), of(out);
     if (!lf.open(QIODevice::ReadOnly) || !of.open(QIODevice::WriteOnly | QIODevice::Truncate)) { fprintf(stderr, "cannot open the list or the output\n"); return 1; }
     SkyMonitor mon; Astro::Site site; site.latDeg = lat; site.lonDeg = lon; mon.setSite(site); mon.setAutoStack(true); mon.setKeepReference(keepRef);
+    if (black >= 0) mon.setBlackLevel(black);
     mon.setTarget(target, raH, decD, !resume);
     int n = 0, stacked = 0;
     while (!lf.atEnd()) {
@@ -40,7 +43,13 @@ int main(int argc, char** argv)
         const QByteArray fits = readFrame(c[0]); ++n;
         QJsonObject r;
         if (fits.isEmpty()) r = QJsonObject{{"verdict", "unreadable"}};
-        else r = mon.process(fits, c[1].toDouble(), c[2].toInt(), c[4].toDouble() * M_PI / 180.0, c[5].toDouble() * M_PI / 180.0, QDateTime::fromString(c[3], Qt::ISODate));
+        else {
+            // the frame's own black level, if its header says (BLACKLVL), else --black / the default
+            const int at = fits.indexOf("BLACKLVL= "); double frameBlack = black;
+            if (at >= 0 && at < 28800 && at % 80 == 0) { bool ok = false; const double v = fits.mid(at + 10, 20).trimmed().toDouble(&ok); if (ok) frameBlack = v; }
+            if (frameBlack >= 0) mon.setBlackLevel(frameBlack); else mon.setBlackLevel(4985.0);
+            r = mon.process(fits, c[1].toDouble(), c[2].toInt(), c[4].toDouble() * M_PI / 180.0, c[5].toDouble() * M_PI / 180.0, QDateTime::fromString(c[3], Qt::ISODate));
+        }
         r["file"] = c[0];
         if (r["registration"].toObject()["stacked"].toBool()) ++stacked;
         of.write(QJsonDocument(r).toJson(QJsonDocument::Compact) + "\n");

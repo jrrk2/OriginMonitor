@@ -33,7 +33,7 @@ const QHash<QString, int>& priorities()
     return p;
 }
 
-struct Target { QString name, key, type, seen; double ra = 0, dec = 0, size = 0; int prio = 3; double faint = 0.5; bool boosted = false, narrowband = false, cluster = false; };   // faint: 0 = bright (high surface brightness: clusters, compact nebulae), 1 = faint (extended nebulae)
+struct Target { QString name, key, type, seen; double ra = 0, dec = 0, size = 0; int prio = 3, colour = 0; double faint = 0.5; bool boosted = false, narrowband = false, cluster = false; };   // faint: 0 = bright (high surface brightness: clusters, compact nebulae), 1 = faint (extended nebulae)
 
 QMap<QString, int> g_boost;   // catalogue id -> priority added (the user's wish list, e.g. M1 +5)
 QString g_stacksDir;          // where the live stacks of earlier nights are kept; empty = no novelty preference
@@ -116,6 +116,38 @@ void applyFilter(QList<Target>& targets)
     }
 }
 
+// Colour: the user prefers colourful targets. A score per object, from what it shows in our Clear and tri-band frames:
+//   3 vivid: emission (H-alpha red), reflection (blue), planetaries (OIII teal), supernova remnants, and the mixed regions (Orion, Trifid, Horsehead/Flame)
+//   2 colourful galaxies: spirals with pink H II regions, blue arms and brown dust lanes, and the starburst M82
+//   1 coloured star fields: open clusters with red or orange giants among the blue (Double Cluster, Owl Cluster)
+//   0 the rest: globulars, ellipticals, most open clusters (white or grey)
+// The priority gains the score times the weight in ~/.config/origin/colour_preference (default 1; 0 turns it off, 2 doubles it). Boosted targets are left alone.
+// A pair ("M81 + M82") takes its most colourful part.
+int colourScore(const QString& id)
+{
+    static const QHash<QString, int> s = {
+        {"M1", 3}, {"M8", 3}, {"M16", 3}, {"M17", 3}, {"M20", 3}, {"M27", 3}, {"M42", 3}, {"M43", 3}, {"M45", 3}, {"M57", 3}, {"M76", 3}, {"M78", 3}, {"M97", 3},
+        {"NGC7000", 3}, {"IC5070", 3}, {"VEIL", 3}, {"IC1805", 3}, {"IC1848", 3}, {"NGC281", 3}, {"IC1396", 3}, {"NGC7380", 3}, {"NGC7293", 3}, {"NGC1499", 3},
+        {"NGC2244", 3}, {"NGC7662", 3}, {"NGC7822", 3}, {"NGC6888", 3}, {"NGC2264", 3}, {"IC434", 3}, {"NGC1333", 3},
+        {"M31", 2}, {"M33", 2}, {"M51", 2}, {"M81", 2}, {"M82", 2}, {"M83", 2}, {"M101", 2}, {"M106", 2}, {"NGC6946", 2}, {"NGC253", 2}, {"M74", 2}, {"M63", 2},
+        {"NGC869", 1}, {"NGC457", 1}};
+    return s.value(id, 0);
+}
+double colourWeight()
+{
+    QFile f(QDir::homePath() + "/.config/origin/colour_preference"); bool ok = false;
+    const double w = f.open(QIODevice::ReadOnly) ? f.readAll().trimmed().toDouble(&ok) : 1.0;
+    return ok ? std::clamp(w, 0.0, 5.0) : 1.0;
+}
+void applyColour(QList<Target>& targets)
+{
+    const double w = colourWeight();
+    for (Target& t : targets) {
+        for (const QString& part : (t.key.isEmpty() ? t.name : t.key).split(" + ")) t.colour = std::max(t.colour, colourScore(catalogId(part)));
+        if (!t.boosted && w > 0) t.prio += int(std::lround(w * t.colour));
+    }
+}
+
 // Size: prefer targets that fill a good part of the field (75' x 50' at 1.48"/px, 3056 x 2048 px). Priority change by the major axis in arcmin, linear in log size
 // between these points: 1' (40 px) -3, 3' (120 px) -2, 6' (240 px) 0, 12' to 60' (500-2400 px) +2, 100' (larger than the field) +1, 200' 0. Unknown size: 0.
 double sizeAdjust(double arcmin)
@@ -180,6 +212,7 @@ QList<Target> loadTargets()
     applyNovelty(out);
     applyFilter(out);
     applySize(out);
+    applyColour(out);
     return out;
 }
 
@@ -199,14 +232,8 @@ public:
         QFile m(skyMap);
         if (!skyMap.isEmpty() && m.open(QIODevice::ReadOnly)) {
             const QJsonObject bins = QJsonDocument::fromJson(m.readAll()).object()["bins"].toObject();
-            {   // glare from neighbours' lights: bins whose clear-sky background is far above the typical bin (see SkyMonitor::obstructionMap) are avoided like obstructions
-                QList<double> means; QList<QPair<QString, double>> all;
-                for (auto it = bins.begin(); it != bins.end(); ++it) { const QJsonObject b = it.value().toObject(); const int n = b["ex_n"].toInt(); if (n >= 5) { const double mm = b["ex_sum"].toDouble() / n; means << mm; all.append({it.key(), mm}); } }
-                if (means.size() >= 4) {
-                    std::sort(means.begin(), means.end()); const double med = means[means.size() / 2];
-                    for (const auto& e : all) if (e.second >= std::max(1.6 * med, med + 0.4)) { const QStringList p = e.first.split('_'); if (p.size() == 2 && p[1].toInt() < 60) m_glare.append({p[0].toInt(), p[1].toInt()}); }
-                }
-            }
+            // glare from neighbours' lights, confirmed on two nights (Planner::glareMap), is avoided like an obstruction
+            for (const Glare::Bin& g : Glare::map(bins).bins) if (g.glare && g.alt < 60) m_glare.append({g.az, g.alt});
             for (auto it = bins.begin(); it != bins.end(); ++it) {
                 const QJsonObject b = it.value().toObject();
                 if (b["good"].toInt() == 0 && b["bad"].toInt() >= 3 && b["bad_dates"].toArray().size() >= 2) {
@@ -375,7 +402,7 @@ QJsonObject schedule(const Options& o)
     }
 
     auto info = [&](const Row& r) {
-        return QJsonObject{{"name", r.t.name}, {"key", r.t.key}, {"ra_hours", r.t.ra}, {"dec_deg", r.t.dec}, {"priority", r.t.prio}, {"novelty", r.t.seen}, {"size_arcmin", r.t.size}, {"faintness", std::round(r.t.faint * 100) / 100}, {"moon_fit", std::round(moonFit(r.t.faint, r.glow, r.i0, r.i1 - r.i0 + 1) * 100) / 100},
+        return QJsonObject{{"name", r.t.name}, {"key", r.t.key}, {"ra_hours", r.t.ra}, {"dec_deg", r.t.dec}, {"priority", r.t.prio}, {"novelty", r.t.seen}, {"size_arcmin", r.t.size}, {"faintness", std::round(r.t.faint * 100) / 100}, {"colour", r.t.colour}, {"moon_fit", std::round(moonFit(r.t.faint, r.glow, r.i0, r.i1 - r.i0 + 1) * 100) / 100},
                            {"window_start", iso(times[r.i0])}, {"window_end", iso(times[r.i1])}, {"peak", iso(times[r.peak])}, {"peak_alt", std::round(r.alt[r.peak] * 10) / 10},
                            {"peak_az", std::round(r.az[r.peak])}, {"minutes", r.mins}};
     };
